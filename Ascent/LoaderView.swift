@@ -41,16 +41,16 @@ struct LoaderView: View {
     private var background: some View {
         GeometryReader { geo in
             ZStack {
-                Image("OctoberBG")
+                Image("Backdrop")
                     .resizable()
                     .scaledToFill()
                     .frame(width: geo.size.width * 1.15, height: geo.size.height * 1.15)
-                    .blur(radius: 8)
+                    .blur(radius: 4)
 
-                Color.black.opacity(0.16)
+                Color.black.opacity(0.14)
 
                 LinearGradient(
-                    colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.40)],
+                    colors: [Color.black.opacity(0.20), Color.clear, Color.black.opacity(0.38)],
                     startPoint: .top,
                     endPoint: .bottom
                 )

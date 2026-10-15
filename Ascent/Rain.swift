@@ -1,51 +1,64 @@
 import SwiftUI
 
-/// Дождь. Капли падают строго вертикально (без наклона и без сноса в сторону).
-/// Отрисовка — одной фигурой на слой, поэтому даже на старых устройствах плавно.
+/// Дождь. Капли падают строго вертикально.
+///
+/// Анимация сделана НЕ таймером (тот давал 20 кадров в секунду), а через
+/// `repeatForever`: SwiftUI сам интерполирует значение каждый кадр экрана —
+/// 60 Гц, а на ProMotion-экранах 120 Гц. Плюс всё рисуется одной фигурой,
+/// поэтому накладных расходов почти нет.
 struct RainView: View {
-    @State private var time: Double = 0
-    @State private var timer: Timer?
+    @State private var phase: Double = 0
+
+    /// Длительность полного цикла. Каждая капля за цикл пролетает экран
+    /// целое число раз (cycles), поэтому стык цикла не виден.
+    private let cycle: Double = 6.0
 
     var body: some View {
         ZStack {
-            // дальний план: мелкая и тусклая морось
-            RainShape(time: time, count: 120, seed: 1, speedBase: 0.40,
-                      lengthMin: 7, lengthMax: 20, widthMin: 0.6, widthMax: 1.1)
+            // дальний план: мелкая тусклая морось
+            RainShape(phase: phase, count: 130, seed: 1,
+                      cyclesMin: 5, cyclesMax: 9,
+                      lengthMin: 7, lengthMax: 20,
+                      widthMin: 0.6, widthMax: 1.1)
                 .fill(Color(red: 0.80, green: 0.86, blue: 0.97))
-                .opacity(0.15)
+                .opacity(0.16)
 
-            // ближний план: длинные и заметные струи
-            RainShape(time: time, count: 55, seed: 2, speedBase: 0.72,
-                      lengthMin: 14, lengthMax: 36, widthMin: 1.0, widthMax: 1.8)
+            // ближний план: длинные заметные струи
+            RainShape(phase: phase, count: 62, seed: 2,
+                      cyclesMin: 6, cyclesMax: 11,
+                      lengthMin: 14, lengthMax: 36,
+                      widthMin: 1.0, widthMax: 1.8)
                 .fill(Color(red: 0.88, green: 0.93, blue: 1.0))
                 .opacity(0.30)
         }
         .allowsHitTesting(false)
         .onAppear {
-            guard timer == nil else { return }
-            let t = Timer(timeInterval: 0.05, repeats: true) { _ in
-                time += 0.05
+            phase = 0
+            withAnimation(.linear(duration: cycle).repeatForever(autoreverses: false)) {
+                phase = 1
             }
-            RunLoop.main.add(t, forMode: .common)
-            timer = t
-        }
-        .onDisappear {
-            timer?.invalidate()
-            timer = nil
         }
     }
 }
 
-/// Все капли одним путём: X у каждой капли постоянный, поэтому дождь идёт ровно вниз.
+/// Все капли одним путём: X у каждой капли постоянный, поэтому дождь идёт
+/// ровно вниз, без наклона и сноса в сторону.
 struct RainShape: Shape {
-    var time: Double
+    var phase: Double
     var count: Int
     var seed: Int
-    var speedBase: Double
+    var cyclesMin: Double
+    var cyclesMax: Double
     var lengthMin: Double
     var lengthMax: Double
     var widthMin: Double
     var widthMax: Double
+
+    /// Именно это значение SwiftUI плавно меняет от 0 до 1 каждый кадр.
+    var animatableData: Double {
+        get { phase }
+        set { phase = newValue }
+    }
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
@@ -60,12 +73,13 @@ struct RainShape: Shape {
             let d = rnd(i, 4)
             let e = rnd(i, 5)
 
-            let x  = (a * 1.06 - 0.03) * w
+            let x   = (a * 1.06 - 0.03) * w
             let len = lengthMin + (lengthMax - lengthMin) * b
-            let speed = speedBase * (0.80 + 0.50 * c)
-            let lw = widthMin + (widthMax - widthMin) * e
+            let lw  = widthMin + (widthMax - widthMin) * e
 
-            let raw = time * speed + d
+            // целое число пролётов за цикл — иначе на стыке будет рывок
+            let cycles = (cyclesMin + (cyclesMax - cyclesMin) * c).rounded()
+            let raw = phase * cycles + d
             let progress = raw - raw.rounded(.down)
             let y = progress * (h + len) - len
 
