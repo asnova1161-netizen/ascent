@@ -9,7 +9,7 @@ struct LoaderView: View {
         ZStack {
             background.ignoresSafeArea()
 
-            FallingLeaves()
+            RainView()
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -41,16 +41,16 @@ struct LoaderView: View {
     private var background: some View {
         GeometryReader { geo in
             ZStack {
-                Image("AutumnBG")
+                Image("OctoberBG")
                     .resizable()
                     .scaledToFill()
-                    .frame(width: geo.size.width * 1.25, height: geo.size.height * 1.25)
-                    .blur(radius: 16)
+                    .frame(width: geo.size.width * 1.15, height: geo.size.height * 1.15)
+                    .blur(radius: 8)
 
-                Theme.bg.opacity(0.34)
+                Color.black.opacity(0.16)
 
                 LinearGradient(
-                    colors: [Color.black.opacity(0.30), Color.clear, Color.black.opacity(0.38)],
+                    colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.40)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
