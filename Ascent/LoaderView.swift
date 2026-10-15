@@ -41,24 +41,16 @@ struct LoaderView: View {
     private var background: some View {
         GeometryReader { geo in
             ZStack {
-                // Поля сверху и снизу закрывает та же картинка, сильно размытая.
+                // Фотка целиком и на весь экран: пропорции не сохраняем —
+                // иначе либо обрезка, ни обрезки ни полей не выйдет.
                 Image("Backdrop")
                     .resizable()
-                    .scaledToFill()
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .blur(radius: 34)
-                    .opacity(0.92)
-
-                // Сама картинка — целиком, без обрезки, во всю ширину экрана.
-                Image("Backdrop")
-                    .resizable()
-                    .scaledToFit()
                     .frame(width: geo.size.width, height: geo.size.height)
 
-                Color.black.opacity(0.12)
+                Color.black.opacity(0.10)
 
                 LinearGradient(
-                    colors: [Color.black.opacity(0.26), Color.clear, Color.black.opacity(0.44)],
+                    colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.38)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
