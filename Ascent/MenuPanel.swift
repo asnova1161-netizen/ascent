@@ -62,7 +62,13 @@ struct MenuPanel: View {
         }
         .frame(width: width, height: height)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous).fill(fill)
+            // Драг живёт на ФОНЕ панели (под содержимым): кнопки, вкладки и
+            // ссылки остаются поверх и нажимаются как обычно, а пустые места
+            // (шапка, отступы, промежутки) — таскают меню.
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(fill)
+                .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .gesture(dragGesture)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(line, lineWidth: 1)
@@ -74,8 +80,6 @@ struct MenuPanel: View {
                 .offset(y: 7)
         )
         .offset(x: position.width, y: position.height)
-        .contentShape(Rectangle())
-        .gesture(dragGesture)          // тащим за ВСЮ панель, а не только за шапку
     }
 
     // MARK: - Перетаскивание
@@ -124,6 +128,8 @@ struct MenuPanel: View {
         }
         .padding(.horizontal, 14)
         .frame(height: headerHeight)
+        .contentShape(Rectangle())
+        .gesture(dragGesture)          // шапка — тоже ручка перетаскивания
         .overlay(Rectangle().fill(line).frame(height: 1), alignment: .bottom)
     }
 
