@@ -11,23 +11,28 @@ final class LoaderState: ObservableObject {
     @Published var tab = 0
 
     /// Выключатель мод-меню: до первого Start ни кнопки, ни меню нет.
-    /// Нажал Start — и дальше они остаются на экране, даже если лоадер
-    /// закрыли через Exit или unload.
+    /// Нажал Start — квадратик появился и дальше остаётся на экране.
     @Published var armed = false
 
-    /// Кнопка Start/Exit. Exit закрывает только лоадер — меню остаётся.
+    /// Кнопка Start/Exit.
+    ///
+    /// Start: лоадер пошёл, вылез квадратик и открылось меню.
+    /// Exit или unload: лоадер встал и меню закрылось вместе с ним.
     func tapStart() {
-        if running {
-            stopLoader()
-        } else {
-            armed = true
-            withAnimation(.easeInOut(duration: 0.18)) { running = true }
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { menuOpen = true }
-        }
+        if running { stopLoader() } else { startLoader() }
+    }
+
+    private func startLoader() {
+        armed = true
+        withAnimation(.easeInOut(duration: 0.18)) { running = true }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { menuOpen = true }
     }
 
     func stopLoader() {
-        withAnimation(.easeInOut(duration: 0.18)) { running = false }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            running = false
+            menuOpen = false
+        }
     }
 
     func toggleMenu() {
