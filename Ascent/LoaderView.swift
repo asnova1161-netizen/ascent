@@ -5,6 +5,7 @@ struct LoaderView: View {
     @State private var menuOpen = false
     @State private var menuTab = 0
     @State private var panelOffset: CGSize = .zero
+    @State private var triggerOffset: CGSize = .zero
 
     private let telegramURL = URL(string: "https://t.me/ascentios")!
     private let panelHeight: CGFloat = 216
@@ -33,10 +34,15 @@ struct LoaderView: View {
 
                 Spacer(minLength: 0)
 
-                menuTrigger
+                telegramLink
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 24)
+
+            if running {
+                triggerLayer
+                    .zIndex(3)
+            }
 
             if menuOpen {
                 menuLayer
@@ -70,6 +76,39 @@ struct LoaderView: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
         }
+    }
+
+    // MARK: - Меню и кнопка мод-меню
+
+    /// Серая кнопка мод-меню: появляется по Start, таскается по экрану,
+    /// тап открывает и закрывает меню.
+    private var triggerLayer: some View {
+        GeometryReader { geo in
+            trigger(in: geo)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func trigger(in geo: GeometryProxy) -> some View {
+        let ins = geo.safeAreaInsets
+        let half = MenuTrigger.side / 2
+        let area = CGRect(x: ins.leading + 8,
+                          y: ins.top + 8,
+                          width: max(geo.size.width - ins.leading - ins.trailing - 16, 0),
+                          height: max(geo.size.height - ins.top - ins.bottom - 16, 0))
+        // по умолчанию — справа сверху, дальше её можно таскать
+        let base = CGPoint(x: geo.size.width - ins.trailing - half - 14,
+                           y: ins.top + half + 14)
+
+        return MenuTrigger(offset: $triggerOffset,
+                           minX: area.minX + half - base.x,
+                           maxX: max(area.maxX - half - base.x, area.minX + half - base.x),
+                           minY: area.minY + half - base.y,
+                           maxY: max(area.maxY - half - base.y, area.minY + half - base.y),
+                           isOpen: menuOpen,
+                           action: toggleMenu)
+            .position(x: base.x, y: base.y)
+            .transition(.scale.combined(with: .opacity))
     }
 
     // MARK: - Меню
@@ -152,23 +191,14 @@ struct LoaderView: View {
         .shadow(color: Theme.amber.opacity(0.45), radius: 18, x: 0, y: 10)
     }
 
-    /// Плашка снизу. Открывает и закрывает меню,
-    /// ссылка на телегу лежит внутри меню (вкладка main).
-    private var menuTrigger: some View {
-        Button(action: {
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                menuOpen.toggle()
-            }
-        }) {
+    private var telegramLink: some View {
+        Link(destination: telegramURL) {
             HStack(spacing: 9) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 13, weight: .semibold))
                 Text("t.me/ascentios")
                     .font(.system(size: 13, weight: .medium))
                     .kerning(0.4)
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Theme.gold.opacity(0.8))
             }
             .foregroundColor(Theme.muted)
             .padding(.vertical, 11)
@@ -197,6 +227,13 @@ struct LoaderView: View {
         }
         menuTab = 0
         panelOffset = .zero
+        triggerOffset = .zero
+    }
+
+    private func toggleMenu() {
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            menuOpen.toggle()
+        }
     }
 }
 

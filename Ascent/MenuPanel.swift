@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// Плавающее меню поверх лоадера.
+/// Плавающее меню мод-меню.
 ///
-/// Панель непрозрачная и её можно таскать за шапку, но она не уходит
-/// за края экрана: границы (minX…maxX, minY…maxY) считает родитель
-/// и передаёт сюда, тут они применяются к смещению.
+/// Панель непрозрачная (серый), текст белый. Её можно таскать за шапку,
+/// но за края экрана она не уходит: границы (minX…maxX, minY…maxY)
+/// считает родитель и передаёт сюда.
 struct MenuPanel: View {
     @Binding var tab: Int
     @Binding var offset: CGSize
@@ -25,6 +25,12 @@ struct MenuPanel: View {
     private let headerHeight: CGFloat = 44
     private let tabBarHeight: CGFloat = 40
 
+    // серый фон непрозрачный + белый текст
+    private let fill  = Color(red: 0.145, green: 0.145, blue: 0.160)
+    private let line  = Color.white.opacity(0.12)
+    private let dim   = Color.white.opacity(0.55)
+    private let gray  = Color(red: 0.36, green: 0.36, blue: 0.40)
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -33,12 +39,10 @@ struct MenuPanel: View {
         }
         .frame(width: width, height: height)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Theme.bg)                       // фон непрозрачный
+            RoundedRectangle(cornerRadius: 20, style: .continuous).fill(fill)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Theme.line, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(line, lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.55), radius: 26, x: 0, y: 16)
         .offset(x: offset.width, y: offset.height)
@@ -52,7 +56,7 @@ struct MenuPanel: View {
             Text("ascent")
                 .font(.system(size: 15, weight: .heavy, design: .rounded))
                 .kerning(1.6)
-                .foregroundColor(Theme.gold)
+                .foregroundColor(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .gesture(drag)
@@ -62,13 +66,13 @@ struct MenuPanel: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(Color.white.opacity(0.85))
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
+                    .background(Circle().fill(Color.white.opacity(0.10)))
                     .contentShape(Circle())
             }
         }
         .padding(.horizontal, 14)
         .frame(height: headerHeight)
-        .overlay(Rectangle().fill(Theme.line).frame(height: 1), alignment: .bottom)
+        .overlay(Rectangle().fill(line).frame(height: 1), alignment: .bottom)
     }
 
     // MARK: - Вкладки
@@ -79,21 +83,19 @@ struct MenuPanel: View {
             tabButton("misc", 1)
         }
         .frame(height: tabBarHeight)
-        .overlay(Rectangle().fill(Theme.line).frame(height: 1), alignment: .bottom)
+        .overlay(Rectangle().fill(line).frame(height: 1), alignment: .bottom)
     }
 
     private func tabButton(_ title: String, _ index: Int) -> some View {
-        Button(action: {
-            withAnimation(.easeInOut(duration: 0.15)) { tab = index }
-        }) {
+        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { tab = index } }) {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
                     .kerning(0.6)
-                    .foregroundColor(tab == index ? Theme.gold : Color.white.opacity(0.55))
+                    .foregroundColor(tab == index ? .white : dim)
                 Rectangle()
-                    .fill(tab == index ? Theme.gold : Color.clear)
+                    .fill(tab == index ? Color.white : Color.clear)
                     .frame(height: 2)
                     .padding(.top, 7)
             }
@@ -117,11 +119,11 @@ struct MenuPanel: View {
             HStack(spacing: 8) {
                 Text("статус")
                     .font(.system(size: 13))
-                    .foregroundColor(Color.white.opacity(0.55))
+                    .foregroundColor(dim)
                 Spacer(minLength: 0)
                 Text("загрузчик активен")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.goldSoft)
+                    .foregroundColor(.white)
             }
 
             Link(destination: telegramURL) {
@@ -142,11 +144,11 @@ struct MenuPanel: View {
                 .frame(height: 46)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.06))
+                        .fill(Color.white.opacity(0.07))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Theme.line, lineWidth: 1)
+                        .stroke(line, lineWidth: 1)
                 )
             }
         }
@@ -162,8 +164,7 @@ struct MenuPanel: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: 46)
                     .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color(red: 0.30, green: 0.30, blue: 0.32))
+                        RoundedRectangle(cornerRadius: 12, style: .continuous).fill(gray)
                     )
             }
             .buttonStyle(StartButtonStyle())
