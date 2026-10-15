@@ -74,6 +74,8 @@ struct MenuPanel: View {
                 .offset(y: 7)
         )
         .offset(x: position.width, y: position.height)
+        .contentShape(Rectangle())
+        .gesture(dragGesture)          // тащим за ВСЮ панель, а не только за шапку
     }
 
     // MARK: - Перетаскивание
@@ -110,8 +112,6 @@ struct MenuPanel: View {
                 .kerning(1.6)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .gesture(dragGesture)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")

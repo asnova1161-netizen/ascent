@@ -126,8 +126,12 @@ final class RainUIView: UIView {
 
     private func scrollAnimation(duration: Double) -> CABasicAnimation {
         let anim = CABasicAnimation(keyPath: "transform.translation.y")
-        anim.fromValue = 0
-        anim.toValue = -tileHeight
+        // В UIKit минус по Y — это ВВЕРХ. Чтобы дождь падал ВНИЗ, прокручиваем
+        // плитку сверху вниз: старт со сдвигом -tileHeight (в кадре плитка №1),
+        // конец 0 (в кадре плитка №0). Плитки одинаковые, поэтому переход и
+        // повтор бесшовные.
+        anim.fromValue = -tileHeight
+        anim.toValue = 0
         anim.duration = duration
         anim.repeatCount = .infinity
         anim.timingFunction = CAMediaTimingFunction(name: .linear)
