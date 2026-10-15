@@ -1,29 +1,9 @@
-import Foundation
 import SwiftUI
 
 struct LoaderView: View {
-    @State private var progress: Double = 0
     @State private var started = false
-    @State private var timer: Timer?
 
     private let telegramURL = URL(string: "https://t.me/ascentios")!
-
-    private let stages: [(limit: Double, label: String)] = [
-        (30,  "initializing"),
-        (65,  "connecting"),
-        (90,  "checking files"),
-        (100, "ready")
-    ]
-
-    private var statusLabel: String {
-        if started { return "launching" }
-        for stage in stages where progress <= stage.limit {
-            return stage.label
-        }
-        return "ready"
-    }
-
-    private var isReady: Bool { progress >= 100 }
 
     var body: some View {
         ZStack {
@@ -39,17 +19,8 @@ struct LoaderView: View {
                     .foregroundColor(Theme.text)
                     .padding(.top, 26)
 
-                Text("LOADER")
-                    .font(.system(size: 10, weight: .semibold))
-                    .kerning(4)
-                    .foregroundColor(Theme.muted)
-                    .padding(.top, 10)
-
-                progressCard
-                    .padding(.top, 44)
-
                 startButton
-                    .padding(.top, 22)
+                    .padding(.top, 40)
 
                 Spacer(minLength: 0)
 
@@ -57,11 +28,6 @@ struct LoaderView: View {
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 24)
-        }
-        .onAppear(perform: beginLoading)
-        .onDisappear {
-            timer?.invalidate()
-            timer = nil
         }
     }
 
@@ -98,49 +64,9 @@ struct LoaderView: View {
         }
     }
 
-    private var progressCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text(statusLabel.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .kerning(2)
-                    .foregroundColor(Theme.muted)
-                Spacer()
-                Text("\(Int(progress))%")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Theme.green)
-            }
-            progressBar
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color.white.opacity(0.035))
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Theme.line, lineWidth: 1)
-            }
-        )
-    }
-
-    private var progressBar: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.07))
-                Capsule()
-                    .fill(LinearGradient(colors: [Theme.green2, Theme.green],
-                                         startPoint: .leading, endPoint: .trailing))
-                    .frame(width: max(0, geo.size.width * CGFloat(progress / 100)))
-                    .shadow(color: Theme.green.opacity(0.5), radius: 8)
-            }
-        }
-        .frame(height: 6)
-    }
-
     private var startButton: some View {
         Button(action: {
-            guard isReady, !started else { return }
+            guard !started else { return }
             withAnimation(.easeInOut(duration: 0.2)) { started = true }
         }) {
             Text(started ? "Started" : "Start")
@@ -156,10 +82,8 @@ struct LoaderView: View {
                 )
         }
         .buttonStyle(StartButtonStyle())
-        .disabled(!isReady || started)
-        .opacity(isReady ? 1 : 0.35)
-        .shadow(color: isReady ? Theme.green.opacity(0.35) : Color.clear,
-                radius: 18, x: 0, y: 10)
+        .disabled(started)
+        .shadow(color: Theme.green.opacity(0.35), radius: 18, x: 0, y: 10)
     }
 
     private var telegramLink: some View {
@@ -180,20 +104,6 @@ struct LoaderView: View {
                     Capsule().stroke(Theme.line, lineWidth: 1)
                 }
             )
-        }
-    }
-
-    // MARK: - Загрузка
-
-    private func beginLoading() {
-        guard timer == nil, !isReady else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.06, repeats: true) { t in
-            progress = min(100, progress + Double.random(in: 0.8...3.5))
-            if progress >= 100 {
-                progress = 100
-                t.invalidate()
-                timer = nil
-            }
         }
     }
 }
