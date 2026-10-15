@@ -6,106 +6,95 @@ struct LoaderView: View {
     private let panelHeight: CGFloat = 216
 
     var body: some View {
-        ZStack {
-            // фон и дождь — отдельные типы без изменяемых свойств, поэтому
-            // при таскании меню SwiftUI их не перерисовывает
-            BackdropView().ignoresSafeArea()
-
-            RainView()
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-
-            LoaderContent(state: state)
-
-            // серая кнопка мод-меню: появляется после Start и дальше остаётся
-            // на экране даже когда лоадер закрыт
-            if state.armed {
-                triggerLayer
-                    .zIndex(3)
-                    .transition(.opacity)
-            }
-
-            if state.armed && state.menuOpen {
-                menuLayer
-                    .zIndex(2)
-                    .transition(.opacity)
-            }
-        }
-    }
-
-    // MARK: - Кнопка мод-меню
-
-    private var triggerLayer: some View {
+        // Один-единственный GeometryReader на весь экран. Всё остальное
+        // расставляется СТАТИЧНЫМИ offset'ами: когда таскаешь меню или
+        // квадратик, ничего в раскладке не меняется — перерисовывается
+        // только то, что тащишь. Раньше тут были GeometryReader + .position,
+        // и каждый кадр пересчитывался весь экран, от этого всё и залипало.
         GeometryReader { geo in
-            trigger(in: geo)
+            let size = geo.size
+            let top = max(geo.safeAreaInsets.top, 44)
+            let bottom = max(geo.safeAreaInsets.bottom, 16)
+            let panelWidth = min(size.width - 44, 300)
+
+            ZStack(alignment: .topLeading) {
+                // фон и дождь — статичные типы, их SwiftUI не перерисовывает
+                BackdropView()
+
+                RainView()
+                    .allowsHitTesting(false)
+
+                LoaderContent(state: state, topInset: top, bottomInset: bottom)
+
+                // квадратик и меню живут, только пока идёт лоадер:
+                // Exit / unload — и они пропадают, вернуть можно по Start
+                if state.running {
+                    trigger(size: size, top: top, bottom: bottom)
+                        .zIndex(3)
+
+                    if state.menuOpen {
+                        panel(size: size, top: top, bottom: bottom, width: panelWidth)
+                            .zIndex(2)
+                    }
+                }
+            }
+            .frame(width: size.width, height: size.height)
         }
         .ignoresSafeArea()
     }
 
-    private func trigger(in geo: GeometryProxy) -> some View {
-        let ins = geo.safeAreaInsets
-        let half = MenuTrigger.side / 2
-        let area = CGRect(x: ins.leading + 8,
-                          y: ins.top + 8,
-                          width: max(geo.size.width - ins.leading - ins.trailing - 16, 0),
-                          height: max(geo.size.height - ins.top - ins.bottom - 16, 0))
-        // по умолчанию — справа сверху, дальше её можно таскать
-        let base = CGPoint(x: geo.size.width - ins.trailing - half - 14,
-                           y: ins.top + half + 14)
+    // MARK: - Квадратик мод-меню
 
-        return MenuTrigger(minX: area.minX + half - base.x,
-                           maxX: max(area.maxX - half - base.x, area.minX + half - base.x),
-                           minY: area.minY + half - base.y,
-                           maxY: max(area.maxY - half - base.y, area.minY + half - base.y),
+    private func trigger(size: CGSize, top: CGFloat, bottom: CGFloat) -> some View {
+        let side = MenuTrigger.side
+        let baseX = size.width - side - 14
+        let baseY = top + 14
+        let area = CGRect(x: 10,
+                          y: top + 10,
+                          width: max(size.width - 20, 0),
+                          height: max(size.height - top - bottom - 20, 0))
+
+        return MenuTrigger(minX: area.minX - baseX,
+                           maxX: max(area.maxX - side - baseX, area.minX - baseX),
+                           minY: area.minY - baseY,
+                           maxY: max(area.maxY - side - baseY, area.minY - baseY),
                            isOpen: state.menuOpen,
                            action: state.toggleMenu)
-            .position(x: base.x, y: base.y)
+            .offset(x: baseX, y: baseY)
     }
 
     // MARK: - Меню
 
-    private var menuLayer: some View {
-        GeometryReader { geo in
-            panel(in: geo)
-        }
-        .ignoresSafeArea()
-    }
-
-    private func panel(in geo: GeometryProxy) -> some View {
-        let ins = geo.safeAreaInsets
-        let panelWidth = min(geo.size.width - 44, 300)
-        let baseX = (geo.size.width - panelWidth) / 2
-        // Панель открывается не по центру, а в свободной полосе под кнопкой,
-        // чтобы не закрывать Exit; дальше её можно таскать.
-        let baseY = geo.size.height * 0.74 - panelHeight / 2
-
-        // область, за которую панель не должна выходить
-        let area = CGRect(x: ins.leading + 10,
-                          y: ins.top + 10,
-                          width: max(geo.size.width - ins.leading - ins.trailing - 20, 0),
-                          height: max(geo.size.height - ins.top - ins.bottom - 20, 0))
+    private func panel(size: CGSize, top: CGFloat, bottom: CGFloat, width: CGFloat) -> some View {
+        let baseX = (size.width - width) / 2
+        // не по центру, а в свободной полосе под кнопкой Start,
+        // чтобы сразу не закрывать Exit
+        let baseY = size.height * 0.74 - panelHeight / 2
+        let area = CGRect(x: 10,
+                          y: top + 10,
+                          width: max(size.width - 20, 0),
+                          height: max(size.height - top - bottom - 20, 0))
 
         return MenuPanel(tab: $state.tab,
-                         width: panelWidth,
+                         width: width,
                          height: panelHeight,
                          minX: area.minX - baseX,
-                         maxX: max(area.maxX - panelWidth - baseX, area.minX - baseX),
+                         maxX: max(area.maxX - width - baseX, area.minX - baseX),
                          minY: area.minY - baseY,
                          maxY: max(area.maxY - panelHeight - baseY, area.minY - baseY),
                          onClose: state.closeMenu,
                          onUnload: state.stopLoader,
                          telegramURL: URL(string: "https://t.me/ascentios")!)
-            .frame(width: panelWidth, height: panelHeight)
-            .position(x: baseX + panelWidth / 2, y: baseY + panelHeight / 2)
+            .offset(x: baseX, y: baseY)
     }
 }
 
-// MARK: - Сам лоадер
+// MARK: - Лоадер
 
-/// Логотип, надпись, кнопка Start/Exit и ссылка.
-/// Перерисовывается только при смене состояния лоадера — не при таскании меню.
 private struct LoaderContent: View {
     @ObservedObject var state: LoaderState
+    let topInset: CGFloat
+    let bottomInset: CGFloat
 
     var body: some View {
         VStack(spacing: 0) {
@@ -128,6 +117,9 @@ private struct LoaderContent: View {
         }
         .padding(.horizontal, 32)
         .padding(.bottom, 24)
+        .padding(.top, topInset)
+        .padding(.bottom, bottomInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var logoMark: some View {
@@ -191,26 +183,21 @@ private struct LoaderContent: View {
 
 // MARK: - Фон
 
-/// Статичный фон. Отдельный тип без свойств: SwiftUI не перерисовывает его,
-/// когда таскаешь меню. Размытие впечатано в саму картинку — в рантайме его
-/// считать не нужно (раньше это делалось каждый кадр и всё заедало).
+/// Статичный фон: свойств нет, поэтому SwiftUI его не перерисовывает,
+/// когда таскаешь меню. Размытие впечатано в саму картинку.
 private struct BackdropView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                // Фотка целиком и на весь экран: пропорции не сохраняем —
-                // иначе либо обрезка, либо поля.
                 Image("Backdrop")
                     .resizable()
                     .frame(width: geo.size.width, height: geo.size.height)
 
                 Color.black.opacity(0.10)
 
-                LinearGradient(
-                    colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.38)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                LinearGradient(colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.38)],
+                               startPoint: .top,
+                               endPoint: .bottom)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
