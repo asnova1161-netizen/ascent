@@ -2,12 +2,13 @@ import SwiftUI
 
 /// Плавающее меню мод-меню.
 ///
-/// Панель непрозрачная (серый), текст белый. Её можно таскать за шапку,
-/// но за края экрана она не уходит: границы (minX…maxX, minY…maxY)
-/// считает родитель и передаёт сюда.
+/// Панель непрозрачная (серая), текст белый. Таскается за шапку, за края
+/// экрана не уходит: границы (minX…maxX, minY…maxY) считает родитель.
+///
+/// Смещение живёт ВНУТРИ панели: при перетаскивании перерисовывается только
+/// она, а не весь экран с дождём — именно из-за этого раньше всё заедало.
 struct MenuPanel: View {
     @Binding var tab: Int
-    @Binding var offset: CGSize
 
     let width: CGFloat
     let height: CGFloat
@@ -20,16 +21,17 @@ struct MenuPanel: View {
     let onUnload: () -> Void
     let telegramURL: URL
 
-    @State private var dragStart: CGSize = .zero
+    @State private var offset: CGSize = .zero
+    @GestureState private var slide: CGSize = .zero
 
     private let headerHeight: CGFloat = 44
     private let tabBarHeight: CGFloat = 40
 
     // серый фон непрозрачный + белый текст
-    private let fill  = Color(red: 0.145, green: 0.145, blue: 0.160)
-    private let line  = Color.white.opacity(0.12)
-    private let dim   = Color.white.opacity(0.55)
-    private let gray  = Color(red: 0.36, green: 0.36, blue: 0.40)
+    private let fill = Color(red: 0.145, green: 0.145, blue: 0.160)
+    private let line = Color.white.opacity(0.12)
+    private let dim  = Color.white.opacity(0.55)
+    private let gray = Color(red: 0.36, green: 0.36, blue: 0.40)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,14 +47,32 @@ struct MenuPanel: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(line, lineWidth: 1)
         )
         .background(
-            // «тень» без размытия: размытая тень пересчитывалась на каждом
-            // кадре перетаскивания и всё заедало
+            // тень без размытия — размытая пересчитывалась бы при каждом движении
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color.black.opacity(0.40))
                 .offset(y: 7)
         )
-        .offset(x: offset.width, y: offset.height)
-        .onAppear { dragStart = offset }
+        .offset(x: current.width, y: current.height)
+    }
+
+    // MARK: - Перетаскивание
+
+    private var current: CGSize {
+        clamp(CGSize(width: offset.width + slide.width, height: offset.height + slide.height))
+    }
+
+    private func clamp(_ s: CGSize) -> CGSize {
+        CGSize(width: min(max(s.width, minX), max(minX, maxX)),
+               height: min(max(s.height, minY), max(minY, maxY)))
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .updating($slide) { value, state, _ in state = value.translation }
+            .onEnded { value in
+                offset = clamp(CGSize(width: offset.width + value.translation.width,
+                                      height: offset.height + value.translation.height))
+            }
     }
 
     // MARK: - Шапка (за неё таскаем)
@@ -175,24 +195,9 @@ struct MenuPanel: View {
             }
             .buttonStyle(StartButtonStyle())
 
-            Text("закроет загрузчик полностью")
+            Text("стоп лоадера, меню остаётся")
                 .font(.system(size: 11.5))
                 .foregroundColor(Color.white.opacity(0.5))
         }
-    }
-
-    // MARK: - Перетаскивание
-
-    private var drag: some Gesture {
-        DragGesture(minimumDistance: 2)
-            .onChanged { value in
-                let raw = CGSize(width: dragStart.width + value.translation.width,
-                                 height: dragStart.height + value.translation.height)
-                offset = CGSize(
-                    width: min(max(raw.width, minX), max(minX, maxX)),
-                    height: min(max(raw.height, minY), max(minY, maxY))
-                )
-            }
-            .onEnded { _ in dragStart = offset }
     }
 }

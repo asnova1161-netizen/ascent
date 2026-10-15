@@ -2,11 +2,10 @@ import SwiftUI
 
 /// Серая плавающая кнопка мод-меню.
 ///
-/// Её можно таскать по всему экрану (границы считает родитель), а обычный
-/// тап по ней открывает и закрывает меню.
+/// Таскается по всему экрану (границы считает родитель), обычный тап
+/// открывает и закрывает меню. Смещение живёт внутри кнопки — при
+/// перетаскивании перерисовывается только она, а не весь экран.
 struct MenuTrigger: View {
-    @Binding var offset: CGSize
-
     let minX: CGFloat
     let maxX: CGFloat
     let minY: CGFloat
@@ -14,10 +13,13 @@ struct MenuTrigger: View {
     let isOpen: Bool
     let action: () -> Void
 
-    @State private var start: CGSize = .zero
-    @State private var moved = false
+    @State private var offset: CGSize = .zero
+    @GestureState private var slide: CGSize = .zero
 
     static let side: CGFloat = 54
+
+    /// Двинули больше 5 pt — значит тащат, а не тапают (тут порог в квадрате).
+    private static let tapLimit: CGFloat = 25
 
     var body: some View {
         ZStack {
@@ -40,26 +42,35 @@ struct MenuTrigger: View {
                 .fill(Color.black.opacity(0.40))
                 .offset(y: 5)
         )
-        .offset(x: offset.width, y: offset.height)
-        .onAppear { start = offset }
+        .offset(x: current.width, y: current.height)
         .gesture(drag)
+    }
+
+    private var current: CGSize {
+        clamp(CGSize(width: offset.width + slide.width, height: offset.height + slide.height))
+    }
+
+    private func clamp(_ s: CGSize) -> CGSize {
+        CGSize(width: min(max(s.width, minX), max(minX, maxX)),
+               height: min(max(s.height, minY), max(minY, maxY)))
+    }
+
+    private func moved(_ t: CGSize) -> Bool {
+        t.width * t.width + t.height * t.height > MenuTrigger.tapLimit
     }
 
     private var drag: some Gesture {
         DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                let moved2 = value.translation.width * value.translation.width
-                    + value.translation.height * value.translation.height
-                if !moved && moved2 > 25 { moved = true }
-                guard moved else { return }
-                let raw = CGSize(width: start.width + value.translation.width,
-                                 height: start.height + value.translation.height)
-                offset = CGSize(width: min(max(raw.width, minX), max(minX, maxX)),
-                                height: min(max(raw.height, minY), max(minY, maxY)))
+            .updating($slide) { value, state, _ in
+                state = moved(value.translation) ? value.translation : .zero
             }
-            .onEnded { _ in
-                if moved { start = offset } else { action() }
-                moved = false
+            .onEnded { value in
+                if moved(value.translation) {
+                    offset = clamp(CGSize(width: offset.width + value.translation.width,
+                                          height: offset.height + value.translation.height))
+                } else {
+                    action()
+                }
             }
     }
 }

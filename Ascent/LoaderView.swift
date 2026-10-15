@@ -2,8 +2,6 @@ import SwiftUI
 
 struct LoaderView: View {
     @StateObject private var state = LoaderState()
-    @State private var panelOffset: CGSize = .zero
-    @State private var triggerOffset: CGSize = .zero
 
     private let panelHeight: CGFloat = 216
 
@@ -19,13 +17,18 @@ struct LoaderView: View {
 
             LoaderContent(state: state)
 
-            // серая кнопка мод-меню: есть всегда, независимо от лоадера
-            triggerLayer
-                .zIndex(3)
+            // серая кнопка мод-меню: появляется после Start и дальше остаётся
+            // на экране даже когда лоадер закрыт
+            if state.armed {
+                triggerLayer
+                    .zIndex(3)
+                    .transition(.opacity)
+            }
 
-            if state.menuOpen {
+            if state.armed && state.menuOpen {
                 menuLayer
                     .zIndex(2)
+                    .transition(.opacity)
             }
         }
     }
@@ -50,8 +53,7 @@ struct LoaderView: View {
         let base = CGPoint(x: geo.size.width - ins.trailing - half - 14,
                            y: ins.top + half + 14)
 
-        return MenuTrigger(offset: $triggerOffset,
-                           minX: area.minX + half - base.x,
+        return MenuTrigger(minX: area.minX + half - base.x,
                            maxX: max(area.maxX - half - base.x, area.minX + half - base.x),
                            minY: area.minY + half - base.y,
                            maxY: max(area.maxY - half - base.y, area.minY + half - base.y),
@@ -84,7 +86,6 @@ struct LoaderView: View {
                           height: max(geo.size.height - ins.top - ins.bottom - 20, 0))
 
         return MenuPanel(tab: $state.tab,
-                         offset: $panelOffset,
                          width: panelWidth,
                          height: panelHeight,
                          minX: area.minX - baseX,
@@ -96,7 +97,6 @@ struct LoaderView: View {
                          telegramURL: URL(string: "https://t.me/ascentios")!)
             .frame(width: panelWidth, height: panelHeight)
             .position(x: baseX + panelWidth / 2, y: baseY + panelHeight / 2)
-            .transition(.scale(scale: 0.92, anchor: .center).combined(with: .opacity))
     }
 }
 
