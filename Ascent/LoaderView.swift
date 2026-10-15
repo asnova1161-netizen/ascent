@@ -9,6 +9,10 @@ struct LoaderView: View {
         ZStack {
             background.ignoresSafeArea()
 
+            FallingLeaves()
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
 
@@ -17,6 +21,7 @@ struct LoaderView: View {
                 Text("ascent")
                     .font(.system(size: 46, weight: .heavy, design: .rounded))
                     .foregroundColor(Theme.text)
+                    .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
                     .padding(.top, 26)
 
                 startButton
@@ -31,27 +36,39 @@ struct LoaderView: View {
         }
     }
 
-    // MARK: - Части экрана
+    // MARK: - Фон
 
     private var background: some View {
-        ZStack {
-            Theme.bg
-            RadialGradient(
-                colors: [Theme.green.opacity(0.16), Color.clear],
-                center: UnitPoint(x: 0.5, y: 0.10),
-                startRadius: 0,
-                endRadius: 430
-            )
+        GeometryReader { geo in
+            ZStack {
+                Image("AutumnBG")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: geo.size.width * 1.25, height: geo.size.height * 1.25)
+                    .blur(radius: 16)
+
+                Theme.bg.opacity(0.34)
+
+                LinearGradient(
+                    colors: [Color.black.opacity(0.30), Color.clear, Color.black.opacity(0.38)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
         }
     }
+
+    // MARK: - Части экрана
 
     private var logoMark: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(LinearGradient(colors: [Theme.green.opacity(0.14), Color.white.opacity(0.02)],
+                .fill(LinearGradient(colors: [Theme.gold.opacity(0.18), Color.white.opacity(0.02)],
                                      startPoint: .top, endPoint: .bottom))
                 .frame(width: 72, height: 72)
-                .shadow(color: Theme.green.opacity(0.35), radius: 22, x: 0, y: 14)
+                .shadow(color: Theme.amber.opacity(0.35), radius: 22, x: 0, y: 14)
 
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Theme.line, lineWidth: 1)
@@ -59,8 +76,8 @@ struct LoaderView: View {
 
             Image(systemName: "arrow.up")
                 .font(.system(size: 28, weight: .bold))
-                .foregroundColor(Theme.green)
-                .shadow(color: Theme.green.opacity(0.6), radius: 8)
+                .foregroundColor(Theme.gold)
+                .shadow(color: Theme.gold.opacity(0.6), radius: 8)
         }
     }
 
@@ -72,18 +89,18 @@ struct LoaderView: View {
             Text(started ? "Started" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
-                .foregroundColor(Theme.onGreen)
+                .foregroundColor(Theme.onGold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(LinearGradient(colors: [Theme.green, Theme.green2],
+                        .fill(LinearGradient(colors: [Theme.gold, Theme.amber],
                                              startPoint: .top, endPoint: .bottom))
                 )
         }
         .buttonStyle(StartButtonStyle())
         .disabled(started)
-        .shadow(color: Theme.green.opacity(0.35), radius: 18, x: 0, y: 10)
+        .shadow(color: Theme.amber.opacity(0.45), radius: 18, x: 0, y: 10)
     }
 
     private var telegramLink: some View {
@@ -100,7 +117,7 @@ struct LoaderView: View {
             .padding(.horizontal, 18)
             .background(
                 ZStack {
-                    Capsule().fill(Color.white.opacity(0.02))
+                    Capsule().fill(Theme.gold.opacity(0.10))
                     Capsule().stroke(Theme.line, lineWidth: 1)
                 }
             )
