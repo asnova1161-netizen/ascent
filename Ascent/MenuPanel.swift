@@ -10,6 +10,7 @@ import SwiftUI
 struct MenuPanel: View {
     @Binding var tab: Int
 
+    let isRunning: Bool
     let width: CGFloat
     let height: CGFloat
     let minX: CGFloat
@@ -21,8 +22,10 @@ struct MenuPanel: View {
     let onUnload: () -> Void
     let telegramURL: URL
 
-    @State private var offset: CGSize = .zero
-    @GestureState private var slide: CGSize = .zero
+    /// Куда панель уже утащили (сохраняется между перетаскиваниями).
+    @State private var origin: CGSize = .zero
+    /// Смещение текущего перетаскивания — живёт только пока палец на экране.
+    @State private var drag: CGSize = .zero
 
     private let headerHeight: CGFloat = 44
     private let tabBarHeight: CGFloat = 40
@@ -32,6 +35,24 @@ struct MenuPanel: View {
     private let line = Color.white.opacity(0.12)
     private let dim  = Color.white.opacity(0.55)
     private let gray = Color(red: 0.36, green: 0.36, blue: 0.40)
+
+    init(tab: Binding<Int>, isRunning: Bool,
+         width: CGFloat, height: CGFloat,
+         minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat,
+         onClose: @escaping () -> Void, onUnload: @escaping () -> Void,
+         telegramURL: URL) {
+        self._tab = tab
+        self.isRunning = isRunning
+        self.width = width
+        self.height = height
+        self.minX = minX
+        self.maxX = maxX
+        self.minY = minY
+        self.maxY = maxY
+        self.onClose = onClose
+        self.onUnload = onUnload
+        self.telegramURL = telegramURL
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,13 +73,14 @@ struct MenuPanel: View {
                 .fill(Color.black.opacity(0.40))
                 .offset(y: 7)
         )
-        .offset(x: current.width, y: current.height)
+        .offset(x: position.width, y: position.height)
     }
 
     // MARK: - Перетаскивание
 
-    private var current: CGSize {
-        clamp(CGSize(width: offset.width + slide.width, height: offset.height + slide.height))
+    private var position: CGSize {
+        clamp(CGSize(width: origin.width + drag.width,
+                     height: origin.height + drag.height))
     }
 
     private func clamp(_ s: CGSize) -> CGSize {
@@ -66,12 +88,16 @@ struct MenuPanel: View {
                height: min(max(s.height, minY), max(minY, maxY)))
     }
 
-    private var drag: some Gesture {
+    /// Ручной драг на `@State` (а не на `@GestureState`): состояние меняется
+    /// только внутри панели, сбрасывается ровно один раз в `onEnded`.
+    /// `@GestureState` + анимации в родителе подвешивали UI.
+    private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 2)
-            .updating($slide) { value, state, _ in state = value.translation }
+            .onChanged { value in drag = value.translation }
             .onEnded { value in
-                offset = clamp(CGSize(width: offset.width + value.translation.width,
-                                      height: offset.height + value.translation.height))
+                origin = clamp(CGSize(width: origin.width + value.translation.width,
+                                      height: origin.height + value.translation.height))
+                drag = .zero
             }
     }
 
@@ -85,7 +111,7 @@ struct MenuPanel: View {
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-                .gesture(drag)
+                .gesture(dragGesture)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -113,7 +139,7 @@ struct MenuPanel: View {
     }
 
     private func tabButton(_ title: String, _ index: Int) -> some View {
-        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { tab = index } }) {
+        Button(action: { tab = index }) {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 Text(title)
@@ -147,7 +173,7 @@ struct MenuPanel: View {
                     .font(.system(size: 13))
                     .foregroundColor(dim)
                 Spacer(minLength: 0)
-                Text("загрузчик активен")
+                Text(isRunning ? "загрузчик активен" : "загрузчик остановлен")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white)
             }

@@ -26,9 +26,9 @@ struct LoaderView: View {
 
                 LoaderContent(state: state, topInset: top, bottomInset: bottom)
 
-                // квадратик и меню живут, только пока идёт лоадер:
-                // Exit / unload — и они пропадают, вернуть можно по Start
-                if state.running {
+                // квадратик и меню живут, пока их не убрали кнопкой Exit:
+                // unload останавливает лоадер, но НЕ прячет их
+                if state.showing {
                     trigger(size: size, top: top, bottom: bottom)
                         .zIndex(3)
 
@@ -76,6 +76,7 @@ struct LoaderView: View {
                           height: max(size.height - top - bottom - 20, 0))
 
         return MenuPanel(tab: $state.tab,
+                         isRunning: state.running,
                          width: width,
                          height: panelHeight,
                          minX: area.minX - baseX,
@@ -83,7 +84,7 @@ struct LoaderView: View {
                          minY: area.minY - baseY,
                          maxY: max(area.maxY - panelHeight - baseY, area.minY - baseY),
                          onClose: state.closeMenu,
-                         onUnload: state.stopLoader,
+                         onUnload: state.unload,
                          telegramURL: URL(string: "https://t.me/ascentios")!)
             .offset(x: baseX, y: baseY)
     }
@@ -142,7 +143,7 @@ private struct LoaderContent: View {
 
     private var startButton: some View {
         Button(action: state.tapStart) {
-            Text(state.running ? "Exit" : "Start")
+            Text(state.showing ? "Exit" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
                 .foregroundColor(Theme.onGold)
@@ -150,7 +151,7 @@ private struct LoaderContent: View {
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(LinearGradient(colors: state.running ? [Theme.amber, Theme.deepRust]
+                        .fill(LinearGradient(colors: state.showing ? [Theme.amber, Theme.deepRust]
                                                                   : [Theme.gold, Theme.amber],
                                              startPoint: .top, endPoint: .bottom))
                 )

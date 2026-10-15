@@ -13,13 +13,26 @@ struct MenuTrigger: View {
     let isOpen: Bool
     let action: () -> Void
 
-    @State private var offset: CGSize = .zero
-    @GestureState private var slide: CGSize = .zero
-
     static let side: CGFloat = 54
+
+    /// Куда кнопку уже утащили (сохраняется между перетаскиваниями).
+    @State private var origin: CGSize = .zero
+
+    /// Смещение текущего перетаскивания — живёт только пока палец на экране.
+    @State private var drag: CGSize = .zero
 
     /// Двинули больше 5 pt — значит тащат, а не тапают (тут порог в квадрате).
     private static let tapLimit: CGFloat = 25
+
+    init(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat,
+         isOpen: Bool, action: @escaping () -> Void) {
+        self.minX = minX
+        self.maxX = maxX
+        self.minY = minY
+        self.maxY = maxY
+        self.isOpen = isOpen
+        self.action = action
+    }
 
     var body: some View {
         ZStack {
@@ -42,12 +55,14 @@ struct MenuTrigger: View {
                 .fill(Color.black.opacity(0.40))
                 .offset(y: 5)
         )
-        .offset(x: current.width, y: current.height)
-        .gesture(drag)
+        .contentShape(Rectangle())          // вся площадь ловит касания
+        .offset(x: position.width, y: position.height)
+        .gesture(dragGesture)
     }
 
-    private var current: CGSize {
-        clamp(CGSize(width: offset.width + slide.width, height: offset.height + slide.height))
+    private var position: CGSize {
+        clamp(CGSize(width: origin.width + drag.width,
+                     height: origin.height + drag.height))
     }
 
     private func clamp(_ s: CGSize) -> CGSize {
@@ -59,18 +74,23 @@ struct MenuTrigger: View {
         t.width * t.width + t.height * t.height > MenuTrigger.tapLimit
     }
 
-    private var drag: some Gesture {
+    /// Ручной драг на `@State` (а не на `@GestureState` и не через
+    /// `withAnimation`): состояние меняется только внутри самой кнопки,
+    /// и когда палец отпускают — сбрасывается ровно один раз. Именно
+    /// сочетание `@GestureState` + анимации в родителе подвешивало UI.
+    private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
-            .updating($slide) { value, state, _ in
-                state = moved(value.translation) ? value.translation : .zero
+            .onChanged { value in
+                if moved(value.translation) { drag = value.translation }
             }
             .onEnded { value in
                 if moved(value.translation) {
-                    offset = clamp(CGSize(width: offset.width + value.translation.width,
-                                          height: offset.height + value.translation.height))
+                    origin = clamp(CGSize(width: origin.width + value.translation.width,
+                                          height: origin.height + value.translation.height))
                 } else {
                     action()
                 }
+                drag = .zero
             }
     }
 }

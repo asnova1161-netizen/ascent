@@ -6,36 +6,46 @@ import SwiftUI
 /// перерисовывает тяжёлые статичные слои (фон, дождь, лоадер), когда мы
 /// таскаем меню или кнопку — от этого всё заедало.
 final class LoaderState: ObservableObject {
-    @Published var running = false      // загрузчик работает (Start / Exit)
+    /// Загрузчик работает. Меняется по Start / Exit / unload.
+    @Published var running = false
+    /// Квадратик и меню вообще есть на экране (Start включает, Exit убирает).
+    @Published var showing = false
     @Published var menuOpen = false
     @Published var tab = 0
 
     /// Кнопка Start/Exit.
     ///
     /// Start: лоадер пошёл, вылез квадратик и открылось меню.
-    /// Exit или unload: лоадер встал, и меню вместе с квадратиком пропали —
+    /// Exit: лоадер встал, и меню вместе с квадратиком пропали —
     /// вернуть их можно только новым Start.
     func tapStart() {
-        if running { stopLoader() } else { startLoader() }
+        if showing { hideAll() } else { startLoader() }
     }
 
     private func startLoader() {
-        withAnimation(.easeInOut(duration: 0.18)) { running = true }
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { menuOpen = true }
+        running = true
+        showing = true
+        menuOpen = true
     }
 
-    func stopLoader() {
-        withAnimation(.easeInOut(duration: 0.18)) {
-            running = false
-            menuOpen = false
-        }
+    /// Всё убираем с экрана (это делает Exit).
+    private func hideAll() {
+        running = false
+        showing = false
+        menuOpen = false
+    }
+
+    /// unload из меню: лоадер останавливается, но квадратик и меню
+    /// ОСТАЮТСЯ на экране — чтобы можно было запустить снова или потаскать.
+    func unload() {
+        running = false
     }
 
     func toggleMenu() {
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { menuOpen.toggle() }
+        menuOpen.toggle()
     }
 
     func closeMenu() {
-        withAnimation(.easeInOut(duration: 0.18)) { menuOpen = false }
+        menuOpen = false
     }
 }
