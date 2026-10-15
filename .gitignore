@@ -1,0 +1,14 @@
+# build/
+DerivedData/
+build/
+*.xcuserdatad
+xcuserdata/
+.DS_Store
+
+# генерируется XcodeGen в CI
+Ascent.xcodeproj
+
+# локальные артефакты
+Payload/
+*.tipa
+*.ipa
