@@ -1,0 +1,47 @@
+name: Ascent
+
+options:
+  bundleIdPrefix: com.ascentios
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "14.0"
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+targets:
+  Ascent:
+    type: application
+    platform: iOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Ascent
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_NAME: Ascent
+        PRODUCT_BUNDLE_IDENTIFIER: com.ascentios.ascent
+        INFOPLIST_FILE: Ascent/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_BITCODE: "NO"
+        SWIFT_EMIT_LOC_STRINGS: "NO"
+
+schemes:
+  Ascent:
+    build:
+      targets:
+        Ascent: all
+    run:
+      config: Release
+    archive:
+      config: Release
