@@ -9,21 +9,31 @@ on:
 jobs:
   build:
     name: Собрать .tipa
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Установить XcodeGen
         run: brew install xcodegen
 
+      - name: Выбрать свежий Xcode
+        continue-on-error: true
+        run: |
+          set -x
+          ls -d /Applications/Xcode*.app || true
+          NEWEST=$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -E 'Xcode_(1[6-9]|[2-9][0-9])' | sort | tail -1 || true)
+          if [ -n "$NEWEST" ]; then sudo xcode-select -s "$NEWEST" || true; fi
+          xcodebuild -version || true
+
       - name: Сгенерировать Xcode-проект
         run: xcodegen generate
 
       - name: Диагностика
+        continue-on-error: true
         run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
-          xcodebuild -list -project Ascent.xcodeproj
+          xcodebuild -version || true
+          xcrun --sdk iphoneos --show-sdk-version || true
+          xcodebuild -list -project Ascent.xcodeproj || true
 
       - name: Собрать приложение (без подписи)
         run: |
