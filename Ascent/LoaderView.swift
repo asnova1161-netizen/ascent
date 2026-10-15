@@ -2,8 +2,12 @@ import SwiftUI
 
 struct LoaderView: View {
     @State private var running = false
+    @State private var menuOpen = false
+    @State private var menuTab = 0
+    @State private var panelOffset: CGSize = .zero
 
     private let telegramURL = URL(string: "https://t.me/ascentios")!
+    private let panelHeight: CGFloat = 216
 
     var body: some View {
         ZStack {
@@ -29,10 +33,15 @@ struct LoaderView: View {
 
                 Spacer(minLength: 0)
 
-                telegramLink
+                menuTrigger
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 24)
+
+            if menuOpen {
+                menuLayer
+                    .zIndex(2)
+            }
         }
     }
 
@@ -42,7 +51,7 @@ struct LoaderView: View {
         GeometryReader { geo in
             ZStack {
                 // Фотка целиком и на весь экран: пропорции не сохраняем —
-                // иначе либо обрезка, ни обрезки ни полей не выйдет.
+                // иначе либо обрезка, либо поля.
                 // Кадр чуть больше экрана (1.08), потому что размытие
                 // осветляет края — так они остаются за пределами экрана.
                 Image("Backdrop")
@@ -61,6 +70,44 @@ struct LoaderView: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
         }
+    }
+
+    // MARK: - Меню
+
+    /// Плавающая панель: центр экрана плюс смещение, но не за краями.
+    private var menuLayer: some View {
+        GeometryReader { geo in
+            panel(in: geo)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func panel(in geo: GeometryProxy) -> some View {
+        let ins = geo.safeAreaInsets
+        let panelWidth = min(geo.size.width - 44, 300)
+        let baseX = (geo.size.width - panelWidth) / 2
+        let baseY = (geo.size.height - panelHeight) / 2
+
+        // область, за которую панель не должна выходить
+        let area = CGRect(x: ins.leading + 10,
+                          y: ins.top + 10,
+                          width: max(geo.size.width - ins.leading - ins.trailing - 20, 0),
+                          height: max(geo.size.height - ins.top - ins.bottom - 20, 0))
+
+        return MenuPanel(tab: $menuTab,
+                         offset: $panelOffset,
+                         width: panelWidth,
+                         height: panelHeight,
+                         minX: area.minX - baseX,
+                         maxX: max(area.maxX - panelWidth - baseX, area.minX - baseX),
+                         minY: area.minY - baseY,
+                         maxY: max(area.maxY - panelHeight - baseY, area.minY - baseY),
+                         onClose: { withAnimation(.easeInOut(duration: 0.18)) { menuOpen = false } },
+                         onUnload: stop,
+                         telegramURL: telegramURL)
+            .frame(width: panelWidth, height: panelHeight)
+            .position(x: baseX + panelWidth / 2, y: baseY + panelHeight / 2)
+            .transition(.scale(scale: 0.92, anchor: .center).combined(with: .opacity))
     }
 
     // MARK: - Части экрана
@@ -85,9 +132,7 @@ struct LoaderView: View {
     }
 
     private var startButton: some View {
-        Button(action: {
-            withAnimation(.easeInOut(duration: 0.18)) { running.toggle() }
-        }) {
+        Button(action: { running ? stop() : start() }) {
             Text(running ? "Exit" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
@@ -105,14 +150,23 @@ struct LoaderView: View {
         .shadow(color: Theme.amber.opacity(0.45), radius: 18, x: 0, y: 10)
     }
 
-    private var telegramLink: some View {
-        Link(destination: telegramURL) {
+    /// Плашка снизу. Открывает и закрывает меню,
+    /// ссылка на телегу лежит внутри меню (вкладка main).
+    private var menuTrigger: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                menuOpen.toggle()
+            }
+        }) {
             HStack(spacing: 9) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 13, weight: .semibold))
                 Text("t.me/ascentios")
                     .font(.system(size: 13, weight: .medium))
                     .kerning(0.4)
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Theme.gold.opacity(0.8))
             }
             .foregroundColor(Theme.muted)
             .padding(.vertical, 11)
@@ -124,6 +178,23 @@ struct LoaderView: View {
                 }
             )
         }
+    }
+
+    // MARK: - Запуск и полное завершение
+
+    private func start() {
+        withAnimation(.easeInOut(duration: 0.18)) { running = true }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { menuOpen = true }
+    }
+
+    /// Полностью закрыть: гасим загрузчик, меню и сбрасываем всё как было.
+    private func stop() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            running = false
+            menuOpen = false
+        }
+        menuTab = 0
+        panelOffset = .zero
     }
 }
 
