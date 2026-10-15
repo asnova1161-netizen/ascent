@@ -1,0 +1,74 @@
+name: build-tipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+
+jobs:
+  build:
+    name: Собрать .tipa
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить XcodeGen
+        run: brew install xcodegen
+
+      - name: Сгенерировать Xcode-проект
+        run: xcodegen generate
+
+      - name: Диагностика
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcodebuild -list -project Ascent.xcodeproj
+
+      - name: Собрать приложение (без подписи)
+        run: |
+          set -euxo pipefail
+          xcodebuild \
+            -project Ascent.xcodeproj \
+            -scheme Ascent \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+          ls -la build/Build/Products/Release-iphoneos/
+
+      - name: Упаковать в .tipa
+        run: |
+          set -euxo pipefail
+          APP="build/Build/Products/Release-iphoneos/Ascent.app"
+          rm -rf Payload Ascent.tipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          rm -rf "Payload/Ascent.app/_CodeSignature"
+          zip -qry Ascent.tipa Payload
+          unzip -l Ascent.tipa | head -n 20
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ascent-tipa
+          path: Ascent.tipa
+          if-no-files-found: error
+
+  release:
+    name: Релиз
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Ascent-tipa
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: Ascent.tipa
