@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct LoaderView: View {
-    @State private var started = false
+    @State private var running = false
 
     private let telegramURL = URL(string: "https://t.me/ascentios")!
 
@@ -83,10 +83,9 @@ struct LoaderView: View {
 
     private var startButton: some View {
         Button(action: {
-            guard !started else { return }
-            withAnimation(.easeInOut(duration: 0.2)) { started = true }
+            withAnimation(.easeInOut(duration: 0.18)) { running.toggle() }
         }) {
-            Text(started ? "Started" : "Start")
+            Text(running ? "Exit" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
                 .foregroundColor(Theme.onGold)
@@ -94,12 +93,12 @@ struct LoaderView: View {
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(LinearGradient(colors: [Theme.gold, Theme.amber],
+                        .fill(LinearGradient(colors: running ? [Theme.amber, Theme.deepRust]
+                                                             : [Theme.gold, Theme.amber],
                                              startPoint: .top, endPoint: .bottom))
                 )
         }
         .buttonStyle(StartButtonStyle())
-        .disabled(started)
         .shadow(color: Theme.amber.opacity(0.45), radius: 18, x: 0, y: 10)
     }
 
