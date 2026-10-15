@@ -19,20 +19,20 @@ struct RainView: View {
             RainShape(phase: phase, count: 130, seed: 1,
                       cyclesMin: 5, cyclesMax: 9,
                       lengthMin: 7, lengthMax: 20,
-                      widthMin: 0.8, widthMax: 1.3)
+                      widthMin: 0.9, widthMax: 1.4)
                 .fill(Color(red: 0.80, green: 0.86, blue: 0.97))
                 .opacity(0.16)
-                .blur(radius: 0.5)   // сглаживает края, иначе капли в пиксель
 
-            // ближний план: длинные заметные струи
             RainShape(phase: phase, count: 62, seed: 2,
                       cyclesMin: 6, cyclesMax: 11,
                       lengthMin: 14, lengthMax: 36,
-                      widthMin: 1.2, widthMax: 2.1)
+                      widthMin: 1.3, widthMax: 2.2)
                 .fill(Color(red: 0.88, green: 0.93, blue: 1.0))
                 .opacity(0.30)
-                .blur(radius: 0.7)
         }
+        // Рисуем одной прослойкой через Metal: кадры ровнее и дешевле.
+        // Размытия тут больше нет — именно оно съедало кадры.
+        .drawingGroup()
         .allowsHitTesting(false)
         .onAppear {
             phase = 0

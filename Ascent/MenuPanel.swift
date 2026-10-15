@@ -44,7 +44,13 @@ struct MenuPanel: View {
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(line, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.55), radius: 26, x: 0, y: 16)
+        .background(
+            // «тень» без размытия: размытая тень пересчитывалась на каждом
+            // кадре перетаскивания и всё заедало
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.black.opacity(0.40))
+                .offset(y: 7)
+        )
         .offset(x: offset.width, y: offset.height)
         .onAppear { dragStart = offset }
     }

@@ -32,10 +32,14 @@ struct MenuTrigger: View {
             Image(systemName: isOpen ? "xmark" : "slider.horizontal.3")
                 .font(.system(size: 20, weight: .bold))
                 .foregroundColor(.white)
-                .shadow(color: Color.black.opacity(0.35), radius: 3, y: 1)
         }
         .frame(width: MenuTrigger.side, height: MenuTrigger.side)
-        .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 8)
+        .background(
+            // тень без размытия — при перетаскивании она не грузит кадры
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .fill(Color.black.opacity(0.40))
+                .offset(y: 5)
+        )
         .offset(x: offset.width, y: offset.height)
         .onAppear { start = offset }
         .gesture(drag)

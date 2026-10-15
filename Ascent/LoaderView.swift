@@ -1,87 +1,37 @@
 import SwiftUI
 
 struct LoaderView: View {
-    @State private var running = false
-    @State private var menuOpen = false
-    @State private var menuTab = 0
+    @StateObject private var state = LoaderState()
     @State private var panelOffset: CGSize = .zero
     @State private var triggerOffset: CGSize = .zero
 
-    private let telegramURL = URL(string: "https://t.me/ascentios")!
     private let panelHeight: CGFloat = 216
 
     var body: some View {
         ZStack {
-            background.ignoresSafeArea()
+            // фон и дождь — отдельные типы без изменяемых свойств, поэтому
+            // при таскании меню SwiftUI их не перерисовывает
+            BackdropView().ignoresSafeArea()
 
             RainView()
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
+            LoaderContent(state: state)
 
-                logoMark
+            // серая кнопка мод-меню: есть всегда, независимо от лоадера
+            triggerLayer
+                .zIndex(3)
 
-                Text("ascent")
-                    .font(.system(size: 46, weight: .heavy, design: .rounded))
-                    .foregroundColor(Theme.text)
-                    .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
-                    .padding(.top, 26)
-
-                startButton
-                    .padding(.top, 40)
-
-                Spacer(minLength: 0)
-
-                telegramLink
-            }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 24)
-
-            if running {
-                triggerLayer
-                    .zIndex(3)
-            }
-
-            if menuOpen {
+            if state.menuOpen {
                 menuLayer
                     .zIndex(2)
             }
         }
     }
 
-    // MARK: - Фон
+    // MARK: - Кнопка мод-меню
 
-    private var background: some View {
-        GeometryReader { geo in
-            ZStack {
-                // Фотка целиком и на весь экран: пропорции не сохраняем —
-                // иначе либо обрезка, либо поля.
-                // Кадр чуть больше экрана (1.08), потому что размытие
-                // осветляет края — так они остаются за пределами экрана.
-                Image("Backdrop")
-                    .resizable()
-                    .frame(width: geo.size.width * 1.08, height: geo.size.height * 1.08)
-                    .blur(radius: 2.5)
-
-                Color.black.opacity(0.10)
-
-                LinearGradient(
-                    colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.38)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .clipped()
-        }
-    }
-
-    // MARK: - Меню и кнопка мод-меню
-
-    /// Серая кнопка мод-меню: появляется по Start, таскается по экрану,
-    /// тап открывает и закрывает меню.
     private var triggerLayer: some View {
         GeometryReader { geo in
             trigger(in: geo)
@@ -105,15 +55,13 @@ struct LoaderView: View {
                            maxX: max(area.maxX - half - base.x, area.minX + half - base.x),
                            minY: area.minY + half - base.y,
                            maxY: max(area.maxY - half - base.y, area.minY + half - base.y),
-                           isOpen: menuOpen,
-                           action: toggleMenu)
+                           isOpen: state.menuOpen,
+                           action: state.toggleMenu)
             .position(x: base.x, y: base.y)
-            .transition(.scale.combined(with: .opacity))
     }
 
     // MARK: - Меню
 
-    /// Плавающая панель: центр экрана плюс смещение, но не за краями.
     private var menuLayer: some View {
         GeometryReader { geo in
             panel(in: geo)
@@ -135,7 +83,7 @@ struct LoaderView: View {
                           width: max(geo.size.width - ins.leading - ins.trailing - 20, 0),
                           height: max(geo.size.height - ins.top - ins.bottom - 20, 0))
 
-        return MenuPanel(tab: $menuTab,
+        return MenuPanel(tab: $state.tab,
                          offset: $panelOffset,
                          width: panelWidth,
                          height: panelHeight,
@@ -143,15 +91,44 @@ struct LoaderView: View {
                          maxX: max(area.maxX - panelWidth - baseX, area.minX - baseX),
                          minY: area.minY - baseY,
                          maxY: max(area.maxY - panelHeight - baseY, area.minY - baseY),
-                         onClose: { withAnimation(.easeInOut(duration: 0.18)) { menuOpen = false } },
-                         onUnload: stop,
-                         telegramURL: telegramURL)
+                         onClose: state.closeMenu,
+                         onUnload: state.stopLoader,
+                         telegramURL: URL(string: "https://t.me/ascentios")!)
             .frame(width: panelWidth, height: panelHeight)
             .position(x: baseX + panelWidth / 2, y: baseY + panelHeight / 2)
             .transition(.scale(scale: 0.92, anchor: .center).combined(with: .opacity))
     }
+}
 
-    // MARK: - Части экрана
+// MARK: - Сам лоадер
+
+/// Логотип, надпись, кнопка Start/Exit и ссылка.
+/// Перерисовывается только при смене состояния лоадера — не при таскании меню.
+private struct LoaderContent: View {
+    @ObservedObject var state: LoaderState
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+
+            logoMark
+
+            Text("ascent")
+                .font(.system(size: 46, weight: .heavy, design: .rounded))
+                .foregroundColor(Theme.text)
+                .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
+                .padding(.top, 26)
+
+            startButton
+                .padding(.top, 40)
+
+            Spacer(minLength: 0)
+
+            telegramLink
+        }
+        .padding(.horizontal, 32)
+        .padding(.bottom, 24)
+    }
 
     private var logoMark: some View {
         ZStack {
@@ -168,13 +145,12 @@ struct LoaderView: View {
             Image(systemName: "arrow.up")
                 .font(.system(size: 28, weight: .bold))
                 .foregroundColor(Theme.gold)
-                .shadow(color: Theme.gold.opacity(0.6), radius: 8)
         }
     }
 
     private var startButton: some View {
-        Button(action: { running ? stop() : start() }) {
-            Text(running ? "Exit" : "Start")
+        Button(action: state.tapStart) {
+            Text(state.running ? "Exit" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
                 .foregroundColor(Theme.onGold)
@@ -182,8 +158,8 @@ struct LoaderView: View {
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(LinearGradient(colors: running ? [Theme.amber, Theme.deepRust]
-                                                             : [Theme.gold, Theme.amber],
+                        .fill(LinearGradient(colors: state.running ? [Theme.amber, Theme.deepRust]
+                                                                  : [Theme.gold, Theme.amber],
                                              startPoint: .top, endPoint: .bottom))
                 )
         }
@@ -192,7 +168,7 @@ struct LoaderView: View {
     }
 
     private var telegramLink: some View {
-        Link(destination: telegramURL) {
+        Link(destination: URL(string: "https://t.me/ascentios")!) {
             HStack(spacing: 9) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 13, weight: .semibold))
@@ -211,28 +187,33 @@ struct LoaderView: View {
             )
         }
     }
+}
 
-    // MARK: - Запуск и полное завершение
+// MARK: - Фон
 
-    private func start() {
-        withAnimation(.easeInOut(duration: 0.18)) { running = true }
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { menuOpen = true }
-    }
+/// Статичный фон. Отдельный тип без свойств: SwiftUI не перерисовывает его,
+/// когда таскаешь меню. Размытие впечатано в саму картинку — в рантайме его
+/// считать не нужно (раньше это делалось каждый кадр и всё заедало).
+private struct BackdropView: View {
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // Фотка целиком и на весь экран: пропорции не сохраняем —
+                // иначе либо обрезка, либо поля.
+                Image("Backdrop")
+                    .resizable()
+                    .frame(width: geo.size.width, height: geo.size.height)
 
-    /// Полностью закрыть: гасим загрузчик, меню и сбрасываем всё как было.
-    private func stop() {
-        withAnimation(.easeInOut(duration: 0.18)) {
-            running = false
-            menuOpen = false
-        }
-        menuTab = 0
-        panelOffset = .zero
-        triggerOffset = .zero
-    }
+                Color.black.opacity(0.10)
 
-    private func toggleMenu() {
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-            menuOpen.toggle()
+                LinearGradient(
+                    colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.38)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
         }
     }
 }
