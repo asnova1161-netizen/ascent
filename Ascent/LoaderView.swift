@@ -86,7 +86,9 @@ struct LoaderView: View {
         let ins = geo.safeAreaInsets
         let panelWidth = min(geo.size.width - 44, 300)
         let baseX = (geo.size.width - panelWidth) / 2
-        let baseY = (geo.size.height - panelHeight) / 2
+        // Панель открывается не по центру, а в свободной полосе под кнопкой,
+        // чтобы не закрывать Exit; дальше её можно таскать.
+        let baseY = geo.size.height * 0.74 - panelHeight / 2
 
         // область, за которую панель не должна выходить
         let area = CGRect(x: ins.leading + 10,
