@@ -43,9 +43,12 @@ struct LoaderView: View {
             ZStack {
                 // Фотка целиком и на весь экран: пропорции не сохраняем —
                 // иначе либо обрезка, ни обрезки ни полей не выйдет.
+                // Кадр чуть больше экрана (1.08), потому что размытие
+                // осветляет края — так они остаются за пределами экрана.
                 Image("Backdrop")
                     .resizable()
-                    .frame(width: geo.size.width, height: geo.size.height)
+                    .frame(width: geo.size.width * 1.08, height: geo.size.height * 1.08)
+                    .blur(radius: 2.5)
 
                 Color.black.opacity(0.10)
 
