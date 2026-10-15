@@ -1,8 +1,9 @@
 {
   "images" : [
     {
-      "filename" : "backdrop.jpg",
-      "idiom" : "universal"
+      "filename" : "backdrop@3x.jpg",
+      "idiom" : "universal",
+      "scale" : "3x"
     }
   ],
   "info" : {

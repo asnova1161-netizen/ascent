@@ -11,7 +11,7 @@ struct RainView: View {
 
     /// Длительность полного цикла. Каждая капля за цикл пролетает экран
     /// целое число раз (cycles), поэтому стык цикла не виден.
-    private let cycle: Double = 6.0
+    private let cycle: Double = 13.0
 
     var body: some View {
         ZStack {
@@ -19,17 +19,19 @@ struct RainView: View {
             RainShape(phase: phase, count: 130, seed: 1,
                       cyclesMin: 5, cyclesMax: 9,
                       lengthMin: 7, lengthMax: 20,
-                      widthMin: 0.6, widthMax: 1.1)
+                      widthMin: 0.8, widthMax: 1.3)
                 .fill(Color(red: 0.80, green: 0.86, blue: 0.97))
                 .opacity(0.16)
+                .blur(radius: 0.5)   // сглаживает края, иначе капли в пиксель
 
             // ближний план: длинные заметные струи
             RainShape(phase: phase, count: 62, seed: 2,
                       cyclesMin: 6, cyclesMax: 11,
                       lengthMin: 14, lengthMax: 36,
-                      widthMin: 1.0, widthMax: 1.8)
+                      widthMin: 1.2, widthMax: 2.1)
                 .fill(Color(red: 0.88, green: 0.93, blue: 1.0))
                 .opacity(0.30)
+                .blur(radius: 0.7)
         }
         .allowsHitTesting(false)
         .onAppear {
