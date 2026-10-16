@@ -115,8 +115,8 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
 // причину в общий журнал, который потом показывает само приложение.
 static void AscentHUDSignalHandler(int signalNumber)
 {
-    char buffer[160];
-    int length = snprintf(buffer, sizeof(buffer), "!!! HUD pid=%d убит сигналом %d\n", (int)getpid(), signalNumber);
+    char buffer[192];
+    int length = snprintf(buffer, sizeof(buffer), "[HUD] !!! HUD pid=%d убит сигналом %d\n", (int)getpid(), signalNumber);
     if (length > 0) {
         AscentHUDLogRaw(buffer);
     }
@@ -160,6 +160,17 @@ int main(int argc, char *argv[])
         }
 
         if (isHelper) {
+            // Помечаем строки этого процесса, чтобы в общем журнале было
+            // видно, что писал именно оверлей.
+            AscentSetProcessMode([NSString stringWithUTF8String:mode]);
+            if (strcmp(mode, "-hud") == 0) {
+                AscentSetLogPrefix(@"[HUD] ");
+            } else if (strcmp(mode, "-check") == 0) {
+                AscentSetLogPrefix(@"[check] ");
+            } else {
+                AscentSetLogPrefix(@"[exit] ");
+            }
+
             AscentHUDLog(@"main: режим %s, pid=%d uid=%d euid=%d, каталог состояния=%s",
                          mode, (int)getpid(), (int)getuid(), (int)geteuid(),
                          AscentStateDirectory().UTF8String);
@@ -216,6 +227,10 @@ int main(int argc, char *argv[])
             AscentHUDLog(@"-hud: старт pid=%@, PID-файл %@ -> %@ (error=%@)",
                          pidString, pidPath, pidWritten ? @"записан" : @"НЕ ЗАПИСАН", pidError);
 
+            // Только чтение собственной подписи — ничего не загружает, поэтому
+            // безопасно писать это до инициализации сервисов.
+            AscentHUDLog(@"-hud: entitlements:\n%@", AscentOwnEntitlements() ?: @"(не прочитались)");
+
             [UIScreen initialize];
             CFRunLoopGetCurrent();
 
@@ -271,6 +286,10 @@ int main(int argc, char *argv[])
 
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
             AscentHUDLog(@"-hud: __completeAndRunAsPlugin ок, уходим в run loop");
+
+            // Пробы приватных API — уже после инициализации, чтобы dlopen
+            // фреймворков не повлиял на порядок запуска сервисов.
+            AscentHUDLog(@"-hud: пробы приватных API:\n%@", AscentProbeReport());
 
             // ВАЖНО: здесь больше нет watchdog'а по родителю. Оверлей должен
             // переживать закрытие приложения ascent и гаснуть только по Exit.

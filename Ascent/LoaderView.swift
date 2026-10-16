@@ -35,7 +35,9 @@ struct LoaderView: View {
                 // Когда поднят HUD-процесс, квадрат и панель рисует ОН (поверх
                 // всех приложений). Внутри app их тогда не дублируем — иначе
                 // получалось бы два квадрата: один в приложении, другой поверх.
-                if state.showing && !state.hudRunning {
+                // Пока HUD не подтверждён, показываем квадрат внутри app, чтобы
+                // он не пропадал во время запуска.
+                if state.engaged && !state.showing {
                     trigger(size: size, top: top, bottom: bottom)
                         .zIndex(3)
 
@@ -45,10 +47,21 @@ struct LoaderView: View {
                     }
                 }
 
-                // Диагностика: появляется только если HUD-процесс не поднялся,
-                // и показывает журнал запуска (на каком шаге он отвалился).
-                if let log = state.hudLog, !log.isEmpty {
-                    hudDiagnostics(text: log)
+                // Версия iOS — поверх всего, но не мешает нажатиям.
+                Text("iOS \(UIDevice.current.systemVersion)")
+                    .font(.system(size: 12.5, weight: .bold))
+                    .foregroundColor(Color.white.opacity(0.35))
+                    .shadow(color: Color.black.opacity(0.5), radius: 3, x: 0, y: 1)
+                    .padding(.leading, 16)
+                    .padding(.top, top + 6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .allowsHitTesting(false)
+                    .zIndex(10)
+
+                // Отладочное окно: длинный тап по «ascent» или автооткрытие,
+                // если оверлей не поднялся.
+                if state.debugVisible {
+                    DebugOverlay(state: state, topInset: top, bottomInset: bottom)
                         .zIndex(20)
                 }
             }
@@ -77,32 +90,6 @@ struct LoaderView: View {
                            initialOrigin: OverlayStore.origin(for: "trigger"),
                            onOriginChange: { OverlayStore.setOrigin($0, for: "trigger") })
             .offset(x: baseX, y: baseY)
-    }
-
-    // MARK: - Диагностика
-
-    private func hudDiagnostics(text: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("HUD не запустился — журнал:")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.white)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(text)
-                        .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(Color(white: 0.92))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-        .padding(8)
-        .frame(height: 200)
-        .background(Color.black.opacity(0.8))
-        .cornerRadius(10)
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 
     // MARK: - Меню
@@ -150,6 +137,10 @@ private struct LoaderContent: View {
                 .foregroundColor(.white)
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
                 .offset(y: -26)
+                // Отладочное окно: длинный тап по заголовку.
+                .onLongPressGesture(minimumDuration: 0.6) {
+                    state.toggleDebug()
+                }
 
             startButton
                 .padding(.top, 40)

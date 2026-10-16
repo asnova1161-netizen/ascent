@@ -15,7 +15,7 @@ BOOL IsHUDEnabled(void);
 /// Включить/выключить оверлей.
 ///
 /// YES — поднять HUD-процесс (если он ещё не запущен, без дублей).
-/// NO  — погасить HUD-процесс.
+/// NO  — погасить HUD-процесс и удалить PID-файл.
 void SetHUDEnabled(BOOL isEnabled);
 
 NSUserDefaults *GetStandardUserDefaults(void);
@@ -34,10 +34,12 @@ NSString *AscentPIDFilePath(void);
 /// Удалить PID-файл (перед выходом HUD-процесса).
 void AscentRemovePIDFile(void);
 
-#pragma mark - Диагностика запуска оверлея
+/// PID процесса-оверлея из PID-файла (0, если файла нет или он пуст).
+pid_t AscentHUDProcessID(void);
 
-/// Записать строку в журнал оверлея (его читает главное приложение и
-/// показывает, если HUD почему-то не поднялся).
+#pragma mark - Журнал
+
+/// Записать строку в журнал оверлея.
 void AscentHUDLogMessage(NSString *message);
 void AscentHUDLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 
@@ -45,11 +47,37 @@ void AscentHUDLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 /// сигналов (падение HUD-процесса).
 void AscentHUDLogRaw(const char *text);
 
+/// Метка процесса в журнале: "[HUD] ", "[check] " и т.п.
+void AscentSetLogPrefix(NSString *prefix);
+
 /// Очистить журнал (перед новым запуском оверлея).
 void AscentHUDLogReset(void);
 
 /// Прочитать журнал целиком.
 NSString *AscentHUDLogText(void);
+
+/// Последние `maxLines` строк журнала.
+NSString *AscentHUDLogTail(int maxLines);
+
+#pragma mark - Диагностика запуска
+
+/// В каком режиме запущен ЭТОТ процесс: "app", "-hud", "-check", "-exit".
+NSString *AscentProcessMode(void);
+void AscentSetProcessMode(NSString *mode);
+
+/// Результат последнего posix_spawn (для отладочного окна).
+int AscentLastSpawnReturnCode(void);
+int AscentLastSpawnErrno(void);
+pid_t AscentLastSpawnPID(void);
+NSString *AscentLastSpawnMode(void);
+
+/// Отчёт «какие приватные символы и классы резолвятся» (список ok/нет).
+NSString *AscentProbeReport(void);
+BOOL AscentProbeSymbol(const char *name);
+BOOL AscentProbeClass(const char *name);
+
+/// Какие entitlements реально лежат в подписи этого бинарника (или nil).
+NSString *AscentOwnEntitlements(void);
 
 #ifdef __cplusplus
 }
