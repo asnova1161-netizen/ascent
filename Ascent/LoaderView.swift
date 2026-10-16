@@ -30,8 +30,12 @@ struct LoaderView: View {
                 LoaderContent(state: state, topInset: top, bottomInset: bottom)
 
                 // квадратик и меню живут, пока их не убрали кнопкой Exit:
-                // unload останавливает лоадер, но НЕ прячет их
-                if state.showing {
+                // unload останавливает лоадер, но НЕ прячет их.
+                //
+                // Когда поднят HUD-процесс, квадрат и панель рисует ОН (поверх
+                // всех приложений). Внутри app их тогда не дублируем — иначе
+                // получалось бы два квадрата: один в приложении, другой поверх.
+                if state.showing && !state.hudRunning {
                     trigger(size: size, top: top, bottom: bottom)
                         .zIndex(3)
 
@@ -62,7 +66,9 @@ struct LoaderView: View {
                            minY: area.minY - baseY,
                            maxY: max(area.maxY - side - baseY, area.minY - baseY),
                            isOpen: state.menuOpen,
-                           action: state.toggleMenu)
+                           action: state.toggleMenu,
+                           initialOrigin: OverlayStore.origin(for: "trigger"),
+                           onOriginChange: { OverlayStore.setOrigin($0, for: "trigger") })
             .offset(x: baseX, y: baseY)
     }
 
@@ -88,7 +94,9 @@ struct LoaderView: View {
                          maxY: max(area.maxY - panelHeight - baseY, area.minY - baseY),
                          onClose: state.closeMenu,
                          onUnload: state.unload,
-                         telegramURL: URL(string: "https://t.me/ascentios")!)
+                         telegramURL: URL(string: "https://t.me/ascentios")!,
+                         initialOrigin: OverlayStore.origin(for: "panel"),
+                         onOriginChange: { OverlayStore.setOrigin($0, for: "panel") })
             .offset(x: baseX, y: baseY)
     }
 }

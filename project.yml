@@ -36,6 +36,7 @@ targets:
         ENABLE_BITCODE: "NO"
         SWIFT_EMIT_LOC_STRINGS: "NO"
         DEAD_CODE_STRIPPING: "NO"
+        SWIFT_OBJC_BRIDGING_HEADER: Ascent/Ascent-Bridging-Header.h
 
 schemes:
   Ascent:

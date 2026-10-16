@@ -13,10 +13,15 @@ struct MenuTrigger: View {
     let isOpen: Bool
     let action: () -> Void
 
+    /// Откуда стартует квадрат (читается из общего файла позиций оверлея).
+    let initialOrigin: CGSize
+    /// Куда квадрат утащили — чтобы сохранить это между запусками.
+    let onOriginChange: (CGSize) -> Void
+
     static let side: CGFloat = 54
 
     /// Куда кнопку уже утащили (сохраняется между перетаскиваниями).
-    @State private var origin: CGSize = .zero
+    @State private var origin: CGSize
 
     /// Смещение текущего перетаскивания — живёт только пока палец на экране.
     @State private var drag: CGSize = .zero
@@ -25,13 +30,17 @@ struct MenuTrigger: View {
     private static let tapLimit: CGFloat = 25
 
     init(minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat,
-         isOpen: Bool, action: @escaping () -> Void) {
+         isOpen: Bool, action: @escaping () -> Void,
+         initialOrigin: CGSize = .zero,
+         onOriginChange: @escaping (CGSize) -> Void = { _ in }) {
         self.minX = minX
         self.maxX = maxX
         self.minY = minY
         self.maxY = maxY
         self.isOpen = isOpen
         self.action = action
+        self.onOriginChange = onOriginChange
+        self._origin = State(initialValue: initialOrigin)
     }
 
     var body: some View {
@@ -81,6 +90,7 @@ struct MenuTrigger: View {
                 if moved(value.translation) {
                     origin = clamp(CGSize(width: origin.width + value.translation.width,
                                           height: origin.height + value.translation.height))
+                    onOriginChange(origin)
                 } else {
                     action()
                 }

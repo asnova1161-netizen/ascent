@@ -6,6 +6,7 @@
 #import <unistd.h>
 #import <signal.h>
 #import <stdlib.h>
+#import <string.h>
 #import <dlfcn.h>
 #import <dispatch/dispatch.h>
 
@@ -15,8 +16,6 @@
 #import "BackboardServices.h"
 #import "AXEventRepresentation.h"
 #import "UIApplication+Private.h"
-
-#define PID_PATH "/var/mobile/Library/Caches/ch.xxtou.hudapp.pid"
 
 // Сервисы GraphicsServices/BackBoardServices не слинкованы в наш бинарь
 // (они приватные), поэтому символы достаём из уже загруженных образов.
@@ -37,33 +36,29 @@ static void *AscentResolvePrivateSymbol(const char *name)
     return symbol;
 }
 
-// Если родительский процесс (само приложение) умер, HUD больше не нужен —
-// сам себя завершаем. Иначе «квадратик» остаётся висеть после закрытия app.
-static void AscentStartParentWatchdog(void)
+#pragma mark - HID -> синтетические касания
+
+// Accessibility-окно не получает касаний от window-сервера, поэтому мы
+// подписываемся на глобальный поток HID-событий и превращаем их в обычные
+// UITouch'и для нашего окна. Событие при этом не «съедается» — как только
+// палец попадает в квадрат/панель, окно оверлея и так перехватывает касание
+// (см. -[HUDMainWindow _ignoresHitTest]).
+static Class AscentAXEventRepresentationClass(void)
 {
-    pid_t parentPid = getppid();
-    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
-    dispatch_source_set_timer(timer,
-                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
-                              (uint64_t)(1 * NSEC_PER_SEC),
-                              (uint64_t)(0.1 * NSEC_PER_SEC));
-    dispatch_source_set_event_handler(timer, ^{
-        // Когда приложение закрывается, HUD переподчиняется launchd (pid 1).
-        if (getppid() != parentPid) {
-            exit(0);
-        }
+    static Class cls = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Без явной загрузки фреймворка objc_getClass вернёт nil и касаний
+        // не будет вообще (окно видно, но не нажимается).
+        [[NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/AccessibilityUtilities.framework"] load];
+        cls = objc_getClass("AXEventRepresentation");
     });
-    dispatch_resume(timer);
+    return cls;
 }
 
-// Accessibility-hosted окно не получает касаний от window-сервера, поэтому
-// подписываемся на глобальный поток HID-событий и превращаем их в
-// синтетические UITouch'и для нашего окна. События при этом продолжают
-// идти и в приложение под нами — то есть «клик сквозь» сохраняется.
 static void AscentHIDEventCallback(void *target, void *refcon, void *service, void *event)
 {
-    Class repClass = objc_getClass("AXEventRepresentation");
+    Class repClass = AscentAXEventRepresentationClass();
     if (repClass == nil) {
         return;
     }
@@ -80,17 +75,12 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     BOOL isTouchCancel = rep.isCancel;
     BOOL isTouchUp = rep.isLift || rep.isInRange || rep.isInRangeLift;
 
-    NSInteger pointerId = 0;
-    NSArray<AXEventPathInfoRepresentation *> *paths = rep.handInfo.paths;
-    if (paths.count > 0) {
-        pointerId = [paths firstObject].pathIdentity;
-    }
+    NSInteger pointerId = [[[[rep handInfo] paths] firstObject] pathIdentity];
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIApplication *app = [UIApplication sharedApplication];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        UIWindow *keyWindow = app.windows.firstObject;
+        UIWindow *keyWindow = [[[UIApplication sharedApplication] windows] firstObject];
 #pragma clang diagnostic pop
         if (keyWindow == nil) {
             return;
@@ -105,30 +95,76 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
             phase = UITouchPhaseMoved;
         } else if (isTouchCancel) {
             phase = UITouchPhaseCancelled;
-        } else if (isTouchUp) {
-            phase = UITouchPhaseEnded;
         }
 
         if (pointerId > 0) {
             [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
                           atGlobalCoordinate:location
                               withTouchPhase:phase
-                                    inWindow:keyWindow
+                                    inWindow:[UIApplication sharedApplication].windows.firstObject
                                       onView:keyView];
         }
     });
 }
 
+#pragma mark - main
+
 int main(int argc, char *argv[])
 {
     @autoreleasepool
     {
-        if (argc > 1 && strcmp(argv[1], "-hud") == 0)
+        const char *mode = (argc > 1) ? argv[1] : NULL;
+        BOOL isHelper = (mode != NULL) && (strcmp(mode, "-hud") == 0 ||
+                                           strcmp(mode, "-check") == 0 ||
+                                           strcmp(mode, "-exit") == 0);
+
+        // Каталог общих файлов состояния (PID + позиции) приходит из главного
+        // процесса: у root-процесса свой «дом», общий путь надо знать точно.
+        if (isHelper && argc > 2 && argv[2] != NULL) {
+            NSString *dir = [NSString stringWithUTF8String:argv[2]];
+            AscentSetStateDirectory(dir);
+        }
+
+        if (mode != NULL && strcmp(mode, "-check") == 0)
         {
+            // EXIT_FAILURE — оверлей жив, EXIT_SUCCESS — нет.
+            NSString *pidString = [NSString stringWithContentsOfFile:AscentPIDFilePath()
+                                                            encoding:NSUTF8StringEncoding
+                                                               error:nil];
+            if (pidString.length > 0) {
+                pid_t pid = (pid_t)[pidString intValue];
+                if (pid > 0 && kill(pid, 0) == 0) {
+                    return EXIT_FAILURE;
+                }
+            }
+            return EXIT_SUCCESS;
+        }
+
+        if (mode != NULL && strcmp(mode, "-exit") == 0)
+        {
+            NSString *pidString = [NSString stringWithContentsOfFile:AscentPIDFilePath()
+                                                            encoding:NSUTF8StringEncoding
+                                                               error:nil];
+            if (pidString.length > 0) {
+                pid_t pid = (pid_t)[pidString intValue];
+                if (pid > 0) {
+                    kill(pid, SIGKILL);
+                }
+            }
+            AscentRemovePIDFile();
+            return EXIT_SUCCESS;
+        }
+
+        if (mode != NULL && strcmp(mode, "-hud") == 0)
+        {
+            // Запоминаем свой PID: по нему главный процесс понимает, что
+            // оверлей уже поднят, и гасит его по Exit.
             pid_t pid = getpid();
-            NSString *pidPath = [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:@"ch.xxtou.hudapp.pid"];
             NSString *pidString = [NSString stringWithFormat:@"%d", pid];
-            [pidString writeToFile:pidPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [pidString writeToFile:AscentPIDFilePath()
+                        atomically:YES
+                          encoding:NSUTF8StringEncoding
+                             error:nil];
 
             [UIScreen initialize];
             CFRunLoopGetCurrent();
@@ -146,8 +182,11 @@ int main(int argc, char *argv[])
             UIApplicationInitialize();
 
             UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
-            id<UIApplicationDelegate> appDelegate = [[objc_getClass("HUDMainApplicationDelegate") alloc] init];
-            [UIApplication.sharedApplication setDelegate:appDelegate];
+            // Делегат держим статически: UIApplication.delegate — assign, а не
+            // strong, и без этого его бы освободили сразу после setDelegate:.
+            static id<UIApplicationDelegate> gHUDAppDelegate = nil;
+            gHUDAppDelegate = [[objc_getClass("HUDMainApplicationDelegate") alloc] init];
+            [UIApplication.sharedApplication setDelegate:gHUDAppDelegate];
             [UIApplication.sharedApplication _accessibilityInit];
 
             [NSRunLoop currentRunLoop];
@@ -169,13 +208,15 @@ int main(int argc, char *argv[])
             }
 
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
-            AscentStartParentWatchdog();
+
+            // ВАЖНО: здесь больше нет watchdog'а по родителю. Оверлей должен
+            // переживать закрытие приложения ascent и гаснуть только по Exit.
             CFRunLoopRun();
             return EXIT_SUCCESS;
         }
     }
 
-    // Normal (non-HUD) launch: let UIKit start the app with our Swift delegate.
+    // Обычный запуск: UIKit стартует приложение с нашим Swift-делегатом.
     Class delegateClass = NSClassFromString(@"AppDelegate");
     return UIApplicationMain(argc, argv, nil, delegateClass ? NSStringFromClass(delegateClass) : nil);
 }

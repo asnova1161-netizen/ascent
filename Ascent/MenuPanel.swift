@@ -22,8 +22,13 @@ struct MenuPanel: View {
     let onUnload: () -> Void
     let telegramURL: URL
 
+    /// Откуда стартует панель (читается из общего файла позиций оверлея).
+    let initialOrigin: CGSize
+    /// Куда панель утащили — чтобы сохранить это между запусками.
+    let onOriginChange: (CGSize) -> Void
+
     /// Куда панель уже утащили (сохраняется между перетаскиваниями).
-    @State private var origin: CGSize = .zero
+    @State private var origin: CGSize
     /// Смещение текущего перетаскивания — живёт только пока палец на экране.
     ///
     /// Именно `@GestureState`, а не `@State`: SwiftUI сам обнуляет его, когда
@@ -44,7 +49,9 @@ struct MenuPanel: View {
          width: CGFloat, height: CGFloat,
          minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat,
          onClose: @escaping () -> Void, onUnload: @escaping () -> Void,
-         telegramURL: URL) {
+         telegramURL: URL,
+         initialOrigin: CGSize = .zero,
+         onOriginChange: @escaping (CGSize) -> Void = { _ in }) {
         self._tab = tab
         self.isRunning = isRunning
         self.width = width
@@ -56,6 +63,8 @@ struct MenuPanel: View {
         self.onClose = onClose
         self.onUnload = onUnload
         self.telegramURL = telegramURL
+        self.onOriginChange = onOriginChange
+        self._origin = State(initialValue: initialOrigin)
     }
 
     var body: some View {
@@ -113,6 +122,7 @@ struct MenuPanel: View {
                 guard value.startLocation.y <= headerHeight else { return }
                 origin = clamp(CGSize(width: origin.width + value.translation.width,
                                       height: origin.height + value.translation.height))
+                onOriginChange(origin)
             }
     }
 

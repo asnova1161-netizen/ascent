@@ -1,54 +1,71 @@
 import SwiftUI
+import UIKit
 import Darwin
 
 /// Состояние приложения: лоадер и мод-меню.
 ///
-/// Отдельный объект, а не поля прямо во View: благодаря этому SwiftUI не
-/// перерисовывает тяжёлые статичные слои (фон, дождь, лоадер), когда мы
-/// таскаем меню или кнопку — от этого всё заедало.
+/// Квадрат и панель теперь живут в отдельном HUD-процессе, который висит
+/// поверх всех приложений. Этот объект только управляет им (Start/Exit) и
+/// знает, поднят ли оверлей прямо сейчас.
 final class LoaderState: ObservableObject {
-    /// Загрузчик работает. Меняется по Start / Exit / unload.
+    /// Лоадер «крутится». Меняется по Start / Exit / unload.
     @Published var running = false
-    /// Квадратик и меню вообще есть на экране (Start включает, Exit убирает).
+    /// Оверлей вообще включён (кнопка показывает Exit вместо Start).
     @Published var showing = false
+    /// HUD-процесс подтверждённо жив (по нему прячем дубль квадрата внутри app).
+    @Published var hudRunning = false
     @Published var menuOpen = false
     @Published var tab = 0
 
+    private var activationObserver: NSObjectProtocol?
+
+    init() {
+        // Приложение могли перезапустить, пока оверлей уже висел, а из панели
+        // оверлей могли погасить — синхронизируемся при каждом возврате в app.
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshFromProcess()
+        }
+
+        // Синхронизацию делаем асинхронно: проверка состояния порождает
+        // вспомогательный процесс, и не хочется тормозить первый кадр app.
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshFromProcess()
+        }
+    }
+
+    deinit {
+        if let activationObserver = activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+        }
+    }
+
     /// Кнопка Start/Exit.
-    ///
-    /// Start: лоадер пошёл, вылез квадратик и открылось меню.
-    /// Exit: лоадер встал, и меню вместе с квадратиком пропали —
-    /// вернуть их можно только новым Start.
     func tapStart() {
         if showing { hideAll() } else { startLoader() }
     }
 
-    /// PID HUD-процесса, который мы запустили (0 — не запущен).
-    private var hudPid: pid_t = 0
-
     private func startLoader() {
         running = true
         showing = true
-        menuOpen = false       // после Start появляется ТОЛЬКО квадратик
+        menuOpen = false // после Start появляется ТОЛЬКО квадратик
 
-        // На всякий случай гасим уже висящий HUD, чтобы не плодить окна.
-        killHUD()
+        // Поднимаем HUD-процесс. Повторный Start дублей не создаёт (проверка
+        // по PID-файлу внутри SetHUDEnabled).
+        SetHUDEnabled(true)
+        // Считаем оверлей поднятым сразу: HUD-процессу нужно мгновение, чтобы
+        // записать PID, и проверка «в лоб» успела бы вернуть false и мигнуть
+        // лишним квадратом внутри приложения.
+        hudRunning = true
 
-        // Запускаем HUD процесс
-        let execURL = Bundle.main.executableURL
-        guard let path = execURL?.path else { return }
-        var pid: pid_t = 0
-        var argv: [UnsafeMutablePointer<CChar>?] = [
-            strdup(execURL?.lastPathComponent ?? "Ascent"),
-            strdup("-hud"),
-            nil
-        ]
-        let result = posix_spawn(&pid, path, nil, nil, &argv, nil)
-        for arg in argv {
-            if let arg = arg { free(arg) }
-        }
-        if result == 0 {
-            hudPid = pid
+        // Через секунду перепроверим по-настоящему: если HUD почему-то не
+        // поднялся, покажем квадрат внутри app как запасной вариант.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self, self.showing else { return }
+            self.hudRunning = IsHUDEnabled()
         }
     }
 
@@ -57,23 +74,18 @@ final class LoaderState: ObservableObject {
         running = false
         showing = false
         menuOpen = false
-        killHUD()
+        SetHUDEnabled(false)
+        hudRunning = false
     }
 
-    /// Гасит HUD-процесс.
-    ///
-    /// Мы сами его породили, поэтому просто шлём SIGKILL по сохранённому PID.
-    /// Никаких внешних утилит вроде `killall` — в песочнице они недоступны,
-    /// а сам HUD дополнительно завершается сам, когда умирает приложение
-    /// (см. watchdog в HUDApp.mm).
-    private func killHUD() {
-        guard hudPid > 0 else { return }
-        _ = kill(hudPid, SIGKILL)
-        hudPid = 0
+    private func refreshFromProcess() {
+        let running = IsHUDEnabled()
+        hudRunning = running
+        showing = running
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
-    /// ОСТАЮТСЯ на экране — чтобы можно было запустить снова или потаскать.
+    /// ОСТАЮТСЯ на экране.
     func unload() {
         running = false
     }
