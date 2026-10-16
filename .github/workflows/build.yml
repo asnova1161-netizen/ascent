@@ -16,6 +16,10 @@ jobs:
       - name: Установить XcodeGen
         run: brew install xcodegen
 
+      - name: Установить ldid
+        continue-on-error: true
+        run: brew install ldid || true
+
       - name: Выбрать свежий Xcode
         continue-on-error: true
         run: |

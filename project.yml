@@ -35,6 +35,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         ENABLE_BITCODE: "NO"
         SWIFT_EMIT_LOC_STRINGS: "NO"
+        DEAD_CODE_STRIPPING: "NO"
 
 schemes:
   Ascent:

@@ -1,10 +1,5 @@
 #import "HUDRootViewController.h"
-#import <SwiftUI/SwiftUI.h>
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wobjc-module-import"
-#import "Ascent-Swift.h"
-#pragma clang diagnostic pop
+#import <UIKit/UIKit.h>
 
 @implementation HUDRootViewController
 
@@ -14,42 +9,34 @@ static BOOL _passthroughMode = NO;
     return _passthroughMode;
 }
 
++ (void)setPassthroughMode:(BOOL)value {
+    _passthroughMode = value;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor clearColor];
-    
-    Class HUDContainerViewClass = NSClassFromString(@"Ascent.HUDContainerView");
-    id container = nil;
-    if (HUDContainerViewClass) {
-        container = [[HUDContainerViewClass alloc] init];
-        if (![container respondsToSelector:@selector(body)]) {
-            // Try wrapper
-            Class wrapper = NSClassFromString(@"Ascent.HUDContainerViewWrapper");
-            id w = [[wrapper alloc] init];
-            if ([w respondsToSelector:@selector(makeView)]) {
-                container = [w makeView];
-            }
-        }
-    }
-    Class UIHostingControllerClass = NSClassFromString(@"_TtGC7SwiftUI19UIHostingControllerGVS_15ModifiedContentVS_7AnyViewVS_12RootModifier__");
-    if (UIHostingControllerClass == nil) {
-        UIHostingControllerClass = NSClassFromString(@"UIHostingController");
-    }
-    id hosting = [[UIHostingControllerClass alloc] initWithRootView:container];
-    if ([hosting respondsToSelector:@selector(setViewBackgroundColor:)]) {
-        [hosting setViewBackgroundColor:[UIColor clearColor]];
-    } else {
-        [hosting view].backgroundColor = [UIColor clearColor];
-    }
-    
+
+    // The SwiftUI hosting controller is generic, so it cannot be referenced
+    // statically from Objective-C. Ask the Swift factory to build it for us.
+    id factory = (id)NSClassFromString(@"Ascent.HUDHostFactory");
+    if (factory == nil) { factory = (id)NSClassFromString(@"HUDHostFactory"); }
+    if (factory == nil) { return; }
+
+    id hostingObject = [factory performSelector:@selector(makeHostingController)];
+    if (hostingObject == nil) { return; }
+
+    UIViewController *hosting = (UIViewController *)hostingObject;
+
     [self addChildViewController:hosting];
-    [self.view addSubview:[hosting view]];
-    [[hosting view] setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [self.view addSubview:hosting.view];
+    hosting.view.backgroundColor = [UIColor clearColor];
+    hosting.view.translatesAutoresizingMaskIntoConstraints = NO;
     [NSLayoutConstraint activateConstraints:@[
-        [[[hosting view] topAnchor] constraintEqualToAnchor:self.view.topAnchor],
-        [[[hosting view] leadingAnchor] constraintEqualToAnchor:self.view.leadingAnchor],
-        [[[hosting view] trailingAnchor] constraintEqualToAnchor:self.view.trailingAnchor],
-        [[[hosting view] bottomAnchor] constraintEqualToAnchor:self.view.bottomAnchor],
+        [hosting.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [hosting.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [hosting.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [hosting.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
     [hosting didMoveToParentViewController:self];
 }

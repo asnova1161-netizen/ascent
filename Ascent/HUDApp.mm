@@ -1,3 +1,4 @@
+#import <UIKit/UIKit.h>
 #import <notify.h>
 #import <mach-o/dyld.h>
 #import <sys/utsname.h>
@@ -22,21 +23,24 @@ int main(int argc, char *argv[])
             NSString *pidPath = [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:@"ch.xxtou.hudapp.pid"];
             NSString *pidString = [NSString stringWithFormat:@"%d", pid];
             [pidString writeToFile:pidPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-            
+
             [UIScreen initialize];
             CFRunLoopGetCurrent();
-            
+
             UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
             id<UIApplicationDelegate> appDelegate = [[objc_getClass("HUDMainApplicationDelegate") alloc] init];
             [UIApplication.sharedApplication setDelegate:appDelegate];
             [UIApplication.sharedApplication _accessibilityInit];
-            
+
             [NSRunLoop currentRunLoop];
-            
+
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
             CFRunLoopRun();
             return EXIT_SUCCESS;
         }
     }
-    return 0;
+
+    // Normal (non-HUD) launch: let UIKit start the app with our Swift delegate.
+    Class delegateClass = NSClassFromString(@"AppDelegate");
+    return UIApplicationMain(argc, argv, nil, delegateClass ? NSStringFromClass(delegateClass) : nil);
 }
