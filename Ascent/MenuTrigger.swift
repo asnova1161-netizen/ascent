@@ -39,6 +39,7 @@ struct MenuTrigger: View {
         self.maxY = maxY
         self.isOpen = isOpen
         self.action = action
+        self.initialOrigin = initialOrigin
         self.onOriginChange = onOriginChange
         self._origin = State(initialValue: initialOrigin)
     }

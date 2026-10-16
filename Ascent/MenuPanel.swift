@@ -63,6 +63,7 @@ struct MenuPanel: View {
         self.onClose = onClose
         self.onUnload = onUnload
         self.telegramURL = telegramURL
+        self.initialOrigin = initialOrigin
         self.onOriginChange = onOriginChange
         self._origin = State(initialValue: initialOrigin)
     }
