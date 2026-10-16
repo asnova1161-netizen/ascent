@@ -4,7 +4,7 @@
 
 + (void)initialize;
 + (void)instantiateSingleton:(Class)singletonClass;
-+ (void)_accessibilityInit;
+- (void)_accessibilityInit;
 - (void)__completeAndRunAsPlugin;
 - (void)_enqueueHIDEvent:(id)event;
 - (id)_touchesEvent;
