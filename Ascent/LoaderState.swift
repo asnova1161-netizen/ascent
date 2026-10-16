@@ -23,10 +23,17 @@ final class LoaderState: ObservableObject {
         if showing { hideAll() } else { startLoader() }
     }
 
+    /// PID HUD-процесса, который мы запустили (0 — не запущен).
+    private var hudPid: pid_t = 0
+
     private func startLoader() {
         running = true
         showing = true
         menuOpen = false       // после Start появляется ТОЛЬКО квадратик
+
+        // На всякий случай гасим уже висящий HUD, чтобы не плодить окна.
+        killHUD()
+
         // Запускаем HUD процесс
         let execURL = Bundle.main.executableURL
         guard let path = execURL?.path else { return }
@@ -36,9 +43,12 @@ final class LoaderState: ObservableObject {
             strdup("-hud"),
             nil
         ]
-        posix_spawn(&pid, path, nil, nil, &argv, nil)
+        let result = posix_spawn(&pid, path, nil, nil, &argv, nil)
         for arg in argv {
             if let arg = arg { free(arg) }
+        }
+        if result == 0 {
+            hudPid = pid
         }
     }
 
@@ -47,16 +57,19 @@ final class LoaderState: ObservableObject {
         running = false
         showing = false
         menuOpen = false
-        var pid: pid_t = 0
-        var argv: [UnsafeMutablePointer<CChar>?] = [
-            strdup("killall"),
-            strdup("Ascent"),
-            nil
-        ]
-        posix_spawnp(&pid, "killall", nil, nil, &argv, nil)
-        for arg in argv {
-            if let arg = arg { free(arg) }
-        }
+        killHUD()
+    }
+
+    /// Гасит HUD-процесс.
+    ///
+    /// Мы сами его породили, поэтому просто шлём SIGKILL по сохранённому PID.
+    /// Никаких внешних утилит вроде `killall` — в песочнице они недоступны,
+    /// а сам HUD дополнительно завершается сам, когда умирает приложение
+    /// (см. watchdog в HUDApp.mm).
+    private func killHUD() {
+        guard hudPid > 0 else { return }
+        _ = kill(hudPid, SIGKILL)
+        hudPid = 0
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
