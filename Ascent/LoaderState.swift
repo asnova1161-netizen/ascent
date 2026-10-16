@@ -25,8 +25,7 @@ final class LoaderState: ObservableObject {
     private func startLoader() {
         running = true
         showing = true
-        menuOpen = false
-        HUDLauncher.shared.launchHUD()
+        menuOpen = false       // после Start появляется ТОЛЬКО квадратик
     }
 
     /// Всё убираем с экрана (это делает Exit).
@@ -34,14 +33,12 @@ final class LoaderState: ObservableObject {
         running = false
         showing = false
         menuOpen = false
-        HUDLauncher.shared.killAllHUD()
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
     /// ОСТАЮТСЯ на экране — чтобы можно было запустить снова или потаскать.
     func unload() {
         running = false
-        HUDLauncher.shared.hideHUD()
     }
 
     func toggleMenu() {

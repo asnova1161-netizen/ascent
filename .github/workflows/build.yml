@@ -58,9 +58,6 @@ jobs:
           mkdir -p Payload
           cp -R "$APP" Payload/
           rm -rf "Payload/Ascent.app/_CodeSignature"
-          if command -v ldid >/dev/null 2>&1; then
-            ldid -SAscent/Ascent.entitlements Payload/Ascent.app/Ascent 2>/dev/null || true
-          fi
           zip -qry Ascent.tipa Payload
           unzip -l Ascent.tipa | head -n 20
 
