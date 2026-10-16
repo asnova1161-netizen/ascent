@@ -144,6 +144,7 @@ private struct LoaderContent: View {
         }
         .buttonStyle(StartButtonStyle())
         .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 10)
+        .offset(y: 40)          // кнопка Start/Exit чуть ниже центра
     }
 
     private var telegramLink: some View {
@@ -195,7 +196,7 @@ private final class BackdropUIView: UIView {
         backgroundColor = .black
         clipsToBounds = true
 
-        imageView.contentMode = .scaleAspectFill
+        imageView.contentMode = .scaleAspectFit
         imageView.clipsToBounds = true
         imageView.image = UIImage(named: "BackdropBlur")
         addSubview(imageView)
