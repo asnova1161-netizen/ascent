@@ -32,7 +32,6 @@ struct DebugOverlay: View {
                 Text(state.debugText)
                     .font(.system(size: 8.5, design: .monospaced))
                     .foregroundColor(Color(white: 0.92))
-                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
