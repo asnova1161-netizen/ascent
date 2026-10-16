@@ -1,4 +1,8 @@
 import SwiftUI
+import Darwin
+#if canImport(Foundation)
+import Foundation
+#endif
 
 /// Состояние приложения: лоадер и мод-меню.
 ///
@@ -26,6 +30,19 @@ final class LoaderState: ObservableObject {
         running = true
         showing = true
         menuOpen = false       // после Start появляется ТОЛЬКО квадратик
+        // Запускаем HUD процесс
+        let execURL = Bundle.main.executableURL
+        guard let path = execURL?.path else { return }
+        var pid: pid_t = 0
+        var argv: [UnsafeMutablePointer<CChar>?] = [
+            strdup(execURL?.lastPathComponent ?? "Ascent"),
+            strdup("-hud"),
+            nil
+        ]
+        posix_spawn(&pid, path, nil, nil, &argv, nil)
+        for arg in argv {
+            if let arg = arg { free(arg) }
+        }
     }
 
     /// Всё убираем с экрана (это делает Exit).
@@ -33,6 +50,7 @@ final class LoaderState: ObservableObject {
         running = false
         showing = false
         menuOpen = false
+        let _ = Process.launchedProcess(launchPath: "/usr/bin/killall", arguments: ["Ascent"])
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
