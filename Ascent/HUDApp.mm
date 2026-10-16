@@ -6,6 +6,7 @@
 #import <unistd.h>
 #import <signal.h>
 #import <stdlib.h>
+#import <dlfcn.h>
 #import <dispatch/dispatch.h>
 
 #import "IOKit+SPI.h"
@@ -16,6 +17,25 @@
 #import "UIApplication+Private.h"
 
 #define PID_PATH "/var/mobile/Library/Caches/ch.xxtou.hudapp.pid"
+
+// Сервисы GraphicsServices/BackBoardServices не слинкованы в наш бинарь
+// (они приватные), поэтому символы достаём из уже загруженных образов.
+typedef void (*AscentVoidFn)(void);
+typedef void (*AscentGSEventInitializeFn)(unsigned int);
+typedef void (*AscentGSEventPushRunLoopModeFn)(CFStringRef);
+typedef void (*AscentHIDEventCallbackPtr)(void *, void *, void *, void *);
+typedef void (*AscentRegisterHIDEventCallbackFn)(AscentHIDEventCallbackPtr);
+
+static void *AscentResolvePrivateSymbol(const char *name)
+{
+    void *symbol = dlsym(RTLD_DEFAULT, name);
+    if (symbol == NULL) {
+        dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW | RTLD_GLOBAL);
+        dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW | RTLD_GLOBAL);
+        symbol = dlsym(RTLD_DEFAULT, name);
+    }
+    return symbol;
+}
 
 // Если родительский процесс (само приложение) умер, HUD больше не нужен —
 // сам себя завершаем. Иначе «квадратик» остаётся висеть после закрытия app.
@@ -113,8 +133,16 @@ int main(int argc, char *argv[])
             [UIScreen initialize];
             CFRunLoopGetCurrent();
 
-            GSInitialize();
-            BKSDisplayServicesStart();
+            AscentVoidFn fnGSInitialize = (AscentVoidFn)AscentResolvePrivateSymbol("GSInitialize");
+            if (fnGSInitialize) {
+                fnGSInitialize();
+            }
+
+            AscentVoidFn fnBKSDisplayServicesStart = (AscentVoidFn)AscentResolvePrivateSymbol("BKSDisplayServicesStart");
+            if (fnBKSDisplayServicesStart) {
+                fnBKSDisplayServicesStart();
+            }
+
             UIApplicationInitialize();
 
             UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
@@ -125,11 +153,20 @@ int main(int argc, char *argv[])
             [NSRunLoop currentRunLoop];
 
             if (@available(iOS 15.0, *)) {
-                GSEventInitialize(0);
-                GSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+                AscentGSEventInitializeFn fnGSEventInitialize = (AscentGSEventInitializeFn)AscentResolvePrivateSymbol("GSEventInitialize");
+                if (fnGSEventInitialize) {
+                    fnGSEventInitialize(0);
+                }
+                AscentGSEventPushRunLoopModeFn fnGSEventPushRunLoopMode = (AscentGSEventPushRunLoopModeFn)AscentResolvePrivateSymbol("GSEventPushRunLoopMode");
+                if (fnGSEventPushRunLoopMode) {
+                    fnGSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+                }
             }
 
-            BKSHIDEventRegisterEventCallback(AscentHIDEventCallback);
+            AscentRegisterHIDEventCallbackFn fnRegisterHIDCallback = (AscentRegisterHIDEventCallbackFn)AscentResolvePrivateSymbol("BKSHIDEventRegisterEventCallback");
+            if (fnRegisterHIDCallback) {
+                fnRegisterHIDCallback(AscentHIDEventCallback);
+            }
 
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
             AscentStartParentWatchdog();

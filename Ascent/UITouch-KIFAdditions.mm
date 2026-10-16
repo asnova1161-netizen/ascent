@@ -79,8 +79,10 @@
 - (void)kif_setHIDEvent
 {
     IOHIDEventRef event = kif_IOHIDEventWithTouches(@[ self ]);
-    [self _setHidEvent:event];
-    CFRelease(event);
+    if (event != NULL) {
+        [self _setHidEvent:event];
+        CFRelease(event);
+    }
 }
 
 @end
