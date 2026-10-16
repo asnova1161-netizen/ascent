@@ -101,13 +101,10 @@ private struct LoaderContent: View {
         VStack(spacing: 0) {
             Spacer(minLength: 0)
 
-            logoMark
-
             Text("ascent")
                 .font(.system(size: 46, weight: .heavy, design: .rounded))
                 .foregroundColor(Theme.text)
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
-                .padding(.top, 26)
 
             startButton
                 .padding(.top, 40)
@@ -123,41 +120,26 @@ private struct LoaderContent: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var logoMark: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(LinearGradient(colors: [Theme.gold.opacity(0.18), Color.white.opacity(0.02)],
-                                     startPoint: .top, endPoint: .bottom))
-                .frame(width: 72, height: 72)
-                .shadow(color: Theme.amber.opacity(0.35), radius: 22, x: 0, y: 14)
-
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Theme.line, lineWidth: 1)
-                .frame(width: 72, height: 72)
-
-            Image(systemName: "arrow.up")
-                .font(.system(size: 28, weight: .bold))
-                .foregroundColor(Theme.gold)
-        }
-    }
-
     private var startButton: some View {
         Button(action: state.tapStart) {
             Text(state.showing ? "Exit" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
-                .foregroundColor(Theme.onGold)
+                .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(LinearGradient(colors: state.showing ? [Theme.amber, Theme.deepRust]
-                                                                  : [Theme.gold, Theme.amber],
+                        .fill(LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
                                              startPoint: .top, endPoint: .bottom))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Theme.grayLine, lineWidth: 1)
                 )
         }
         .buttonStyle(StartButtonStyle())
-        .shadow(color: Theme.amber.opacity(0.45), radius: 18, x: 0, y: 10)
+        .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 10)
     }
 
     private var telegramLink: some View {
@@ -169,13 +151,14 @@ private struct LoaderContent: View {
                     .font(.system(size: 13, weight: .medium))
                     .kerning(0.4)
             }
-            .foregroundColor(Theme.muted)
+            .foregroundColor(.white)
             .padding(.vertical, 11)
             .padding(.horizontal, 18)
             .background(
                 ZStack {
-                    Capsule().fill(Theme.gold.opacity(0.10))
-                    Capsule().stroke(Theme.line, lineWidth: 1)
+                    Capsule().fill(LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
+                                                  startPoint: .top, endPoint: .bottom))
+                    Capsule().stroke(Theme.grayLine, lineWidth: 1)
                 }
             )
         }
