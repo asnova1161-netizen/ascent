@@ -125,12 +125,15 @@ static void AscentHUDSignalHandler(int signalNumber)
     raise(signalNumber);
 }
 
+static void AscentUncaughtExceptionHandler(NSException *exception)
+{
+    AscentHUDLogMessage([NSString stringWithFormat:@"!!! HUD: необработанное исключение %@: %@\n%@",
+                         exception.name, exception.reason, exception.callStackSymbols]);
+}
+
 static void AscentInstallCrashHandlers(void)
 {
-    NSSetUncaughtExceptionHandler(^(NSException *exception) {
-        AscentHUDLogMessage([NSString stringWithFormat:@"!!! HUD: необработанное исключение %@: %@\n%@",
-                             exception.name, exception.reason, exception.callStackSymbols]);
-    });
+    NSSetUncaughtExceptionHandler(&AscentUncaughtExceptionHandler);
 
     int signals[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGTRAP, SIGFPE };
     for (size_t index = 0; index < sizeof(signals) / sizeof(signals[0]); index++) {
