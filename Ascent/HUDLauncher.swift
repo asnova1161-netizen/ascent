@@ -7,12 +7,12 @@ final class HUDLauncher {
     private init() {}
     
     func launchHUD() {
-        let execURL = Bundle.main.executableURL
-        guard let path = execURL?.path else { return }
+        guard let execURL = Bundle.main.executableURL else { return }
+        let path = execURL.path
         
         var pid: pid_t = 0
         var argv: [UnsafeMutablePointer<CChar>?] = [
-            strdup(execURL?.lastPathComponent ?? "Ascent"),
+            strdup(execURL.lastPathComponent),
             strdup("-hud"),
             nil
         ]
@@ -22,19 +22,25 @@ final class HUDLauncher {
             }
         }
         
-        var attr: posix_spawnattr_t = nil
+        var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
         
-        if let a = attr {
+        if var a = attr {
             posix_spawnattr_set_persona_np(&a, 99, UInt32(POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE))
             posix_spawnattr_set_persona_uid_np(&a, 0)
             posix_spawnattr_set_persona_gid_np(&a, 0)
-            posix_spawn(&pid, path, nil, &a, &argv, environ)
+            posix_spawn(&pid, path, nil, &a, &argv, nil)
             posix_spawnattr_destroy(&a)
         }
     }
     
     func killAllHUD() {
-        let _ = Process.launchedProcess(launchPath: "/usr/bin/killall", arguments: ["Ascent"])
+        let task = NSTask()
+        task.launchPath = "/usr/bin/killall"
+        task.arguments = ["Ascent"]
+        do {
+            try task.launch()
+            task.waitUntilExit()
+        } catch {}
     }
 }
