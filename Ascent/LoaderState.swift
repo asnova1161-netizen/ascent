@@ -47,7 +47,16 @@ final class LoaderState: ObservableObject {
         running = false
         showing = false
         menuOpen = false
-        posix_spawnp(nil, "killall", nil, nil, ["killall", "Ascent", nil], nil)
+        var pid: pid_t = 0
+        var argv: [UnsafeMutablePointer<CChar>?] = [
+            strdup("killall"),
+            strdup("Ascent"),
+            nil
+        ]
+        posix_spawnp(&pid, "killall", nil, nil, &argv, nil)
+        for arg in argv {
+            if let arg = arg { free(arg) }
+        }
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
