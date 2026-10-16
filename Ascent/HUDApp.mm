@@ -37,6 +37,68 @@ static void AscentStartParentWatchdog(void)
     dispatch_resume(timer);
 }
 
+// Accessibility-hosted окно не получает касаний от window-сервера, поэтому
+// подписываемся на глобальный поток HID-событий и превращаем их в
+// синтетические UITouch'и для нашего окна. События при этом продолжают
+// идти и в приложение под нами — то есть «клик сквозь» сохраняется.
+static void AscentHIDEventCallback(void *target, void *refcon, void *service, void *event)
+{
+    Class repClass = objc_getClass("AXEventRepresentation");
+    if (repClass == nil) {
+        return;
+    }
+
+    AXEventRepresentation *rep = [repClass representationWithHIDEvent:(IOHIDEventRef)event
+                                                    hidStreamIdentifier:@"UIApplicationEvents"];
+    if (rep == nil) {
+        return;
+    }
+
+    CGPoint location = rep.location;
+    BOOL isTouchDown = rep.isTouchDown;
+    BOOL isTouchMove = rep.isMove;
+    BOOL isTouchCancel = rep.isCancel;
+    BOOL isTouchUp = rep.isLift || rep.isInRange || rep.isInRangeLift;
+
+    NSInteger pointerId = 0;
+    NSArray<AXEventPathInfoRepresentation *> *paths = rep.handInfo.paths;
+    if (paths.count > 0) {
+        pointerId = [paths firstObject].pathIdentity;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication *app = [UIApplication sharedApplication];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        UIWindow *keyWindow = app.windows.firstObject;
+#pragma clang diagnostic pop
+        if (keyWindow == nil) {
+            return;
+        }
+
+        UIView *keyView = [keyWindow hitTest:location withEvent:nil];
+
+        UITouchPhase phase = UITouchPhaseEnded;
+        if (isTouchDown) {
+            phase = UITouchPhaseBegan;
+        } else if (isTouchMove) {
+            phase = UITouchPhaseMoved;
+        } else if (isTouchCancel) {
+            phase = UITouchPhaseCancelled;
+        } else if (isTouchUp) {
+            phase = UITouchPhaseEnded;
+        }
+
+        if (pointerId > 0) {
+            [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
+                          atGlobalCoordinate:location
+                              withTouchPhase:phase
+                                    inWindow:keyWindow
+                                      onView:keyView];
+        }
+    });
+}
+
 int main(int argc, char *argv[])
 {
     @autoreleasepool
@@ -51,12 +113,23 @@ int main(int argc, char *argv[])
             [UIScreen initialize];
             CFRunLoopGetCurrent();
 
+            GSInitialize();
+            BKSDisplayServicesStart();
+            UIApplicationInitialize();
+
             UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
             id<UIApplicationDelegate> appDelegate = [[objc_getClass("HUDMainApplicationDelegate") alloc] init];
             [UIApplication.sharedApplication setDelegate:appDelegate];
             [UIApplication.sharedApplication _accessibilityInit];
 
             [NSRunLoop currentRunLoop];
+
+            if (@available(iOS 15.0, *)) {
+                GSEventInitialize(0);
+                GSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+            }
+
+            BKSHIDEventRegisterEventCallback(AscentHIDEventCallback);
 
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
             AscentStartParentWatchdog();
