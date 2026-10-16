@@ -238,7 +238,7 @@ int main(int argc, char *argv[])
             AscentVoidFn fnGSEventPushRunLoopMode = (AscentVoidFn)AscentResolvePrivateSymbol("GSEventPushRunLoopMode");
             AscentRegisterHIDEventCallbackFn fnRegisterHIDCallback = (AscentRegisterHIDEventCallbackFn)AscentResolvePrivateSymbol("BKSHIDEventRegisterEventCallback");
             AscentHUDLog(@"-hud: HUDMainApplication=%p, HUDMainApplicationDelegate=%p, GSEventInitialize=%p, GSEventPushRunLoopMode=%p, BKSHIDEventRegisterEventCallback=%p",
-                         (void *)hudApplicationClass, (void *)hudDelegateClass,
+                         (__bridge void *)hudApplicationClass, (__bridge void *)hudDelegateClass,
                          (void *)fnGSEventInitialize, (void *)fnGSEventPushRunLoopMode,
                          (void *)fnRegisterHIDCallback);
 

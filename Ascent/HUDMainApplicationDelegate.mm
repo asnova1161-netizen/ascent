@@ -39,7 +39,7 @@
                  (int)[self.window isHidden], self.window.windowScene);
 
     Class hostingClass = objc_getClass("SBSAccessibilityWindowHostingController");
-    AscentHUDLog(@"delegate: SBSAccessibilityWindowHostingController=%p", (void *)hostingClass);
+    AscentHUDLog(@"delegate: SBSAccessibilityWindowHostingController=%p", (__bridge void *)hostingClass);
 
     _windowHostingController = [[hostingClass alloc] init];
     unsigned int _contextId = [self.window _contextId];
