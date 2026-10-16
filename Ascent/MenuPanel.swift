@@ -25,7 +25,11 @@ struct MenuPanel: View {
     /// Куда панель уже утащили (сохраняется между перетаскиваниями).
     @State private var origin: CGSize = .zero
     /// Смещение текущего перетаскивания — живёт только пока палец на экране.
-    @State private var drag: CGSize = .zero
+    ///
+    /// Именно `@GestureState`, а не `@State`: SwiftUI сам обнуляет его, когда
+    /// жест заканчивается ИЛИ отменяется, поэтому панель не залипает в
+    /// сдвинутом положении, если жест перебили.
+    @GestureState private var drag: CGSize = .zero
 
     private let headerHeight: CGFloat = 44
     private let tabBarHeight: CGFloat = 40
@@ -61,13 +65,20 @@ struct MenuPanel: View {
             content
         }
         .frame(width: width, height: height)
+        // серый фон непрозрачный + белый текст
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous).fill(fill)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(line, lineWidth: 1)
         )
+        .contentShape(Rectangle())
+        // ВАЖНО: жест и смещение — на ОДНОМ и том же вью (как в MenuTrigger).
+        // Раньше жест висел на тексте «ascent», а offset — на внешнем VStack:
+        // SwiftUI двигал один вью, а жест слушал другой, от этого панель
+        // не ехала, а интерфейс подвешивался.
         .offset(x: position.width, y: position.height)
+        .gesture(dragGesture)
     }
 
     // MARK: - Перетаскивание
@@ -82,16 +93,26 @@ struct MenuPanel: View {
                height: min(max(s.height, minY), max(minY, maxY)))
     }
 
-    /// Ручной драг на `@State` (а не на `@GestureState`): состояние меняется
-    /// только внутри панели, сбрасывается ровно один раз в `onEnded`.
-    /// `@GestureState` + анимации в родителе подвешивали UI.
+    /// Перетаскивание за шапку.
+    ///
+    /// Жест и `.offset` живут на одном вью, поэтому во время движения
+    /// перерисовывается только панель, а не весь экран. Смещение копится в
+    /// `@GestureState` и обнуляется системой и при отпускании, и при отмене;
+    /// в `onEnded` оно разово «затвердевает» в `origin`.
+    ///
+    /// Тянем только если палец опустился на шапку: касания по вкладкам
+    /// main/misc, кнопкам внутри и по ссылке остаются им.
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 2)
-            .onChanged { value in drag = value.translation }
+            .updating($drag) { value, state, _ in
+                if value.startLocation.y <= headerHeight {
+                    state = value.translation
+                }
+            }
             .onEnded { value in
+                guard value.startLocation.y <= headerHeight else { return }
                 origin = clamp(CGSize(width: origin.width + value.translation.width,
                                       height: origin.height + value.translation.height))
-                drag = .zero
             }
     }
 
@@ -104,8 +125,6 @@ struct MenuPanel: View {
                 .kerning(1.6)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .gesture(dragGesture)      // меню тащим за верхнюю полосу «ascent»
 
             Button(action: onClose) {
                 Image(systemName: "xmark")

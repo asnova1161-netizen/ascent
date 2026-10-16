@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import CoreImage
 
 struct LoaderView: View {
     @StateObject private var state = LoaderState()
@@ -21,8 +23,10 @@ struct LoaderView: View {
                 // фон и дождь — статичные типы, их SwiftUI не перерисовывает
                 BackdropView()
 
+                // дождь — тоже статичный UIViewRepresentable: SwiftUI его не
+                // перерисовывает, капли крутит Core Animation. Внутри вью
+                // неинтерактивно, поэтому касания уходят к квадрату и меню.
                 RainView()
-                    .allowsHitTesting(false)
 
                 LoaderContent(state: state, topInset: top, bottomInset: bottom)
 
@@ -168,27 +172,79 @@ private struct LoaderContent: View {
 
 // MARK: - Фон
 
-/// Статичный фон: свойств нет, поэтому SwiftUI его не перерисовывает,
-/// когда таскаешь меню. Размытие впечатано в саму картинку.
-private struct BackdropView: View {
-    var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Image("Backdrop")
-                    .resizable()
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .scaleEffect(1.14)
-                    .blur(radius: 9)
+/// Фон — статичная картинка с уже «впечённым» размытием.
+///
+/// Раньше это была SwiftUI-вью с живым `.blur(radius: 9)` поверх
+/// `scaleEffect`. Живой блюр пересчитывается на каждом кадре, и на iPhone 7,
+/// пока таскаешь меню, из-за него всё залипало. Здесь размытие считается
+/// ОДИН раз при создании вью, а `updateUIView` пустой — SwiftUI фон вообще
+/// не трогает во время перетаскивания.
+private struct BackdropView: UIViewRepresentable {
+    func makeUIView(context: Context) -> BackdropUIView { BackdropUIView() }
+    func updateUIView(_ uiView: BackdropUIView, context: Context) { }
+}
 
-                Color.black.opacity(0.10)
+private final class BackdropUIView: UIView {
+    private let imageView = UIImageView()
+    private let flat = CALayer()
+    private let dim = CAGradientLayer()
 
-                LinearGradient(colors: [Color.black.opacity(0.22), Color.clear, Color.black.opacity(0.38)],
-                               startPoint: .top,
-                               endPoint: .bottom)
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .clipped()
+    /// Размытая картинка одна на всё приложение — считаем её единожды.
+    private static var cachedImage: UIImage?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .black
+        clipsToBounds = true
+
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.image = BackdropUIView.blurredBackdrop()
+        addSubview(imageView)
+
+        flat.backgroundColor = UIColor.black.withAlphaComponent(0.10).cgColor
+        layer.addSublayer(flat)
+
+        dim.colors = [UIColor.black.withAlphaComponent(0.22).cgColor,
+                      UIColor.clear.cgColor,
+                      UIColor.black.withAlphaComponent(0.38).cgColor]
+        dim.locations = [0.0, 0.5, 1.0]
+        layer.addSublayer(dim)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        imageView.frame = bounds
+        // небольшой зум, чтобы размытые края не были видны
+        imageView.transform = CGAffineTransform(scaleX: 1.14, y: 1.14)
+        flat.frame = bounds
+        dim.frame = bounds
+    }
+
+    /// Один раз размывает картинку фонa и кэширует результат.
+    private static func blurredBackdrop() -> UIImage? {
+        if let cachedImage = cachedImage { return cachedImage }
+        guard let image = UIImage(named: "Backdrop"), let cg = image.cgImage else {
+            return UIImage(named: "Backdrop")
         }
+
+        let input = CIImage(cgImage: cg)
+        // радиус 9 pt, как в прежнем `.blur(radius: 9)` — не усиливаем
+        let radius = 9.0 * Double(image.scale)
+        let blurred = input
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+            .cropped(to: input.extent)
+
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        guard let out = context.createCGImage(blurred, from: input.extent) else { return image }
+
+        let result = UIImage(cgImage: out, scale: image.scale, orientation: image.imageOrientation)
+        cachedImage = result
+        return result
     }
 }
 
