@@ -48,7 +48,7 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
         return;
     }
 
-    AXEventRepresentation *rep = [repClass representationWithHIDEvent:(IOHIDEventRef)event
+    AXEventRepresentation *rep = [repClass representationWithHIDEvent:(__bridge id)event
                                                     hidStreamIdentifier:@"UIApplicationEvents"];
     if (rep == nil) {
         return;
