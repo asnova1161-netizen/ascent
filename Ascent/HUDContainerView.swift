@@ -8,7 +8,11 @@ public struct HUDContainerView: View {
     @State private var menuOpen: Bool
     private let panelHeight: CGFloat = 216
     
-    public init(menuOpen: Bool) {
+    public init(menuOpen: Bool = false) {
+        self._menuOpen = State(initialValue: menuOpen)
+    }
+    
+    @objc public init(withMenuOpen menuOpen: Bool) {
         self._menuOpen = State(initialValue: menuOpen)
     }
     

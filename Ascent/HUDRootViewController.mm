@@ -19,13 +19,22 @@ static BOOL _passthroughMode = NO;
     self.view.backgroundColor = [UIColor clearColor];
     
     Class HUDContainerViewClass = NSClassFromString(@"Ascent.HUDContainerView");
-    id container = [[HUDContainerViewClass alloc] initWithMenuOpen:NO];
+    id container = [[HUDContainerViewClass alloc] init];
+    if ([container respondsToSelector:@selector(initWithMenuOpen:)]) {
+        container = [[HUDContainerViewClass alloc] initWithMenuOpen:NO];
+    } else if ([container respondsToSelector:@selector(initWithMenuOpen:)]) {
+        // try
+    }
     Class UIHostingControllerClass = NSClassFromString(@"_TtGC7SwiftUI19UIHostingControllerGVS_15ModifiedContentVS_7AnyViewVS_12RootModifier__");
     if (UIHostingControllerClass == nil) {
         UIHostingControllerClass = NSClassFromString(@"UIHostingController");
     }
     id hosting = [[UIHostingControllerClass alloc] initWithRootView:container];
-    [hosting setViewBackgroundColor:[UIColor clearColor]];
+    if ([hosting respondsToSelector:@selector(setViewBackgroundColor:)]) {
+        [hosting setViewBackgroundColor:[UIColor clearColor]];
+    } else {
+        [hosting view].backgroundColor = [UIColor clearColor];
+    }
     
     [self addChildViewController:hosting];
     [self.view addSubview:[hosting view]];
