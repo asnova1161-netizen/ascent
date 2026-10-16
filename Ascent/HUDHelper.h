@@ -1,5 +1,9 @@
 #import <Foundation/Foundation.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /// Запущен ли сейчас процесс-оверлей (HUD).
 BOOL IsHUDEnabled(void);
 
@@ -24,3 +28,7 @@ NSString *AscentPIDFilePath(void);
 
 /// Удалить PID-файл (перед выходом HUD-процесса).
 void AscentRemovePIDFile(void);
+
+#ifdef __cplusplus
+}
+#endif
