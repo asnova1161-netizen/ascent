@@ -1,5 +1,6 @@
 #import "HUDRootViewController.h"
 #import <UIKit/UIKit.h>
+#import "HUDHelper.h"
 
 @implementation HUDRootViewController
 
@@ -21,9 +22,11 @@ static BOOL _passthroughMode = NO;
     // statically from Objective-C. Ask the Swift factory to build it for us.
     id factory = (id)NSClassFromString(@"Ascent.HUDHostFactory");
     if (factory == nil) { factory = (id)NSClassFromString(@"HUDHostFactory"); }
+    AscentHUDLog(@"rootVC: viewDidLoad, фабрика HUDHostFactory=%@", factory);
     if (factory == nil) { return; }
 
     id hostingObject = [factory performSelector:@selector(makeHostingController)];
+    AscentHUDLog(@"rootVC: hosting controller=%@", hostingObject);
     if (hostingObject == nil) { return; }
 
     UIViewController *hosting = (UIViewController *)hostingObject;
@@ -39,6 +42,12 @@ static BOOL _passthroughMode = NO;
         [hosting.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
     [hosting didMoveToParentViewController:self];
+    AscentHUDLog(@"rootVC: SwiftUI-вью встроена, bounds=%@", NSStringFromCGRect(self.view.bounds));
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    AscentHUDLog(@"rootVC: viewDidAppear, окно=%@", self.view.window);
 }
 
 @end

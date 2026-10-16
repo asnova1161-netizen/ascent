@@ -6,6 +6,7 @@
 
 #import "SBSAccessibilityWindowHostingController.h"
 #import "UIWindow+Private.h"
+#import "HUDHelper.h"
 
 @implementation HUDMainApplicationDelegate {
     HUDRootViewController *_rootViewController;
@@ -22,6 +23,8 @@
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary <UIApplicationLaunchOptionsKey, id> *)launchOptions
 {
+    AscentHUDLog(@"delegate: didFinishLaunching, launchOptions=%@", launchOptions);
+
     _rootViewController = [[HUDRootViewController alloc] init];
 
     self.window = [[HUDMainWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
@@ -31,9 +34,18 @@
     [self.window setHidden:NO];
     [self.window makeKeyAndVisible];
 
-    _windowHostingController = [[objc_getClass("SBSAccessibilityWindowHostingController") alloc] init];
+    AscentHUDLog(@"delegate: окно создано, frame=%@, level=%.0f, hidden=%d, windowScene=%@",
+                 NSStringFromCGRect(self.window.bounds), [self.window windowLevel],
+                 (int)[self.window isHidden], self.window.windowScene);
+
+    Class hostingClass = objc_getClass("SBSAccessibilityWindowHostingController");
+    AscentHUDLog(@"delegate: SBSAccessibilityWindowHostingController=%p", (void *)hostingClass);
+
+    _windowHostingController = [[hostingClass alloc] init];
     unsigned int _contextId = [self.window _contextId];
     double windowLevel = [self.window windowLevel];
+
+    AscentHUDLog(@"delegate: contextId=%u, hosting=%p", _contextId, _windowHostingController);
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -45,6 +57,8 @@
     [invocation setArgument:&windowLevel atIndex:3];
     [invocation invoke];
 #pragma clang diagnostic pop
+
+    AscentHUDLog(@"delegate: registerWindowWithContextID:atLevel: вызван");
 
     return YES;
 }

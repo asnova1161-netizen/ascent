@@ -44,6 +44,13 @@ struct LoaderView: View {
                             .zIndex(2)
                     }
                 }
+
+                // Диагностика: появляется только если HUD-процесс не поднялся,
+                // и показывает журнал запуска (на каком шаге он отвалился).
+                if let log = state.hudLog, !log.isEmpty {
+                    hudDiagnostics(text: log)
+                        .zIndex(20)
+                }
             }
             .frame(width: size.width, height: size.height)
         }
@@ -70,6 +77,32 @@ struct LoaderView: View {
                            initialOrigin: OverlayStore.origin(for: "trigger"),
                            onOriginChange: { OverlayStore.setOrigin($0, for: "trigger") })
             .offset(x: baseX, y: baseY)
+    }
+
+    // MARK: - Диагностика
+
+    private func hudDiagnostics(text: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("HUD не запустился — журнал:")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(text)
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(Color(white: 0.92))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(8)
+        .frame(height: 200)
+        .background(Color.black.opacity(0.8))
+        .cornerRadius(10)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 
     // MARK: - Меню

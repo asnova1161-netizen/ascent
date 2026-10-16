@@ -7,6 +7,8 @@
 #import <signal.h>
 #import <stdlib.h>
 #import <string.h>
+#import <stdio.h>
+#import <errno.h>
 #import <dlfcn.h>
 #import <dispatch/dispatch.h>
 
@@ -107,6 +109,35 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     });
 }
 
+#pragma mark - Диагностика падений HUD
+
+// Падение HUD-процесса иначе выглядит просто как «квадрат исчез». Пишем
+// причину в общий журнал, который потом показывает само приложение.
+static void AscentHUDSignalHandler(int signalNumber)
+{
+    char buffer[160];
+    int length = snprintf(buffer, sizeof(buffer), "!!! HUD pid=%d убит сигналом %d\n", (int)getpid(), signalNumber);
+    if (length > 0) {
+        AscentHUDLogRaw(buffer);
+    }
+
+    signal(signalNumber, SIG_DFL);
+    raise(signalNumber);
+}
+
+static void AscentInstallCrashHandlers(void)
+{
+    NSSetUncaughtExceptionHandler(^(NSException *exception) {
+        AscentHUDLogMessage([NSString stringWithFormat:@"!!! HUD: необработанное исключение %@: %@\n%@",
+                             exception.name, exception.reason, exception.callStackSymbols]);
+    });
+
+    int signals[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGTRAP, SIGFPE };
+    for (size_t index = 0; index < sizeof(signals) / sizeof(signals[0]); index++) {
+        signal(signals[index], AscentHUDSignalHandler);
+    }
+}
+
 #pragma mark - main
 
 int main(int argc, char *argv[])
@@ -125,6 +156,12 @@ int main(int argc, char *argv[])
             AscentSetStateDirectory(dir);
         }
 
+        if (isHelper) {
+            AscentHUDLog(@"main: режим %s, pid=%d uid=%d euid=%d, каталог состояния=%s",
+                         mode, (int)getpid(), (int)getuid(), (int)geteuid(),
+                         AscentStateDirectory().UTF8String);
+        }
+
         if (mode != NULL && strcmp(mode, "-check") == 0)
         {
             // EXIT_FAILURE — оверлей жив, EXIT_SUCCESS — нет.
@@ -133,9 +170,13 @@ int main(int argc, char *argv[])
                                                                error:nil];
             if (pidString.length > 0) {
                 pid_t pid = (pid_t)[pidString intValue];
-                if (pid > 0 && kill(pid, 0) == 0) {
+                if (pid > 0 && (kill(pid, 0) == 0 || errno == EPERM)) {
+                    AscentHUDLog(@"-check: pid=%d жив", pid);
                     return EXIT_FAILURE;
                 }
+                AscentHUDLog(@"-check: pid=%@ мёртв, errno=%d", pidString, errno);
+            } else {
+                AscentHUDLog(@"-check: PID-файла нет");
             }
             return EXIT_SUCCESS;
         }
@@ -148,8 +189,11 @@ int main(int argc, char *argv[])
             if (pidString.length > 0) {
                 pid_t pid = (pid_t)[pidString intValue];
                 if (pid > 0) {
+                    AscentHUDLog(@"-exit: убиваю pid=%d", pid);
                     kill(pid, SIGKILL);
                 }
+            } else {
+                AscentHUDLog(@"-exit: PID-файла нет");
             }
             AscentRemovePIDFile();
             return EXIT_SUCCESS;
@@ -157,61 +201,78 @@ int main(int argc, char *argv[])
 
         if (mode != NULL && strcmp(mode, "-hud") == 0)
         {
-            // Запоминаем свой PID: по нему главный процесс понимает, что
-            // оверлей уже поднят, и гасит его по Exit.
-            pid_t pid = getpid();
-            NSString *pidString = [NSString stringWithFormat:@"%d", pid];
-            [pidString writeToFile:AscentPIDFilePath()
-                        atomically:YES
-                          encoding:NSUTF8StringEncoding
-                             error:nil];
+            AscentInstallCrashHandlers();
+
+            NSString *pidPath = AscentPIDFilePath();
+            NSString *pidString = [NSString stringWithFormat:@"%d", (int)getpid()];
+            NSError *pidError = nil;
+            BOOL pidWritten = [pidString writeToFile:pidPath
+                                          atomically:YES
+                                            encoding:NSUTF8StringEncoding
+                                               error:&pidError];
+            AscentHUDLog(@"-hud: старт pid=%@, PID-файл %@ -> %@ (error=%@)",
+                         pidString, pidPath, pidWritten ? @"записан" : @"НЕ ЗАПИСАН", pidError);
 
             [UIScreen initialize];
             CFRunLoopGetCurrent();
 
             AscentVoidFn fnGSInitialize = (AscentVoidFn)AscentResolvePrivateSymbol("GSInitialize");
+            AscentVoidFn fnBKSDisplayServicesStart = (AscentVoidFn)AscentResolvePrivateSymbol("BKSDisplayServicesStart");
+            AscentHUDLog(@"-hud: GSInitialize=%p, BKSDisplayServicesStart=%p",
+                         (void *)fnGSInitialize, (void *)fnBKSDisplayServicesStart);
+
             if (fnGSInitialize) {
                 fnGSInitialize();
             }
 
-            AscentVoidFn fnBKSDisplayServicesStart = (AscentVoidFn)AscentResolvePrivateSymbol("BKSDisplayServicesStart");
             if (fnBKSDisplayServicesStart) {
                 fnBKSDisplayServicesStart();
             }
 
             UIApplicationInitialize();
+            AscentHUDLog(@"-hud: UIApplicationInitialize() ок");
 
-            UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
+            Class hudApplicationClass = objc_getClass("HUDMainApplication");
+            Class hudDelegateClass = objc_getClass("HUDMainApplicationDelegate");
+            AscentVoidFn fnGSEventInitialize = (AscentVoidFn)AscentResolvePrivateSymbol("GSEventInitialize");
+            AscentVoidFn fnGSEventPushRunLoopMode = (AscentVoidFn)AscentResolvePrivateSymbol("GSEventPushRunLoopMode");
+            AscentRegisterHIDEventCallbackFn fnRegisterHIDCallback = (AscentRegisterHIDEventCallbackFn)AscentResolvePrivateSymbol("BKSHIDEventRegisterEventCallback");
+            AscentHUDLog(@"-hud: HUDMainApplication=%p, HUDMainApplicationDelegate=%p, GSEventInitialize=%p, GSEventPushRunLoopMode=%p, BKSHIDEventRegisterEventCallback=%p",
+                         (void *)hudApplicationClass, (void *)hudDelegateClass,
+                         (void *)fnGSEventInitialize, (void *)fnGSEventPushRunLoopMode,
+                         (void *)fnRegisterHIDCallback);
+
+            UIApplicationInstantiateSingleton(hudApplicationClass);
             // Делегат держим статически: UIApplication.delegate — assign, а не
             // strong, и без этого его бы освободили сразу после setDelegate:.
             static id<UIApplicationDelegate> gHUDAppDelegate = nil;
-            gHUDAppDelegate = [[objc_getClass("HUDMainApplicationDelegate") alloc] init];
+            gHUDAppDelegate = [[hudDelegateClass alloc] init];
             [UIApplication.sharedApplication setDelegate:gHUDAppDelegate];
             [UIApplication.sharedApplication _accessibilityInit];
+            AscentHUDLog(@"-hud: UIApplication поднят, delegate=%@", [UIApplication sharedApplication].delegate);
 
             [NSRunLoop currentRunLoop];
 
             if (@available(iOS 15.0, *)) {
-                AscentGSEventInitializeFn fnGSEventInitialize = (AscentGSEventInitializeFn)AscentResolvePrivateSymbol("GSEventInitialize");
                 if (fnGSEventInitialize) {
-                    fnGSEventInitialize(0);
+                    ((AscentGSEventInitializeFn)fnGSEventInitialize)(0);
                 }
-                AscentGSEventPushRunLoopModeFn fnGSEventPushRunLoopMode = (AscentGSEventPushRunLoopModeFn)AscentResolvePrivateSymbol("GSEventPushRunLoopMode");
                 if (fnGSEventPushRunLoopMode) {
-                    fnGSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+                    ((AscentGSEventPushRunLoopModeFn)fnGSEventPushRunLoopMode)(kCFRunLoopDefaultMode);
                 }
             }
 
-            AscentRegisterHIDEventCallbackFn fnRegisterHIDCallback = (AscentRegisterHIDEventCallbackFn)AscentResolvePrivateSymbol("BKSHIDEventRegisterEventCallback");
             if (fnRegisterHIDCallback) {
                 fnRegisterHIDCallback(AscentHIDEventCallback);
             }
 
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
+            AscentHUDLog(@"-hud: __completeAndRunAsPlugin ок, уходим в run loop");
 
             // ВАЖНО: здесь больше нет watchdog'а по родителю. Оверлей должен
             // переживать закрытие приложения ascent и гаснуть только по Exit.
             CFRunLoopRun();
+            AscentHUDLog(@"-hud: run loop завершился, выходим");
             return EXIT_SUCCESS;
         }
     }
