@@ -1,16 +1,5 @@
 import SwiftUI
 
-@objc public class HUDContainerViewState: NSObject {
-    @objc var menuOpen: Bool = false
-}
-
-@objcMembers
-public class HUDContainerViewWrapper: NSObject {
-    @objc public func makeView() -> Any? {
-        return HUDContainerView(menuOpen: false)
-    }
-}
-
 public struct HUDContainerView: View {
     @State private var menuOpen: Bool
     private let panelHeight: CGFloat = 216
@@ -19,7 +8,7 @@ public struct HUDContainerView: View {
         self._menuOpen = State(initialValue: menuOpen)
     }
     
-    @objc public init(withMenuOpen menuOpen: Bool) {
+    public init(withMenuOpen menuOpen: Bool) {
         self._menuOpen = State(initialValue: menuOpen)
     }
     
@@ -82,5 +71,12 @@ public struct HUDContainerView: View {
             telegramURL: URL(string: "https://t.me/ascentios")!
         )
         .offset(x: baseX, y: baseY)
+    }
+}
+
+@objcMembers
+public class HUDContainerViewWrapper: NSObject {
+    @objc public func makeView() -> Any? {
+        return AnyView(HUDContainerView(menuOpen: false))
     }
 }

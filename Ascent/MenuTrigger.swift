@@ -49,12 +49,6 @@ struct MenuTrigger: View {
                 .foregroundColor(.white)
         }
         .frame(width: MenuTrigger.side, height: MenuTrigger.side)
-        .background(
-            // тень без размытия — при перетаскивании она не грузит кадры
-            RoundedRectangle(cornerRadius: 17, style: .continuous)
-                .fill(Color.black.opacity(0.40))
-                .offset(y: 5)
-        )
         .contentShape(Rectangle())          // вся площадь ловит касания
         .offset(x: position.width, y: position.height)
         .gesture(dragGesture)
