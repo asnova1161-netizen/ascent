@@ -74,22 +74,15 @@ final class HUDViewController: UIViewController {
         }
     }
     
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        // Pass touches through when not on trigger/panel
-    }
-    
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        // Don't consume touches by default - pass through
-        // This allows touches to pass through to apps behind
+        // Don't consume by default for pass-through
     }
     
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        // Check if point is inside trigger or panel
-        // Return true only if inside interactive elements
+        let safeTop: CGFloat = 44
         let triggerSide: CGFloat = 54
         let triggerX = UIScreen.main.bounds.width - triggerSide - 14
-        let triggerY = max(UIScreen.main.safeAreaInsets.top, 44) + 14
+        let triggerY = safeTop + 14
         let triggerRect = CGRect(x: triggerX, y: triggerY, width: triggerSide, height: triggerSide)
         
         if triggerRect.contains(point) {
