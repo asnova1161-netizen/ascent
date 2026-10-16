@@ -204,7 +204,11 @@ private final class BackdropUIView: UIView {
         backgroundColor = .black
         clipsToBounds = true
 
-        imageView.contentMode = .scaleAspectFit
+        // imageView.contentMode = .scaleAspectFill, а не .scaleAspectFit:
+        // картинка (1320x2868) выше экрана iPhone 7, и при «fit» она
+        // ужималась по высоте, оставляя чёрные полосы слева и справа.
+        // «Fill» растягивает фото на всю ширину — полос по бокам нет.
+        imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
         imageView.image = UIImage(named: "BackdropBlur")
         addSubview(imageView)

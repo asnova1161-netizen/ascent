@@ -146,6 +146,16 @@ static pid_t AscentSpawnSelf(const char *argument)
 
     AscentApplyRootPersona(&attr);
 
+    // HUD-процесс должен переживать уход приложения в фон и его закрытие.
+    // Если оставить его в группе процессов приложения, iOS вместе с
+    // приложением приостанавливает и оверлей — и квадрат пропадает при
+    // выходе на домашний экран. Поэтому (как в TrollSpeed) выводим HUD в
+    // собственную группу процессов.
+    if (strcmp(argument, "-hud") == 0) {
+        posix_spawnattr_setpgroup(&attr, 0);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    }
+
     const char *args[] = { exe, argument, stateBuf, NULL };
     pid_t pid = -1;
     int rc = posix_spawn(&pid, exe, NULL, &attr, (char *const *)args, environ);
