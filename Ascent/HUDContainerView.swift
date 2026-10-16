@@ -12,7 +12,7 @@ public struct HUDContainerView: View {
         self._menuOpen = State(initialValue: menuOpen)
     }
     
-    @objc public init(withMenuOpen menuOpen: Bool) {
+    public init(withMenuOpen menuOpen: Bool) {
         self._menuOpen = State(initialValue: menuOpen)
     }
     
