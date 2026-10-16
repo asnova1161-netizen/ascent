@@ -1,8 +1,5 @@
 import SwiftUI
 import Darwin
-#if canImport(Foundation)
-import Foundation
-#endif
 
 /// Состояние приложения: лоадер и мод-меню.
 ///
@@ -50,7 +47,7 @@ final class LoaderState: ObservableObject {
         running = false
         showing = false
         menuOpen = false
-        let _ = Process.launchedProcess(launchPath: "/usr/bin/killall", arguments: ["Ascent"])
+        posix_spawnp(nil, "killall", nil, nil, ["killall", "Ascent", nil], nil)
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
