@@ -1,6 +1,10 @@
 #import "HUDRootViewController.h"
 #import <SwiftUI/SwiftUI.h>
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wobjc-module-import"
 #import "Ascent-Swift.h"
+#pragma clang diagnostic pop
 
 @implementation HUDRootViewController
 
