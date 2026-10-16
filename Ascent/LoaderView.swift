@@ -103,8 +103,9 @@ private struct LoaderContent: View {
 
             Text("ascent")
                 .font(.system(size: 46, weight: .heavy, design: .rounded))
-                .foregroundColor(Theme.text)
+                .foregroundColor(.white)
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
+                .offset(y: -26)
 
             startButton
                 .padding(.top, 40)
@@ -176,6 +177,8 @@ private struct BackdropView: View {
                 Image("Backdrop")
                     .resizable()
                     .frame(width: geo.size.width, height: geo.size.height)
+                    .scaleEffect(1.14)
+                    .blur(radius: 9)
 
                 Color.black.opacity(0.10)
 
