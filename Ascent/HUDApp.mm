@@ -143,20 +143,21 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     BOOL isTouchCancel = rep.isCancel;
     BOOL isTouchUp = rep.isLift || rep.isInRange || rep.isInRangeLift;
 
-    // Фазу определяем от «конца» к «началу»: подъём/отмена и движение важнее
-    // признака «палец на экране», который система выставляет и на движениях.
-    // Иначе каждое событие перетаскивания принималось бы за новое нажатие, на
-    // каждый кадр создавалось бы новое касание, оверлей копил бы их, и меню
-    // падало бы ровно при перетаскивании и прокрутке.
+    // Порядок проверок важен. Движение проверяем РАНЬШЕ подъёма: система
+    // выставляет признаки «в зоне» (isInRange/isInRangeLift) и на событиях
+    // движения, а если счесть их подъёмом пальца — касание обрывается на первом
+    // же кадре и панель перестаёт ехать. Движение также важнее признака «палец
+    // на экране», который система выставляет и на движениях: иначе каждый кадр
+    // перетаскивания считался бы новым нажатием и касания копились бы.
     UITouchPhase phase = UITouchPhaseEnded;
     if (isTouchCancel) {
         phase = UITouchPhaseCancelled;
-    } else if (isTouchUp) {
-        phase = UITouchPhaseEnded;
     } else if (isTouchMove) {
         phase = UITouchPhaseMoved;
     } else if (isTouchDown) {
         phase = UITouchPhaseBegan;
+    } else if (isTouchUp) {
+        phase = UITouchPhaseEnded;
     }
 
     // Идентификатор пальца приходит не в каждом событии: у движения и подъёма
