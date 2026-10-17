@@ -140,6 +140,11 @@ static const CGFloat kTabBarHeight   = 40.0;
 static const CGFloat kMargin         = 10.0;
 static const CGFloat kTriggerInset   = 14.0;
 
+// Делегат прокрутки нужен только ради журнала: по нему видно, начиналась ли
+// прокрутка меню и дожила ли она до конца.
+@interface HUDOverlayView () <UIScrollViewDelegate>
+@end
+
 @implementation HUDOverlayView
 {
     // Слой, который поворачивается вслед за устройством: в нём лежат квадрат и
@@ -379,6 +384,7 @@ static const CGFloat kTriggerInset   = 14.0;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _triggerDragging = NO;
         _triggerDragStart = _trigger.center;
+        AscentHUDLog(@"[gesture] квадрат: перетаскивание началось");
         return;
     }
 
@@ -405,6 +411,8 @@ static const CGFloat kTriggerInset   = 14.0;
             HUDOverlaySetNumber(@"trigger.x", _triggerOffset.width);
             HUDOverlaySetNumber(@"trigger.y", _triggerOffset.height);
             _triggerDragging = NO;
+            AscentHUDLog(@"[gesture] квадрат: перетаскивание закончилось, смещение=(%.0f, %.0f)",
+                         _triggerOffset.width, _triggerOffset.height);
         }
         // Тап здесь больше не обрабатываем — это делает triggerTapped:.
     }
@@ -514,6 +522,7 @@ static const CGFloat kTriggerInset   = 14.0;
     // Без задержки касаний для содержимого: жесты на кнопках/строках вкладок
     // срабатывают мгновенно, а не через долю секунды после касания.
     _scroll.delaysContentTouches = NO;
+    _scroll.delegate = self;
     [_panel addSubview:_scroll];
 
     [self buildMiscTab];
@@ -818,6 +827,8 @@ static const CGFloat kTriggerInset   = 14.0;
 - (void)panelControlTapped:(UITapGestureRecognizer *)gesture
 {
     UIView *view = gesture.view;
+    AscentHUDLog(@"[gesture] панель: нажатие на %@ (tag=%ld)",
+                 NSStringFromClass([view class]), (long)view.tag);
     if (view == _panelClose) { [self closePanel]; return; }
     if (view == _unloadButton) { [self unloadTapped]; return; }
     if (view.tag >= 100 && view.tag < 100 + (NSInteger)_tabButtons.count) { [self selectTab:view.tag - 100]; }
@@ -831,6 +842,7 @@ static const CGFloat kTriggerInset   = 14.0;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _panelDragging = YES;
         _panelDragStart = _panel.center;
+        AscentHUDLog(@"[gesture] панель: перетаскивание началось");
         return;
     }
     if (gesture.state == UIGestureRecognizerStateChanged) {
@@ -854,7 +866,32 @@ static const CGFloat kTriggerInset   = 14.0;
         HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
         HUDOverlaySetNumber(@"hud.panel.y", _panelOffset.height);
         [self setNeedsLayout];
+        AscentHUDLog(@"[gesture] панель: перетаскивание закончилось, смещение=(%.0f, %.0f)",
+                     _panelOffset.width, _panelOffset.height);
     }
+}
+
+#pragma mark - Прокрутка (диагностика)
+
+// Обработчики ниже только пишут в журнал: по ним видно, начиналась ли
+// прокрутка меню и дожила ли она до конца — в паре с [touch] это показывает,
+// на каком шаге всё обрывается, если меню «пропадает» при протяжке.
+
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView
+{
+    AscentHUDLog(@"[gesture] прокрутка меню: началась (смещение y=%.0f)",
+                 scrollView.contentOffset.y);
+}
+
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate
+{
+    AscentHUDLog(@"[gesture] прокрутка меню: палец отпущен (деселерация=%d, y=%.0f)",
+                 (int)decelerate, scrollView.contentOffset.y);
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView
+{
+    AscentHUDLog(@"[gesture] прокрутка меню: остановилась (y=%.0f)", scrollView.contentOffset.y);
 }
 
 
@@ -890,6 +927,7 @@ static const CGFloat kTriggerInset   = 14.0;
     UISwitch *toggle = [self switchInRow:gesture.view];
     if (toggle == nil) { return; }
     toggle.on = !toggle.on;
+    AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
     [self switchChanged:toggle];
 }
 
@@ -911,6 +949,7 @@ static const CGFloat kTriggerInset   = 14.0;
     if (gesture.state == UIGestureRecognizerStateEnded ||
         gesture.state == UIGestureRecognizerStateCancelled ||
         gesture.state == UIGestureRecognizerStateFailed) {
+        AscentHUDLog(@"[gesture] %@ = %.2f", slider.accessibilityIdentifier, slider.value);
         [self sliderChanged:slider];
     }
 }
