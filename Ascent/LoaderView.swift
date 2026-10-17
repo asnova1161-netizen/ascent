@@ -64,6 +64,18 @@ struct LoaderView: View {
                     DebugOverlay(state: state, topInset: top, bottomInset: bottom)
                         .zIndex(20)
                 }
+
+                // Пока оверлей включён, внизу висит короткая диагностика: по ней
+                // видно, жив ли HUD-процесс и до какой стадии он дошёл — без
+                // длинных тапов и без переписывания длинного текста.
+                // Тап по полоске раскрывает полное отладочное окно.
+                if state.engaged || state.showing {
+                    HUDDiagnosticsStrip(state: state)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, bottom + 6)
+                        .zIndex(15)
+                }
             }
             .frame(width: size.width, height: size.height)
         }
@@ -254,6 +266,49 @@ private final class BackdropUIView: UIView {
         imageView.frame = bounds
         flat.frame = bounds
         dim.frame = bounds
+    }
+}
+
+// MARK: - Короткая диагностика оверлея
+
+/// Полоска внизу экрана: «ПРИЧИНА: …» и последние шаги HUD-процесса.
+///
+/// Висит всё время, пока оверлей включён (от Start до Exit), чтобы причину не
+/// приходилось искать вслепую: длинное отладочное окно открывается по нажатию.
+private struct HUDDiagnosticsStrip: View {
+    @ObservedObject var state: LoaderState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(state.diagnosticsVerdict)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundColor(.yellow)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !state.diagnosticsSteps.isEmpty {
+                Text(state.diagnosticsSteps)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.8))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(6)
+            }
+
+            Text("нажми, чтобы раскрыть подробности")
+                .font(.system(size: 9))
+                .foregroundColor(.white.opacity(0.45))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Theme.grayLine, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { state.openDebug() }
     }
 }
 

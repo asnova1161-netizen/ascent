@@ -5,6 +5,8 @@
 #import <unistd.h>
 #import <sys/wait.h>
 #import <sys/stat.h>
+#import <sys/sysctl.h>
+#import <sys/proc.h>
 #import <fcntl.h>
 #import <stdlib.h>
 #import <string.h>
@@ -301,6 +303,53 @@ pid_t AscentHUDProcessID(void)
                                                        error:nil];
     pid_t pid = (pid_t)[pidString intValue];
     return pid > 0 ? pid : 0;
+}
+
+/// Зомби для `kill(pid, 0)` выглядит совершенно живым процессом, поэтому
+/// спрашиваем настоящее состояние у ядра.
+static BOOL AscentProcessIsZombie(pid_t pid)
+{
+#if defined(KERN_PROC_PID) && defined(SZOMB)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &size, NULL, 0) == 0 && size >= sizeof(info)) {
+        return info.kp_proc.p_stat == SZOMB;
+    }
+#endif
+    return NO;
+}
+
+NSString *AscentHUDProcessState(void)
+{
+    pid_t pid = AscentHUDProcessID();
+    if (pid <= 0) {
+        return @"PID-файла нет";
+    }
+
+    if (kill(pid, 0) != 0 && errno != EPERM) {
+        if (errno == ESRCH) {
+            return @"мёртв (такого процесса нет)";
+        }
+        return [NSString stringWithFormat:@"kill: errno %d", errno];
+    }
+
+#if defined(KERN_PROC_PID) && defined(SZOMB)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &size, NULL, 0) == 0 && size >= sizeof(info)) {
+        int state = info.kp_proc.p_stat;
+        if (state == SZOMB) {
+            return @"ЗОМБИ — процесс уже завершился, оверлея нет";
+        }
+        return [NSString stringWithFormat:@"жив (состояние %d)", state];
+    }
+#endif
+
+    return @"жив (состояние определить не удалось)";
 }
 
 static char gExecutablePath[PATH_MAX];
@@ -676,10 +725,15 @@ BOOL IsHUDEnabled(void)
     if (pid > 0) {
         // HUD бежит от root, поэтому для приложения (оно от mobile) живой
         // процесс даёт EPERM, а не 0. И то, и другое означает «жив».
-        if (kill(pid, 0) == 0 || errno == EPERM) {
-            return YES;
+        if (kill(pid, 0) != 0 && errno != EPERM) {
+            return NO;
         }
-        return NO;
+        // Зомби тоже «жив» для kill(), но оверлея за ним уже нет: если это не
+        // отсечь, кнопка навсегда остаётся Exit при пустом экране.
+        if (AscentProcessIsZombie(pid)) {
+            return NO;
+        }
+        return YES;
     }
 
     // Файл почему-то недоступен из приложения — спрашиваем root-хелпер: он

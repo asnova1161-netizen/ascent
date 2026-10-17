@@ -87,6 +87,11 @@ final class LoaderState: ObservableObject {
 
         // Оверлей НЕ считаем запущенным, пока дочерний процесс не записал свой
         // PID и не оказался жив. До этого кнопка остаётся Start.
+        // Оверлей поднят — держим диагностику свежей всё время, пока он включён:
+        // её короткая версия висит внизу экрана, а не только в отдельном окне.
+        refreshDebug()
+        startDiagnosticsRefresh()
+
         waitForHUDStart()
     }
 
@@ -141,6 +146,9 @@ final class LoaderState: ObservableObject {
         menuOpen = false
         SetHUDEnabled(false)
         refreshDebug()
+        if !debugVisible {
+            stopDiagnosticsRefresh()
+        }
     }
 
     /// Перечитываем реальность: жив ли HUD-процесс. Никаких других сбросов —
@@ -149,11 +157,15 @@ final class LoaderState: ObservableObject {
         let alive = IsHUDEnabled()
         showing = alive
         if alive {
+            // Оверлей уже поднят — значит мы «включены», даже если приложение
+            // перезапускали: так кнопка, запасной квадрат и диагностика видят
+            // одно и то же состояние.
+            engaged = true
             startHeartbeat()
         } else {
             stopHeartbeat()
         }
-        if debugVisible {
+        if debugVisible || engaged {
             refreshDebug()
         }
     }
@@ -217,9 +229,7 @@ final class LoaderState: ObservableObject {
 
     func toggleDebug() {
         if debugVisible {
-            debugVisible = false
-            debugTimer?.invalidate()
-            debugTimer = nil
+            closeDebug()
         } else {
             openDebug()
         }
@@ -228,8 +238,21 @@ final class LoaderState: ObservableObject {
     func openDebug() {
         debugVisible = true
         refreshDebug()
-        debugTimer?.invalidate()
-        // Раз в 2 секунды: чаще не нужно, а на iPhone 7 лишняя работа заметна.
+        startDiagnosticsRefresh()
+    }
+
+    func closeDebug() {
+        // Окно просто прячем: пока оверлей включён, диагностика продолжает
+        // обновляться — её короткая строка висит внизу экрана.
+        debugVisible = false
+    }
+
+    /// Раз в 2 секунды пересчитываем диагностику: чаще не нужно, а на iPhone 7
+    /// лишняя работа заметна.
+    private func startDiagnosticsRefresh() {
+        if debugTimer != nil {
+            return
+        }
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.refreshDebug()
         }
@@ -237,8 +260,7 @@ final class LoaderState: ObservableObject {
         debugTimer = timer
     }
 
-    func closeDebug() {
-        debugVisible = false
+    private func stopDiagnosticsRefresh() {
         debugTimer?.invalidate()
         debugTimer = nil
     }
@@ -253,10 +275,11 @@ final class LoaderState: ObservableObject {
         let spawnCode = AscentLastSpawnReturnCode()
         let logTail = AscentHUDLogTail(80) ?? ""
         let logLines = logTail.split(separator: "\n", omittingEmptySubsequences: false)
+        let processState = AscentHUDProcessState()
 
         // Самое главное — короткий вывод о причине: его легко переписать или
         // продиктовать, не разбираясь в остальном тексте.
-        lines.append("ПРИЧИНА: \(verdict(logText: logTail, spawnCode: spawnCode))")
+        lines.append("ПРИЧИНА: \(verdict(logText: logTail, spawnCode: spawnCode, processState: processState))")
         lines.append("")
 
         let mode = AscentProcessMode() ?? "?"
@@ -280,7 +303,8 @@ final class LoaderState: ObservableObject {
         let alive = IsHUDEnabled()
         lines.append("HUD-процесс:")
         lines.append("  PID-файл: \(pid > 0 ? "\(pid)" : "нет")")
-        lines.append("  жив сейчас (kill pid 0): \(alive ? "да" : "нет")")
+        lines.append("  состояние: \(processState)")
+        lines.append("  kill(pid, 0) говорит жив: \(alive ? "да" : "нет")")
         lines.append("  кнопка показывает: \(showing ? "Exit" : "Start")")
         lines.append("")
 
@@ -307,14 +331,31 @@ final class LoaderState: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    /// Короткая строка для панели внизу экрана: верхняя строка диагностики,
+    /// то есть «ПРИЧИНА: …».
+    var diagnosticsVerdict: String {
+        debugText.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? ""
+    }
+
+    /// Последние шаги HUD-процесса из журнала: по ним видно, до какой стадии он
+    /// дошёл (инициализация, окно, хостинг).
+    var diagnosticsSteps: String {
+        let steps = debugText.split(separator: "\n")
+            .map { stripLogPrefix($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { $0.hasPrefix("[HUD]") || $0.hasPrefix("!!!") }
+        return steps.suffix(6).joined(separator: "\n")
+    }
+
     /// Короткий вывод: что именно случилось с оверлеем.
-    private func verdict(logText: String, spawnCode: Int32) -> String {
+    private func verdict(logText: String, spawnCode: Int32, processState: String) -> String {
         if spawnCode != 0 {
             let message = strerror(spawnCode).map { String(cString: $0) } ?? "неизвестно"
             return "posix_spawn не прошёл: errno \(spawnCode) — \(message)"
         }
 
         let lines = logText.split(separator: "\n").map { stripLogPrefix(String($0)) }
+        let hudLines = lines.filter { $0.hasPrefix("[HUD]") }
 
         for line in lines.reversed() {
             if line.contains("убит сигналом") {
@@ -325,12 +366,22 @@ final class LoaderState: ObservableObject {
             }
         }
 
-        let hudLines = lines.filter { $0.hasPrefix("[HUD]") }
+        if processState.contains("ЗОМБИ") {
+            if let last = hudLines.last {
+                return "HUD-процесс УЖЕ ЗАВЕРШИЛСЯ (зомби), последний шаг — \(last)"
+            }
+            return "HUD-процесс УЖЕ ЗАВЕРШИЛСЯ (зомби) и в журнал ничего не записал"
+        }
+
         if hudLines.isEmpty {
             return "HUD-процесс не записал в журнал ни одной строки — он не дошёл до старта"
         }
+
         if let last = hudLines.last {
-            return "HUD-процесс: последний шаг — \(last)"
+            if last.contains("delegate:") || last.contains("rootVC:") {
+                return "процесс жив и дошёл до окна, значит окно не выводится поверх: \(last)"
+            }
+            return "HUD-процесс \(processState), последний шаг — \(last)"
         }
         return "неизвестно"
     }
