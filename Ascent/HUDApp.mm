@@ -19,6 +19,9 @@
 #import "AXEventRepresentation.h"
 #import "UIApplication+Private.h"
 
+// Имя уведомления, которым можно попросить оверлей погаснуть (как в TrollSpeed).
+#define ASCENT_NOTIFY_DISMISSAL "com.ascentios.ascent.hud.dismissal"
+
 // Сервисы GraphicsServices/BackBoardServices не слинкованы в наш бинарь
 // (они приватные), поэтому символы достаём из уже загруженных образов.
 typedef void (*AscentVoidFn)(void);
@@ -141,6 +144,14 @@ static void AscentInstallCrashHandlers(void)
     }
 }
 
+// Пустой callout: таймер нужен только для того, чтобы run loop оверлея не был
+// пустым (иначе CFRunLoopRun() возвращается сразу и процесс выходит).
+static void AscentKeepAliveTimerCallback(CFRunLoopTimerRef timer, void *info)
+{
+    (void)timer;
+    (void)info;
+}
+
 #pragma mark - main
 
 int main(int argc, char *argv[])
@@ -250,6 +261,14 @@ int main(int argc, char *argv[])
             UIApplicationInitialize();
             AscentHUDLog(@"-hud: UIApplicationInitialize() ок");
 
+            // Класс SBSAccessibilityWindowHostingController живёт в приватном
+            // SpringBoardServices. Без него окно оверлея не выводится на экран
+            // вообще (внутри приложения оно есть, поверх — нет).
+            dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                   RTLD_NOW | RTLD_GLOBAL);
+            AscentHUDLog(@"-hud: SBSAccessibilityWindowHostingController=%p",
+                         objc_getClass("SBSAccessibilityWindowHostingController"));
+
             Class hudApplicationClass = objc_getClass("HUDMainApplication");
             Class hudDelegateClass = objc_getClass("HUDMainApplicationDelegate");
             AscentVoidFn fnGSEventInitialize = (AscentVoidFn)AscentResolvePrivateSymbol("GSEventInitialize");
@@ -271,6 +290,15 @@ int main(int argc, char *argv[])
 
             [NSRunLoop currentRunLoop];
 
+            // Порядок как в TrollSpeed: сначала подписка на HID-события,
+            // потом инициализация GSEvent.
+            if (fnRegisterHIDCallback) {
+                fnRegisterHIDCallback(AscentHIDEventCallback);
+                AscentHUDLog(@"-hud: HID-callback зарегистрирован");
+            } else {
+                AscentHUDLog(@"!!! -hud: BKSHIDEventRegisterEventCallback не найден — касания работать не будут");
+            }
+
             if (@available(iOS 15.0, *)) {
                 if (fnGSEventInitialize) {
                     ((AscentGSEventInitializeFn)fnGSEventInitialize)(0);
@@ -280,19 +308,53 @@ int main(int argc, char *argv[])
                 }
             }
 
-            if (fnRegisterHIDCallback) {
-                fnRegisterHIDCallback(AscentHIDEventCallback);
-            }
-
             [UIApplication.sharedApplication __completeAndRunAsPlugin];
-            AscentHUDLog(@"-hud: __completeAndRunAsPlugin ок, уходим в run loop");
+            AscentHUDLog(@"-hud: __completeAndRunAsPlugin ок");
 
-            // Пробы приватных API — уже после инициализации, чтобы dlopen
-            // фреймворков не повлиял на порядок запуска сервисов.
-            AscentHUDLog(@"-hud: пробы приватных API:\n%@", AscentProbeReport());
+            // Пробы приватных API пишем чуть позже: dlopen посторонних
+            // фреймворков до старта run loop может испортить порядок подъёма
+            // сервисов. Заодно эта строка доказывает, что run loop жив.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AscentHUDLog(@"-hud: жив уже 2 с, run loop работает");
+                AscentHUDLog(@"-hud: пробы приватных API:\n%@", AscentProbeReport());
+            });
+
+            // ГЛАВНОЕ: run loop оверлея не должен быть пустым. Если приватный
+            // UIEventDispatcher не отдал своих источников (на новых iOS его
+            // метод _installEventRunLoopSources: недоступен), CFRunLoopRun()
+            // возвращается сразу — процесс выходит, и квадрат пропадает через
+            // долю секунды. Поэтому держим run loop своим таймером.
+            static CFRunLoopTimerRef gKeepAliveTimer = NULL;
+            gKeepAliveTimer = CFRunLoopTimerCreate(kCFAllocatorDefault,
+                                                   CFAbsoluteTimeGetCurrent() + 3600.0,
+                                                   3600.0, 0, 0,
+                                                   AscentKeepAliveTimerCallback, NULL);
+            CFRunLoopAddTimer(CFRunLoopGetCurrent(), gKeepAliveTimer, kCFRunLoopDefaultMode);
+            AscentHUDLog(@"-hud: keep-alive таймер добавлен (%p), run loop не пустой", gKeepAliveTimer);
+
+            // Гашение оверлея уведомлением — как в TrollSpeed.
+            static int gDismissToken = 0;
+            notify_register_dispatch(ASCENT_NOTIFY_DISMISSAL, &gDismissToken, dispatch_get_main_queue(), ^(int token) {
+                notify_cancel(token);
+                AscentHUDLog(@"пришло уведомление о гашении — выходим");
+                exit(EXIT_SUCCESS);
+            });
+
+            // Перезапуск SpringBoard убивает окна оверлея — поднимаем заново.
+            static int gBootToken = 0;
+            notify_register_dispatch("SBSpringBoardDidLaunchNotification", &gBootToken, dispatch_get_main_queue(), ^(int token) {
+                notify_cancel(token);
+                AscentHUDLog(@"SpringBoard перезапустился — поднимаем оверлей заново");
+                pid_t selfPid = getpid();
+                AscentRemovePIDFile();
+                SetHUDEnabled(YES);
+                kill(self_pid, SIGKILL);
+            });
 
             // ВАЖНО: здесь больше нет watchdog'а по родителю. Оверлей должен
             // переживать закрытие приложения ascent и гаснуть только по Exit.
+            AscentHUDLog(@"-hud: уходим в CFRunLoopRun()");
             CFRunLoopRun();
             AscentHUDLog(@"-hud: run loop завершился, выходим");
             return EXIT_SUCCESS;

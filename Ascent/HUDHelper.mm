@@ -1,5 +1,6 @@
 #import "HUDHelper.h"
 #import <spawn.h>
+#import <notify.h>
 #import <signal.h>
 #import <unistd.h>
 #import <sys/wait.h>
@@ -51,12 +52,16 @@ static void AscentResolvePersonaSymbols(void)
     });
 }
 
-static void AscentApplyRootPersona(posix_spawnattr_t *attr)
+static BOOL AscentApplyRootPersona(posix_spawnattr_t *attr)
 {
     AscentResolvePersonaSymbols();
-    if (gPersonaSetNp) gPersonaSetNp(attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-    if (gPersonaSetUid) gPersonaSetUid(attr, 0);
-    if (gPersonaSetGid) gPersonaSetGid(attr, 0);
+    if (!gPersonaSetNp || !gPersonaSetUid || !gPersonaSetGid) {
+        return NO;
+    }
+    gPersonaSetNp(attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+    gPersonaSetUid(attr, 0);
+    gPersonaSetGid(attr, 0);
+    return YES;
 }
 
 #pragma mark - Общий каталог состояния
@@ -198,21 +203,6 @@ void AscentHUDLogReset(void)
     }
 }
 
-// Содержимое первого непустого журнала (контейнер, иначе общий кэш).
-static NSString *AscentLogText(void)
-{
-    AscentLogPathsInit();
-
-    for (int index = 0; index < gLogPathCount; index++) {
-        NSString *path = [NSString stringWithUTF8String:gLogPaths[index]];
-        NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-        if (text.length > 0) {
-            return text;
-        }
-    }
-    return nil;
-}
-
 NSString *AscentHUDLogText(void)
 {
     AscentLogPathsInit();
@@ -226,13 +216,52 @@ NSString *AscentHUDLogText(void)
     return result;
 }
 
+// Хвост журнала: читаем только последние maxBytes байт файла, иначе на каждое
+// обновление отладочного окна приходилось бы разбирать мегабайт текста и
+// интерфейс заметно лагал.
+static NSString *AscentLogTailText(size_t maxBytes)
+{
+    AscentLogPathsInit();
+
+    for (int index = 0; index < gLogPathCount; index++) {
+        int fd = open(gLogPaths[index], O_RDONLY);
+        if (fd < 0) {
+            continue;
+        }
+
+        off_t size = lseek(fd, 0, SEEK_END);
+        if (size <= 0) {
+            close(fd);
+            continue;
+        }
+
+        off_t start = size > (off_t)maxBytes ? size - (off_t)maxBytes : 0;
+        lseek(fd, start, SEEK_SET);
+
+        NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)(size - start)];
+        ssize_t got = read(fd, data.mutableBytes, data.length);
+        close(fd);
+
+        if (got <= 0) {
+            continue;
+        }
+        data.length = (NSUInteger)got;
+
+        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (text.length > 0) {
+            return text;
+        }
+    }
+    return nil;
+}
+
 NSString *AscentHUDLogTail(int maxLines)
 {
     if (maxLines <= 0) {
         maxLines = 30;
     }
 
-    NSString *text = AscentLogText();
+    NSString *text = AscentLogTailText(64 * 1024);
     if (text.length == 0) {
         return @"(журнал пуст)";
     }
@@ -256,6 +285,9 @@ NSString *AscentPIDFilePath(void)
 {
     return @ASCENT_HUD_PID_PATH;
 }
+
+// Уведомление «погасни» — его слушает HUD-процесс (см. HUDApp.mm).
+#define ASCENT_NOTIFY_DISMISSAL "com.ascentios.ascent.hud.dismissal"
 
 void AscentRemovePIDFile(void)
 {
@@ -333,18 +365,29 @@ static pid_t AscentSpawnSelf(const char *argument)
         return -1;
     }
 
-    AscentApplyRootPersona(&attr);
+    BOOL personaApplied = AscentApplyRootPersona(&attr);
+    AscentHUDLog(@"spawn %s: персона root применена: %s",
+                 argument ? argument : "",
+                 personaApplied ? "да" : "НЕТ (символы персоны не найдены)");
 
     // HUD-процесс должен переживать уход приложения в фон и его закрытие.
     // Если оставить его в группе процессов приложения, iOS вместе с
     // приложением приостанавливает и оверлей — и квадрат пропадает при
     // выходе на домашний экран.
-    // Для самого оверлея даём СВОЮ группу процессов (как в TrollSpeed), а
-    // короткоживущие -check/-exit оставляем в группе родителя, иначе waitpid
-    // по ним работал бы нестабильно.
+    // Для самого оверлея даём СВОЮ группу процессов, а короткоживущие
+    // -check/-exit оставляем в группе родителя, иначе waitpid по ним работал
+    // бы нестабильно.
+    //
+    // ВАЖНО: posix_spawnattr_setflags() перезаписывает ВСЕ флаги, а персона
+    // root (см. AscentApplyRootPersona) могла выставить свой бит. Поэтому
+    // сначала читаем текущие флаги и только добавляем нужный.
     if (strcmp(argument, "-hud") == 0) {
-        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-        posix_spawnattr_setpgroup(&attr, 0);
+        short existingFlags = 0;
+        posix_spawnattr_getflags(&attr, &existingFlags);
+        int rcSetFlags = posix_spawnattr_setflags(&attr, existingFlags | POSIX_SPAWN_SETPGROUP);
+        int rcSetPgroup = posix_spawnattr_setpgroup(&attr, 0);
+        AscentHUDLog(@"spawn %s: flags %d -> %d (setflags=%d, setpgroup=%d)",
+                     argument, existingFlags, existingFlags | POSIX_SPAWN_SETPGROUP, rcSetFlags, rcSetPgroup);
     }
 
     pid_t pid = 0;
@@ -451,7 +494,21 @@ BOOL AscentProbeClass(const char *name)
     return objc_getClass(name) != nil;
 }
 
+static NSString *AscentBuildProbeReport(void);
+
 NSString *AscentProbeReport(void)
+{
+    // Отчёт считаем один раз: результат не меняется, а в отладочном окне он
+    // перерисовывается часто.
+    static NSString *cached = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cached = AscentBuildProbeReport();
+    });
+    return cached;
+}
+
+static NSString *AscentBuildProbeReport(void)
 {
     static const char *symbols[] = {
         "GSInitialize",
@@ -573,7 +630,20 @@ static NSData *AscentEntitlementsXMLData(void)
     return nil;
 }
 
+static NSString *AscentBuildOwnEntitlements(void);
+
 NSString *AscentOwnEntitlements(void)
+{
+    // Подпись не меняется на протяжении жизни процесса — читаем один раз.
+    static NSString *cached = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cached = AscentBuildOwnEntitlements();
+    });
+    return cached;
+}
+
+static NSString *AscentBuildOwnEntitlements(void)
 {
     NSData *xml = AscentEntitlementsXMLData();
     if (xml.length == 0) {
@@ -662,6 +732,10 @@ void SetHUDEnabled(BOOL isEnabled)
         }
     } else {
         AscentHUDLog(@"SetHUDEnabled(NO): гашу оверлей");
+
+        // Сначала просим оверлей погаснуть по-хорошему (он это умеет, как в
+        // TrollSpeed), и только потом добиваем процесс, если он не ушёл.
+        notify_post(ASCENT_NOTIFY_DISMISSAL);
 
         pid_t pid = AscentHUDProcessID();
         AscentSpawnSelfAndWait("-exit", NULL);

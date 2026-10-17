@@ -176,14 +176,29 @@ final class LoaderState: ObservableObject {
 
     /// Раз в 2 секунды отмечаем в журнале, что оверлей на связи. Если он умрёт,
     /// в журнале будет видно последнюю живую отметку и следующую за ней причину.
+    private func heartbeat(_ timer: Timer) {
+        let pid = AscentHUDProcessID()
+        let alive = IsHUDEnabled()
+        AscentHUDLogMessage("HUD alive: pid=\(pid) жив=\(alive ? "да" : "нет")")
+
+        // HUD пропал — отмечаем это один раз и прекращаем пульс, чтобы журнал
+        // не забивался одинаковыми строками (и интерфейс не тормозил).
+        if !alive {
+            timer.invalidate()
+            heartbeatTimer = nil
+            AscentHUDLogMessage("HUD пропал — возвращаем квадрат внутрь приложения")
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshFromProcess()
+            }
+        }
+    }
+
     private func startHeartbeat() {
         if heartbeatTimer != nil {
             return
         }
-        let timer = Timer(timeInterval: 2.0, repeats: true) { _ in
-            let pid = AscentHUDProcessID()
-            let alive = IsHUDEnabled()
-            AscentHUDLogMessage("HUD alive: pid=\(pid) жив=\(alive ? "да" : "нет")")
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] timer in
+            self?.heartbeat(timer)
         }
         RunLoop.main.add(timer, forMode: .common)
         heartbeatTimer = timer
@@ -210,7 +225,8 @@ final class LoaderState: ObservableObject {
         debugVisible = true
         refreshDebug()
         debugTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Раз в 2 секунды: чаще не нужно, а на iPhone 7 лишняя работа заметна.
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.refreshDebug()
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -230,12 +246,20 @@ final class LoaderState: ObservableObject {
     private func buildDebugText() -> String {
         var lines: [String] = []
 
+        let spawnCode = AscentLastSpawnReturnCode()
+        let logTail = AscentHUDLogTail(80) ?? ""
+        let logLines = logTail.split(separator: "\n", omittingEmptySubsequences: false)
+
+        // Самое главное — короткий вывод о причине: его легко переписать или
+        // продиктовать, не разбираясь в остальном тексте.
+        lines.append("ПРИЧИНА: \(verdict(logText: logTail, spawnCode: spawnCode))")
+        lines.append("")
+
         let mode = AscentProcessMode() ?? "?"
         lines.append("режим процесса: \(mode)")
         lines.append("это -hud-процесс: \(mode == "-hud" ? "да" : "нет")")
         lines.append("")
 
-        let spawnCode = AscentLastSpawnReturnCode()
         let spawnErrno = AscentLastSpawnErrno()
         lines.append("последний posix_spawn:")
         lines.append("  режим: \(AscentLastSpawnMode() ?? "?")")
@@ -270,8 +294,48 @@ final class LoaderState: ObservableObject {
         lines.append("")
 
         lines.append("последние 30 строк журнала:")
-        lines.append(AscentHUDLogTail(30) ?? "")
+        if logLines.isEmpty {
+            lines.append("(журнал пуст)")
+        } else {
+            lines.append(logLines.suffix(30).joined(separator: "\n"))
+        }
 
         return lines.joined(separator: "\n")
+    }
+
+    /// Короткий вывод: что именно случилось с оверлеем.
+    private func verdict(logText: String, spawnCode: Int32) -> String {
+        if spawnCode != 0 {
+            let message = strerror(spawnCode).map { String(cString: $0) } ?? "неизвестно"
+            return "posix_spawn не прошёл: errno \(spawnCode) — \(message)"
+        }
+
+        let lines = logText.split(separator: "\n").map { stripLogPrefix(String($0)) }
+
+        for line in lines.reversed() {
+            if line.contains("убит сигналом") {
+                return "HUD-процесс убит: \(line)"
+            }
+            if line.contains("завершился сам, код") {
+                return "HUD-процесс завершился сам: \(line)"
+            }
+        }
+
+        let hudLines = lines.filter { $0.hasPrefix("[HUD]") }
+        if hudLines.isEmpty {
+            return "HUD-процесс не записал в журнал ни одной строки — он не дошёл до старта"
+        }
+        if let last = hudLines.last {
+            return "HUD-процесс: последний шаг — \(last)"
+        }
+        return "неизвестно"
+    }
+
+    /// Убирает из строки журнала дату и «[pid uid=N] », оставляя суть.
+    private func stripLogPrefix(_ line: String) -> String {
+        if let range = line.range(of: "] ") {
+            return String(line[range.upperBound...])
+        }
+        return line
     }
 }
