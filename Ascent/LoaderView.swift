@@ -47,16 +47,7 @@ struct LoaderView: View {
                     }
                 }
 
-                // Версия iOS — поверх всего, но не мешает нажатиям.
-                Text("iOS \(UIDevice.current.systemVersion)")
-                    .font(.system(size: 12.5, weight: .bold))
-                    .foregroundColor(Color.white.opacity(0.35))
-                    .shadow(color: Color.black.opacity(0.5), radius: 3, x: 0, y: 1)
-                    .padding(.leading, 16)
-                    .padding(.top, top + 6)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .allowsHitTesting(false)
-                    .zIndex(10)
+
 
                 // Отладочное окно: открывается ТОЛЬКО длинным тапом по «ascent».
                 // Само по себе на экране ничего не пишет.
