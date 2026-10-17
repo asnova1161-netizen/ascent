@@ -4,6 +4,7 @@
 #import "HUDMainApplicationDelegate.h"
 #import "HUDMainWindow.h"
 #import "HUDRootViewController.h"
+#import "HUDOverlayView.h"
 
 #import "SBSAccessibilityWindowHostingController.h"
 #import "UIWindow+Private.h"
@@ -12,7 +13,7 @@
 @implementation HUDMainApplicationDelegate {
     HUDRootViewController *_rootViewController;
     SBSAccessibilityWindowHostingController *_windowHostingController;
-    UIView *_diagnosticMarker;
+    HUDOverlayView *_overlayView;
 }
 
 - (instancetype)init
@@ -84,19 +85,17 @@
                      NSStringFromCGRect(self.window.bounds), [self.window windowLevel],
                      (int)[self.window isHidden], self.window.windowScene);
 
-        // Диагностическая метка: обычная UIView, без SwiftUI. Если её видно
-        // поверх постороннего приложения — хостинг окна работает, и дело в
-        // содержимом. Через 25 секунд метка сама убирается.
-        _diagnosticMarker = [[UIView alloc] initWithFrame:CGRectMake(8, 64, 44, 44)];
-        _diagnosticMarker.backgroundColor = [UIColor magentaColor];
-        _diagnosticMarker.userInteractionEnabled = NO;
-        [self.window addSubview:_diagnosticMarker];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [self->_diagnosticMarker removeFromSuperview];
-            self->_diagnosticMarker = nil;
-            AscentHUDLog(@"delegate: диагностическая метка убрана");
-        });
+        // Квадрат-триггер и панель меню — чистый UIKit, прямо в окне (тот же
+        // путь, что и раньше у диагностической метки, а она рисовалась).
+        // SwiftUI в HUD-процессе не отрисовывался, поэтому его тут нет.
+        _overlayView = [HUDOverlayView overlayForWindow:self.window];
+        if (_overlayView != nil) {
+            [self.window addSubview:_overlayView];
+            AscentHUDLog(@"delegate: UIKit-оверлей добавлен в окно, кадр=%@",
+                         NSStringFromCGRect(_overlayView.frame));
+        } else {
+            AscentHUDLog(@"!!! delegate: не удалось создать UIKit-оверлей");
+        }
 
         Class hostingClass = objc_getClass("SBSAccessibilityWindowHostingController");
         AscentHUDLog(@"delegate: SBSAccessibilityWindowHostingController=%p", (__bridge void *)hostingClass);
