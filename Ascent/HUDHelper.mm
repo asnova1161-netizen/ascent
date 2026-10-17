@@ -158,22 +158,9 @@ void AscentHUDLogRaw(const char *text)
             continue;
         }
 
-        // Простейшая ротация: файл вырос — начинаем с чистого листа.
-        struct stat info;
-        if (fstat(fd, &info) == 0 && info.st_size > (off_t)(1024 * 1024)) {
-            ftruncate(fd, 0);
-        }
-
-        ssize_t written = 0;
-        while (written < (ssize_t)length) {
-            ssize_t chunk = write(fd, text + written, length - (size_t)written);
-            if (chunk <= 0) {
-                break;
-            }
-            written += chunk;
-        }
-        close(fd);
-    }
+        // Запись в лог делаем синхронно только для редких случаев; в основном — асинхронно.
+    AscentHUDLogRawSync(copy);
+    free(copy);
 }
 
 void AscentHUDLogMessage(NSString *message)
