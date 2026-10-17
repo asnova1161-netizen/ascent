@@ -502,16 +502,25 @@ void AscentSetProcessMode(NSString *mode)
 // Это же делает и сам оверлей, так что проба отражает реальную картину.
 static void AscentLoadPrivateFrameworks(void)
 {
+    // ВАЖНО: только в HUD-процессе. Обычному приложению подгружать чужие
+    // приватные фреймворки нельзя: их инициализаторы рассчитаны на системный
+    // процесс, а RTLD_GLOBAL подменяет символы в уже работающем приложении —
+    // это роняет процесс на месте.
+    NSString *mode = AscentProcessMode();
+    if (![mode isEqualToString:@"-hud"]) {
+        return;
+    }
+
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // Только те три фреймворка, которые оверлею действительно нужны.
+        // SpringBoardUI/SpringBoardFoundation/FrontBoardServices в root-процессе
+        // подгружать опасно: их инициализаторы падают, если процесс не
+        // SpringBoard, и оверлей умирает через пару секунд после старта.
         NSArray<NSString *> *frameworks = @[
             @"/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
             @"/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices",
-            @"/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities",
             @"/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
-            @"/System/Library/PrivateFrameworks/SpringBoardUI.framework/SpringBoardUI",
-            @"/System/Library/PrivateFrameworks/SpringBoardFoundation.framework/SpringBoardFoundation",
-            @"/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
         ];
         for (NSString *path in frameworks) {
             dlopen(path.UTF8String, RTLD_NOW | RTLD_GLOBAL);

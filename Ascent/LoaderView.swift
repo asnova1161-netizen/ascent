@@ -65,16 +65,18 @@ struct LoaderView: View {
                         .zIndex(20)
                 }
 
-                // Пока оверлей включён, внизу висит короткая диагностика: по ней
-                // видно, жив ли HUD-процесс и до какой стадии он дошёл — без
-                // длинных тапов и без переписывания длинного текста.
+                // Диагностика висит внизу, пока оверлей включён — а также если
+                // прошлый запуск не дошёл до конца (упал): тогда причину видно
+                // сразу, без длинных тапов.
                 // Тап по полоске раскрывает полное отладочное окно.
-                if state.engaged || state.showing {
-                    HUDDiagnosticsStrip(state: state)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, bottom + 6)
-                        .zIndex(15)
+                if state.engaged || state.showing || state.lastRunCrashed {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        HUDDiagnosticsStrip(state: state)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, bottom + 6)
+                    .zIndex(15)
                 }
             }
             .frame(width: size.width, height: size.height)

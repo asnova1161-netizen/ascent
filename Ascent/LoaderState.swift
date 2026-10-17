@@ -44,6 +44,10 @@ final class LoaderState: ObservableObject {
             self?.refreshFromProcess()
         }
 
+        // Метка начала запуска: если приложение упадёт между ней и меткой
+        // «нажат Start»/«готово», в журнале останется видимый след.
+        AscentHUDLogMessage("Swift: приложение запущено (pid=\(getpid()))")
+
         // Синхронизацию делаем асинхронно, чтобы не тормозить первый кадр app.
         DispatchQueue.main.async { [weak self] in
             self?.refreshFromProcess()
@@ -84,15 +88,18 @@ final class LoaderState: ObservableObject {
         // Поднимаем HUD-процесс. Повторный Start дублей не создаёт (проверка
         // по PID-файлу внутри SetHUDEnabled).
         SetHUDEnabled(true)
+        AscentHUDLogMessage("Swift: Start — HUD поднят, собираю диагностику")
 
         // Оверлей НЕ считаем запущенным, пока дочерний процесс не записал свой
         // PID и не оказался жив. До этого кнопка остаётся Start.
         // Оверлей поднят — держим диагностику свежей всё время, пока он включён:
         // её короткая версия висит внизу экрана, а не только в отдельном окне.
         refreshDebug()
+        AscentHUDLogMessage("Swift: Start — диагностика собрана, жду PID-файл")
         startDiagnosticsRefresh()
 
         waitForHUDStart()
+        AscentHUDLogMessage("Swift: Start — готово, показываю: \(showing ? "Exit" : "Start")")
     }
 
     /// Ждём до 3 секунд, пока HUD-процесс запишет PID-файл и окажется живым.
@@ -165,9 +172,10 @@ final class LoaderState: ObservableObject {
         } else {
             stopHeartbeat()
         }
-        if debugVisible || engaged {
-            refreshDebug()
-        }
+        // Диагностику перечитываем всегда: она безопасна (никаких приватных
+        // фреймворков) и нужна даже без открытого отладочного окна — по ней
+        // видно, чем закончился предыдущий запуск.
+        refreshDebug()
     }
 
     /// unload из меню: лоадер останавливается, но квадратик и меню
@@ -308,11 +316,6 @@ final class LoaderState: ObservableObject {
         lines.append("  кнопка показывает: \(showing ? "Exit" : "Start")")
         lines.append("")
 
-        if let report = AscentProbeReport() {
-            lines.append(report)
-        }
-        lines.append("")
-
         lines.append("entitlements из подписи бинарника:")
         if let entitlements = AscentOwnEntitlements(), !entitlements.isEmpty {
             lines.append(entitlements)
@@ -338,13 +341,32 @@ final class LoaderState: ObservableObject {
             .first.map(String.init) ?? ""
     }
 
-    /// Последние шаги HUD-процесса из журнала: по ним видно, до какой стадии он
-    /// дошёл (инициализация, окно, хостинг).
+    /// Последние шаги из журнала: по ним видно, до какой стадии дошёл HUD-процесс
+    /// и до какой — само приложение.
     var diagnosticsSteps: String {
         let steps = debugText.split(separator: "\n")
             .map { stripLogPrefix($0.trimmingCharacters(in: .whitespaces)) }
-            .filter { $0.hasPrefix("[HUD]") || $0.hasPrefix("!!!") }
+            .filter { $0.hasPrefix("[HUD]") || $0.hasPrefix("!!!") || $0.hasPrefix("Swift:") }
         return steps.suffix(6).joined(separator: "\n")
+    }
+
+    /// Признак того, что прошлый запуск приложения не дошёл до конца (упал).
+    ///
+    /// Метку «нажат Start» пишем до опасной работы, метку «готово» — после. Если
+    /// в журнале есть первая и нет второй, значит между ними процесс умер — и
+    /// причину надо показать сразу при запуске, не дожидаясь нажатий.
+    var lastRunCrashed: Bool {
+        let lines = debugText.split(separator: "\n")
+            .map { stripLogPrefix($0.trimmingCharacters(in: .whitespaces)) }
+        for line in lines.reversed() {
+            if line.contains("Swift: Start — готово") || line.contains("Swift: нажат Exit") {
+                return false
+            }
+            if line.contains("Swift: нажат Start") {
+                return true
+            }
+        }
+        return false
     }
 
     /// Короткий вывод: что именно случилось с оверлеем.
