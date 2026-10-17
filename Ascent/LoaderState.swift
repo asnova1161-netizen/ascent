@@ -20,6 +20,9 @@ final class LoaderState: ObservableObject {
     /// фон, сменой сцены или возвратом в приложение: пока оверлей включён,
     /// внутри app остаётся запасной квадратик.
     @Published var engaged = false
+    /// HUD-процесс поднялся И отрисовал свой UIKit-квадрат. Только тогда прячем
+    /// запасной квадрат внутри app: пока это не так, квадрат живёт в приложении.
+    @Published var hudOverlayReady = false
     /// Показывать ли отладочное окно.
     @Published var debugVisible = false
     /// Содержимое отладочного окна (обновляется раз в секунду).
@@ -83,6 +86,11 @@ final class LoaderState: ObservableObject {
         running = true
         engaged = true
         menuOpen = false // после Start появляется ТОЛЬКО квадратик
+        // Снимаем прошлую метку «HUD нарисовал квадрат»: новый процесс поставит
+        // её сам, когда его оверлей реально поднимется. Иначе запасной квадрат
+        // внутри app спрятался бы раньше времени.
+        hudOverlayReady = false
+        OverlayStore.setFlag(false, for: "hud.overlay")
 
         AscentHUDLogMessage("Swift: нажат Start")
 
@@ -120,6 +128,13 @@ final class LoaderState: ObservableObject {
                 self.isStarting = false
                 self.showing = true
                 self.running = true
+                // HUD пишет метку hud.overlay в момент создания своего квадрата;
+                // к этому моменту PID-файл уже есть, а метка может появиться на
+                // долю секунды позже. Перечитаем её чуть позже и в пульсе.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                    guard let self = self else { return }
+                    self.hudOverlayReady = IsHUDEnabled() && OverlayStore.flag(for: "hud.overlay")
+                }
                 let pid = AscentHUDProcessID()
                 AscentHUDLogMessage("Swift: оверлей подтверждён, pid=\(pid)")
                 self.startHeartbeat()
@@ -132,8 +147,6 @@ final class LoaderState: ObservableObject {
                 self.isStarting = false
                 self.showing = false
                 AscentHUDLogMessage("Swift: оверлей НЕ подтвердился за 3 с")
-                // Показываем причину автоматически, чтобы не искать её вслепую.
-                self.openDebug()
             }
         }
 
@@ -151,6 +164,7 @@ final class LoaderState: ObservableObject {
         engaged = false
         running = false
         showing = false
+        hudOverlayReady = false
         menuOpen = false
         SetHUDEnabled(false)
         refreshDebug()
@@ -172,6 +186,7 @@ final class LoaderState: ObservableObject {
 
         let alive = IsHUDEnabled()
         showing = alive
+        hudOverlayReady = alive && OverlayStore.flag(for: "hud.overlay")
         if alive {
             // Оверлей уже поднят — значит мы «включены», даже если приложение
             // перезапускали: так кнопка, запасной квадрат и диагностика видят
@@ -208,6 +223,7 @@ final class LoaderState: ObservableObject {
     private func heartbeat(_ timer: Timer) {
         let pid = AscentHUDProcessID()
         let alive = IsHUDEnabled()
+        hudOverlayReady = alive && OverlayStore.flag(for: "hud.overlay")
         AscentHUDLogMessage("HUD alive: pid=\(pid) жив=\(alive ? "да" : "нет")")
 
         // HUD пропал — отмечаем это один раз и прекращаем пульс, чтобы журнал
@@ -219,9 +235,6 @@ final class LoaderState: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.refreshFromProcess()
-                // Чтобы не искать причину вслепую: как только оверлей пропал,
-                // сразу показываем отладочное окно с выводом «ПРИЧИНА».
-                self.openDebug()
             }
             // Система пишет отчёт о падении с задержкой: если первый раз его
             // ещё не было, через несколько секунд он уже точно на месте.
