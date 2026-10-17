@@ -12,6 +12,10 @@
 	<true/>
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
 	<key>com.apple.private.hid.client.event-monitor</key>
 	<true/>
 	<key>com.apple.private.hid.client.event-filter</key>
