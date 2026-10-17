@@ -121,6 +121,18 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
             phase = UITouchPhaseCancelled;
         }
 
+        // Журналируем всё, КРОМЕ движения: по нему видно, куда и с какой фазой
+        // попадают пасания — в частности, доходит ли «подъём» пальца до конца
+        // и какое вью получило касание. Движения писать нельзя — их сотни.
+        if (phase != UITouchPhaseMoved) {
+            static const char *kPhaseNames[] = { "began", "moved", "stationary", "ended", "cancelled" };
+            const char *phaseName = (phase >= 0 && phase < 5) ? kPhaseNames[phase] : "?";
+            AscentHUDLog(@"[touch] %s на (%.0f, %.0f) -> %@, pointer=%ld",
+                         phaseName, location.x, location.y,
+                         keyView != nil ? NSStringFromClass([keyView class]) : @"nil",
+                         (long)pointerId);
+        }
+
         if (pointerId > 0) {
             [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
                           atGlobalCoordinate:location
