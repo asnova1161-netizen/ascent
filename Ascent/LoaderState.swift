@@ -275,7 +275,7 @@ final class LoaderState: ObservableObject {
         let spawnCode = AscentLastSpawnReturnCode()
         let logTail = AscentHUDLogTail(80) ?? ""
         let logLines = logTail.split(separator: "\n", omittingEmptySubsequences: false)
-        let processState = AscentHUDProcessState()
+        let processState = AscentHUDProcessState() ?? "состояние неизвестно"
 
         // Самое главное — короткий вывод о причине: его легко переписать или
         // продиктовать, не разбираясь в остальном тексте.

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>application-identifier</key>
+	<string>com.ascentios.ascent</string>
 	<key>platform-application</key>
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
@@ -16,6 +18,10 @@
 	<true/>
 	<key>com.apple.private.hid.client.event-dispatch</key>
 	<true/>
+	<key>com.apple.private.hid.client.service-protected</key>
+	<true/>
+	<key>com.apple.private.hid.manager.client</key>
+	<true/>
 	<key>com.apple.backboard.client</key>
 	<true/>
 	<key>com.apple.QuartzCore.displayable-context</key>
@@ -25,6 +31,16 @@
 	<key>com.apple.springboard.CFUserNotification</key>
 	<true/>
 	<key>com.apple.springboard.appbackgroundstyle</key>
+	<true/>
+	<key>com.apple.springboard.disallowControlCenter</key>
+	<true/>
+	<key>com.apple.springboard.disallowNotificationCenter</key>
+	<true/>
+	<key>com.apple.private.allow-background-haptics</key>
+	<true/>
+	<key>com.apple.private.kernel.jetsam</key>
+	<true/>
+	<key>com.apple.private.memorystatus</key>
 	<true/>
 	<key>file-read-data</key>
 	<true/>
