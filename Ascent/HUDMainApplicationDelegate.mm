@@ -81,6 +81,12 @@
                      exception.name, exception.reason, exception.callStackSymbols);
     }
 
+    // Если этой метки нет в журнале — процесс умер синхронно, ещё внутри
+    // __completeAndRunAsPlugin, до того как управление вернулось в очередь main.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AscentHUDLog(@"delegate: очередь main снова работает после хостинга");
+    });
+
     // Через 2 секунды после регистрации пишем состояние окна: если процесс жив,
     // а эти строки не появились — значит процессу не дали дожить до 2 секунд.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),

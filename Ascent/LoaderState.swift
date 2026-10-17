@@ -32,6 +32,7 @@ final class LoaderState: ObservableObject {
     private var debugTimer: Timer?
     private var heartbeatTimer: Timer?
     private var isStarting = false
+    private var didFetchCrashLog = false
 
     init() {
         // Приложение могли перезапустить, пока оверлей уже висел, а из панели
@@ -161,6 +162,14 @@ final class LoaderState: ObservableObject {
     /// Перечитываем реальность: жив ли HUD-процесс. Никаких других сбросов —
     /// уход в фон и возврат в приложение только это и пересчитывают.
     private func refreshFromProcess() {
+        // Один раз за запуск подтягиваем системный отчёт Apple о падении
+        // оверлея: там и тип исключения, и стек — причина видна сразу, без
+        // разбора журнала вручную. Читает его root-хелпер (-crash).
+        if !didFetchCrashLog {
+            didFetchCrashLog = true
+            AscentFetchSystemCrashReport()
+        }
+
         let alive = IsHUDEnabled()
         showing = alive
         if alive {
@@ -214,6 +223,13 @@ final class LoaderState: ObservableObject {
                 // сразу показываем отладочное окно с выводом «ПРИЧИНА».
                 self.openDebug()
             }
+            // Система пишет отчёт о падении с задержкой: если первый раз его
+            // ещё не было, через несколько секунд он уже точно на месте.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                guard let self = self else { return }
+                AscentFetchSystemCrashReport()
+                self.refreshDebug()
+            }
         }
     }
 
@@ -245,6 +261,9 @@ final class LoaderState: ObservableObject {
 
     func openDebug() {
         debugVisible = true
+        // Причину падения оверлея точнее всего объясняет системный отчёт Apple,
+        // а прочитать его может только root-хелпер — обновляем в момент разбора.
+        AscentFetchSystemCrashReport()
         refreshDebug()
         startDiagnosticsRefresh()
     }
@@ -342,12 +361,27 @@ final class LoaderState: ObservableObject {
     }
 
     /// Последние шаги из журнала: по ним видно, до какой стадии дошёл HUD-процесс
-    /// и до какой — само приложение.
+    /// и до какой — само приложение. Стек падения сюда не попадает: у него
+    /// отдельный блок, потому что важны первые кадры, а не последние.
     var diagnosticsSteps: String {
         let steps = debugText.split(separator: "\n")
             .map { stripLogPrefix($0.trimmingCharacters(in: .whitespaces)) }
-            .filter { $0.hasPrefix("[HUD]") || $0.hasPrefix("!!!") || $0.hasPrefix("Swift:") }
+            .filter {
+                ($0.hasPrefix("[HUD]") && !$0.contains("!!! стек")) ||
+                $0.hasPrefix("[crash]") ||
+                $0.hasPrefix("!!!") ||
+                $0.hasPrefix("Swift:")
+            }
         return steps.suffix(6).joined(separator: "\n")
+    }
+
+    /// Стек падения HUD-процесса, если он был: где именно процесс упал, видно по
+    /// первым кадрам. Пусто, если падения не было.
+    var diagnosticsCrash: String {
+        let frames = debugText.split(separator: "\n")
+            .map { stripLogPrefix($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { $0.hasPrefix("[HUD] !!! стек") }
+        return frames.prefix(9).joined(separator: "\n")
     }
 
     /// Признак того, что прошлый запуск приложения не дошёл до конца (упал).

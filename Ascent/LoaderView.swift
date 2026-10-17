@@ -287,6 +287,14 @@ private struct HUDDiagnosticsStrip: View {
                 .foregroundColor(.yellow)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if !state.diagnosticsCrash.isEmpty {
+                Text(state.diagnosticsCrash)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.orange.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(9)
+            }
+
             if !state.diagnosticsSteps.isEmpty {
                 Text(state.diagnosticsSteps)
                     .font(.system(size: 9, design: .monospaced))

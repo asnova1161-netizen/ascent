@@ -87,6 +87,17 @@ BOOL AscentProbeClass(const char *name);
 /// Какие entitlements реально лежат в подписи этого бинарника (или nil).
 NSString *AscentOwnEntitlements(void);
 
+#pragma mark - Системные отчёты о падениях
+
+/// Найти новейший системный отчёт Apple о падении (файл Ascent*.ips) и записать
+/// в журнал тип исключения и стек. Читать системный каталог умеет только
+/// root-процесс, поэтому вызывать это надо из режима -crash.
+void AscentCollectSystemCrashReports(void);
+
+/// То же самое, но запуском отдельного процесса (-crash). Безопасно вызывать
+/// из приложения: системный каталог читает уже сам root-хелпер.
+void AscentFetchSystemCrashReport(void);
+
 #ifdef __cplusplus
 }
 #endif

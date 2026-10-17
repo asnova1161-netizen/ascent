@@ -487,6 +487,169 @@ static pid_t AscentSpawnSelfAndWait(const char *argument, int *outStatus)
     return pid;
 }
 
+#pragma mark - Системные отчёты о падениях
+
+// Приложение (оно от mobile) не может читать системный каталог отчётов Apple,
+// а оверлей/хелпер от root — может. Поэтому отчёт ищет отдельный режим -crash,
+// а результат кладётся в общий журнал.
+
+static NSString *AscentCrashReportSummary(NSData *data)
+{
+    // Формат .ips: первая строка — заголовок, дальше — тело в JSON.
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (text.length == 0) {
+        return nil;
+    }
+
+    NSString *body = text;
+    NSRange newline = [text rangeOfString:@"\n"];
+    if (newline.location != NSNotFound) {
+        body = [text substringFromIndex:newline.location + 1];
+    }
+
+    id json = [NSJSONSerialization JSONObjectWithData:[body dataUsingEncoding:NSUTF8StringEncoding]
+                                             options:0
+                                               error:NULL];
+    if (![json isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+
+    NSDictionary *report = (NSDictionary *)json;
+    NSMutableString *summary = [NSMutableString string];
+
+    id exception = report[@"exception"];
+    if (exception != nil) {
+        [summary appendFormat:@"исключение: %@\n", exception];
+    }
+
+    id termination = report[@"termination"];
+    if (termination != nil) {
+        [summary appendFormat:@"завершение: %@\n", termination];
+    }
+
+    id asi = report[@"asi"];
+    if (asi != nil) {
+        [summary appendFormat:@"asi: %@\n", asi];
+    }
+
+    NSArray *images = report[@"usedImages"];
+    NSArray *threads = report[@"threads"];
+    NSInteger faultingThread = [report[@"faultingThread"] integerValue];
+
+    if ([threads isKindOfClass:[NSArray class]] &&
+        faultingThread >= 0 && faultingThread < (NSInteger)threads.count) {
+        id thread = threads[(NSUInteger)faultingThread];
+        if ([thread isKindOfClass:[NSDictionary class]]) {
+            [summary appendFormat:@"поток %ld (имя: %@)\n",
+             (long)faultingThread, ((NSDictionary *)thread)[@"name"] ?: @"нет"];
+
+            NSArray *frames = ((NSDictionary *)thread)[@"frames"];
+            if ([frames isKindOfClass:[NSArray class]]) {
+                NSInteger limit = MIN((NSInteger)frames.count, 24);
+                for (NSInteger index = 0; index < limit; index++) {
+                    id frame = frames[(NSUInteger)index];
+                    if (![frame isKindOfClass:[NSDictionary class]]) {
+                        continue;
+                    }
+
+                    NSString *imageName = @"?";
+                    NSInteger imageIndex = [((NSDictionary *)frame)[@"imageIndex"] integerValue];
+                    if ([images isKindOfClass:[NSArray class]] &&
+                        imageIndex >= 0 && imageIndex < (NSInteger)images.count &&
+                        [images[(NSUInteger)imageIndex] isKindOfClass:[NSDictionary class]]) {
+                        imageName = ((NSDictionary *)images[(NSUInteger)imageIndex])[@"name"] ?: @"?";
+                    }
+
+                    [summary appendFormat:@"  #%ld %@ + %@ %@\n", (long)index, imageName,
+                     ((NSDictionary *)frame)[@"imageOffset"] ?: @"?",
+                     ((NSDictionary *)frame)[@"symbol"] ?: @""];
+                }
+            }
+        }
+    }
+
+    return summary;
+}
+
+void AscentCollectSystemCrashReports(void)
+{
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSArray<NSString *> *directories = @[
+        @"/var/mobile/Library/Logs/CrashReporter",
+        @"/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs",
+        @"/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs/Retired",
+        @"/var/mobile/Library/Logs/CrashReporter/Retired",
+        @"/var/root/Library/Logs/CrashReporter",
+    ];
+
+    NSString *newestPath = nil;
+    NSDate *newestDate = nil;
+    NSMutableString *inventory = [NSMutableString string];
+
+    for (NSString *directory in directories) {
+        NSArray<NSString *> *entries = [manager contentsOfDirectoryAtPath:directory error:nil];
+        if (entries == nil) {
+            [inventory appendFormat:@"  %@ — нет доступа\n", directory];
+            continue;
+        }
+
+        NSInteger matched = 0;
+        for (NSString *entry in entries) {
+            if (![[entry lowercaseString] hasPrefix:@"ascent"]) {
+                continue;
+            }
+
+            NSString *path = [directory stringByAppendingPathComponent:entry];
+            NSDate *modified = [manager attributesOfItemAtPath:path error:nil][NSFileModificationDate];
+            if (modified == nil) {
+                continue;
+            }
+
+            matched++;
+            if (newestDate == nil || [modified compare:newestDate] == NSOrderedDescending) {
+                newestDate = modified;
+                newestPath = path;
+            }
+        }
+        [inventory appendFormat:@"  %@ — файлов Ascent*: %ld\n", directory, (long)matched];
+    }
+
+    AscentHUDLog(@"отчёты Apple:\n%@", inventory);
+
+    if (newestPath == nil) {
+        AscentHUDLog(@"отчёт Apple о падении не найден");
+        return;
+    }
+
+    NSData *data = [NSData dataWithContentsOfFile:newestPath];
+    AscentHUDLog(@"отчёт Apple: %@ (%lu байт, время %@)",
+                 newestPath, (unsigned long)data.length, newestDate);
+
+    NSString *summary = data.length > 0 ? AscentCrashReportSummary(data) : nil;
+    if (summary.length > 0) {
+        AscentHUDLog(@"%@", summary);
+    } else {
+        AscentHUDLog(@"отчёт Apple не разобран (не JSON .ips или обрезан)");
+    }
+}
+
+void AscentFetchSystemCrashReport(void)
+{
+    // Отдельный процесс: самому приложению системный каталог отчётов недоступен.
+    // Результат последнего spawn -hud сохранённым (иначе диагностика показала бы
+    // «последний spawn: -crash»).
+    int savedError = gLastSpawnError;
+    pid_t savedPID = gLastSpawnPID;
+    char savedMode[sizeof(gLastSpawnMode)];
+    memcpy(savedMode, gLastSpawnMode, sizeof(savedMode));
+
+    AscentSpawnSelfAndWait("-crash", NULL);
+
+    gLastSpawnError = savedError;
+    gLastSpawnPID = savedPID;
+    memcpy(gLastSpawnMode, savedMode, sizeof(savedMode));
+}
+
 #pragma mark - Пробы приватных API
 
 static NSString *gProcessMode = @"app";

@@ -5,12 +5,23 @@
 #import <objc/runtime.h>
 #import <unistd.h>
 #import <signal.h>
+#import <pthread.h>
 #import <stdlib.h>
 #import <string.h>
 #import <stdio.h>
 #import <errno.h>
 #import <dlfcn.h>
 #import <dispatch/dispatch.h>
+#import <ucontext.h>
+
+// Заголовок разворачивателя стека есть не во всех SDK, а обход по цепочке
+// кадров (x29) на arm64 доступен всегда — поэтому он основной.
+#if __has_include(<unwind.h>)
+#import <unwind.h>
+#define ASCENT_HAS_UNWIND 1
+#else
+#define ASCENT_HAS_UNWIND 0
+#endif
 
 #import "IOKit+SPI.h"
 #import "HUDHelper.h"
@@ -115,14 +126,110 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
 #pragma mark - Диагностика падений HUD
 
 // Падение HUD-процесса иначе выглядит просто как «квадрат исчез». Пишем
-// причину в общий журнал, который потом показывает само приложение.
-static void AscentHUDSignalHandler(int signalNumber)
+// причину в общий журнал, который потом показывает само приложение. Кроме
+// самого сигнала снимаем стек: без него причину падения искать вслепую.
+
+#define ASCENT_MAX_STACK_FRAMES 24
+
+// Главный поток процесса — запоминаем при старте, чтобы в обработчике сигнала
+// было понятно, где именно упало (главный поток или фоновый).
+static pthread_t gAscentMainThread;
+
+typedef struct {
+    void *frames[ASCENT_MAX_STACK_FRAMES];
+    int count;
+} AscentStackWalk;
+
+// Печатает один кадр: адрес, символ и образ (имя фреймворка). Форматируем
+// только средствами C — в обработчике сигналов нельзя трогать Foundation.
+static void AscentLogStackFrame(const char *tag, int index, uintptr_t address)
 {
-    char buffer[192];
-    int length = snprintf(buffer, sizeof(buffer), "[HUD] !!! HUD pid=%d убит сигналом %d\n", (int)getpid(), signalNumber);
+    char buffer[288];
+    Dl_info info;
+
+    memset(&info, 0, sizeof(info));
+    if (address != 0 && dladdr((void *)address, &info) != 0 && info.dli_fname != NULL) {
+        const char *image = strrchr(info.dli_fname, '/');
+        image = (image != NULL) ? image + 1 : info.dli_fname;
+        uintptr_t offset = info.dli_saddr != NULL ? address - (uintptr_t)info.dli_saddr : 0;
+        snprintf(buffer, sizeof(buffer), "[HUD] !!! стек %s #%d: %s + 0x%lx (образ %s)\n",
+                 tag, index, info.dli_sname != NULL ? info.dli_sname : "?", (unsigned long)offset, image);
+    } else {
+        snprintf(buffer, sizeof(buffer), "[HUD] !!! стек %s #%d: 0x%lx (образ не определён)\n",
+                 tag, index, (unsigned long)address);
+    }
+    AscentHUDLogRaw(buffer);
+}
+
+#if ASCENT_HAS_UNWIND
+static _Unwind_Reason_Code AscentUnwindStep(struct _Unwind_Context *context, void *argument)
+{
+    AscentStackWalk *walk = (AscentStackWalk *)argument;
+    uintptr_t address = (uintptr_t)_Unwind_GetIP(context);
+
+    if (address != 0 && walk->count < ASCENT_MAX_STACK_FRAMES) {
+        walk->frames[walk->count++] = (void *)address;
+    }
+    return (walk->count >= ASCENT_MAX_STACK_FRAMES) ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+#endif
+
+static void AscentHUDSignalHandler(int signalNumber, siginfo_t *info, void *context)
+{
+    // Главный поток запоминаем при старте: по журналу важно сразу понять,
+    // упало в главном потоке или в фоновом (например, в ответе XPC).
+    pthread_t currentThread = pthread_self();
+    char buffer[256];
+    int length = snprintf(buffer, sizeof(buffer),
+                          "[HUD] !!! HUD pid=%d убит сигналом %d, адрес=%p, поток=%s (%p)\n",
+                          (int)getpid(), signalNumber, info != NULL ? info->si_addr : NULL,
+                          pthread_equal(currentThread, gAscentMainThread) ? "главный" : "фоновый",
+                          (void *)currentThread);
     if (length > 0) {
         AscentHUDLogRaw(buffer);
     }
+
+#if defined(__arm64__)
+    if (context != NULL) {
+        ucontext_t *ucontext = (ucontext_t *)context;
+        AscentLogStackFrame("pc", 0, (uintptr_t)ucontext->uc_mcontext->__ss.__pc);
+        AscentLogStackFrame("lr", 0, (uintptr_t)ucontext->uc_mcontext->__ss.__lr);
+    }
+#endif
+
+    // Стек через разворачиватель (если он есть в SDK): он не доверяет
+    // содержимому памяти, поэтому безопасен внутри обработчика сигнала.
+#if ASCENT_HAS_UNWIND
+    AscentStackWalk walk;
+    memset(&walk, 0, sizeof(walk));
+    _Unwind_Backtrace(AscentUnwindStep, &walk);
+    for (int index = 0; index < walk.count; index++) {
+        AscentLogStackFrame("uw", index, (uintptr_t)walk.frames[index]);
+    }
+#endif
+
+#if defined(__arm64__)
+    if (context != NULL) {
+        // Обход по цепочке кадров (x29) обычно даёт более «человеческий» стек.
+        // Указатели проверяем, чтобы не упасть повторно и не потерять уже
+        // записанные строки.
+        ucontext_t *ucontext = (ucontext_t *)context;
+        uintptr_t framePointer = (uintptr_t)ucontext->uc_mcontext->__ss.__fp;
+        for (int index = 0; index < ASCENT_MAX_STACK_FRAMES && framePointer != 0; index++) {
+            uintptr_t *frame = (uintptr_t *)framePointer;
+            uintptr_t returnAddress = frame[1];
+            uintptr_t nextFrame = frame[0];
+
+            if (returnAddress != 0) {
+                AscentLogStackFrame("fp", index, returnAddress);
+            }
+            if (nextFrame <= framePointer || (nextFrame & 0x7) != 0) {
+                break;
+            }
+            framePointer = nextFrame;
+        }
+    }
+#endif
 
     signal(signalNumber, SIG_DFL);
     raise(signalNumber);
@@ -138,9 +245,15 @@ static void AscentInstallCrashHandlers(void)
 {
     NSSetUncaughtExceptionHandler(&AscentUncaughtExceptionHandler);
 
-    int signals[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGTRAP, SIGFPE };
+    const int signals[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGTRAP, SIGFPE };
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = AscentHUDSignalHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+
     for (size_t index = 0; index < sizeof(signals) / sizeof(signals[0]); index++) {
-        signal(signals[index], AscentHUDSignalHandler);
+        sigaction(signals[index], &action, NULL);
     }
 }
 
@@ -158,10 +271,15 @@ int main(int argc, char *argv[])
 {
     @autoreleasepool
     {
+        // Запоминаем главный поток до всего остального: обработчик сигналов
+        // должен успеть сообщить, где именно упал процесс.
+        gAscentMainThread = pthread_self();
+
         const char *mode = (argc > 1) ? argv[1] : NULL;
         BOOL isHelper = (mode != NULL) && (strcmp(mode, "-hud") == 0 ||
                                            strcmp(mode, "-check") == 0 ||
-                                           strcmp(mode, "-exit") == 0);
+                                           strcmp(mode, "-exit") == 0 ||
+                                           strcmp(mode, "-crash") == 0);
 
         // Каталог общих файлов состояния (PID + позиции) приходит из главного
         // процесса: у root-процесса свой «дом», общий путь надо знать точно.
@@ -178,6 +296,8 @@ int main(int argc, char *argv[])
                 AscentSetLogPrefix(@"[HUD] ");
             } else if (strcmp(mode, "-check") == 0) {
                 AscentSetLogPrefix(@"[check] ");
+            } else if (strcmp(mode, "-crash") == 0) {
+                AscentSetLogPrefix(@"[crash] ");
             } else {
                 AscentSetLogPrefix(@"[exit] ");
             }
@@ -221,6 +341,15 @@ int main(int argc, char *argv[])
                 AscentHUDLog(@"-exit: PID-файла нет");
             }
             AscentRemovePIDFile();
+            return EXIT_SUCCESS;
+        }
+
+        if (mode != NULL && strcmp(mode, "-crash") == 0)
+        {
+            // Ищем системный отчёт Apple о падении оверлея: там есть и тип
+            // исключения, и полный стек. Бежать это должно от root, поэтому
+            // запускается как отдельный режим, а не из самого приложения.
+            AscentCollectSystemCrashReports();
             return EXIT_SUCCESS;
         }
 
