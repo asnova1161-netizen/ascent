@@ -6,6 +6,7 @@
 #import "UIEvent+Private.h"
 #import "UITouch-KIFAdditions.h"
 #import "UIApplication+Private.h"
+#import "HUDHelper.h"
 
 // Pool of reusable `UITouch` objects (one per pointer id) plus the set of
 // touches that are currently down. Events arriving from BackBoard are turned
@@ -14,6 +15,11 @@
 // not receive real touches from the window server.
 static NSMutableArray<UITouch *> *_touchPool = nil;
 static NSMutableArray<UITouch *> *_livingTouches = nil;
+
+// Сколько касаний может быть «живым» одновременно. Пальцев больше восьми не
+// бывает, а ограничение страхует от накопления, если событие «подъёма»
+// потеряется: иначе живые касания копились бы в каждом следующем событии.
+static const NSUInteger kMaxLivingTouches = 8;
 
 @implementation TSEventFetcher
 
@@ -33,29 +39,13 @@ static NSMutableArray<UITouch *> *_livingTouches = nil;
     }
 }
 
-+ (NSInteger)receiveAXEventID:(NSInteger)eventId
-           atGlobalCoordinate:(CGPoint)coordinate
-               withTouchPhase:(UITouchPhase)phase
-                     inWindow:(UIWindow *)window
-                       onView:(UIView *)view
+// Отправляет одно событие со всеми текущими касаниями. Вынесено отдельно,
+// потому что то же событие нужно послать, когда повторное «начал» вытесняет
+// старое касание того же пальца.
++ (void)deliverLivingTouches
 {
-    [self preparePoolIfNeeded];
-
-    NSInteger index = MIN(MAX(eventId, 1), 98) - 1;
-
-    UITouch *touch = nil;
-
-    if (phase == UITouchPhaseBegan) {
-        touch = [[UITouch alloc] initAtPoint:coordinate inWindow:window onView:view];
-        [_touchPool replaceObjectAtIndex:index withObject:touch];
-        [_livingTouches addObject:touch];
-    } else {
-        touch = _touchPool[index];
-        if (![_livingTouches containsObject:touch]) {
-            return 0;
-        }
-        [touch setLocationInWindow:coordinate];
-        [touch setPhaseAndUpdateTimestamp:phase];
+    if (_livingTouches.count == 0) {
+        return;
     }
 
     UIApplication *app = [UIApplication sharedApplication];
@@ -66,12 +56,82 @@ static NSMutableArray<UITouch *> *_livingTouches = nil;
         [event _addTouch:t forDelayedDelivery:NO];
     }
     [app sendEvent:event];
+}
+
++ (NSInteger)receiveAXEventID:(NSInteger)eventId
+           atGlobalCoordinate:(CGPoint)coordinate
+               withTouchPhase:(UITouchPhase)phase
+                     inWindow:(UIWindow *)window
+                       onView:(UIView *)view
+{
+    // Раздача касаний идёт через UIKit: жест, прокрутка или распознаватель
+    // внутри могут бросить исключение (например, при несогласованном касании).
+    // Ронять из-за этого весь оверлей нельзя — ловим, пишем в журнал и
+    // сбрасываем живые касания, чтобы меню с квадратом остались на экране.
+    @try {
+        [self deliverTouchWithEventID:eventId
+                   atGlobalCoordinate:coordinate
+                       withTouchPhase:phase
+                             inWindow:window
+                               onView:view];
+    } @catch (NSException *exception) {
+        AscentHUDLog(@"[touch] отправка касания бросила %@: %@ — сбрасываю живые касания",
+                     exception.name, exception.reason);
+        [_livingTouches removeAllObjects];
+    }
+
+    return 0;
+}
+
++ (void)deliverTouchWithEventID:(NSInteger)eventId
+             atGlobalCoordinate:(CGPoint)coordinate
+                 withTouchPhase:(UITouchPhase)phase
+                       inWindow:(UIWindow *)window
+                         onView:(UIView *)view
+{
+    [self preparePoolIfNeeded];
+
+    NSInteger index = MIN(MAX(eventId, 1), 98) - 1;
+
+    UITouch *touch = nil;
+
+    if (phase == UITouchPhaseBegan) {
+        // Если для этого пальца касание ещё числится живым, значит событие
+        // «подъёма» потерялось. Закрываем старое: без этого оно навсегда
+        // осталось бы в списке живых и подмешивалось бы в каждое следующее
+        // событие — от этого оверлей и падал при перетаскивании.
+        UITouch *stale = _touchPool[index];
+        if (stale != nil && [_livingTouches indexOfObjectIdenticalTo:stale] != NSNotFound) {
+            [stale setPhaseAndUpdateTimestamp:UITouchPhaseCancelled];
+            [self deliverLivingTouches];
+            [_livingTouches removeObjectIdenticalTo:stale];
+        }
+
+        touch = [[UITouch alloc] initAtPoint:coordinate inWindow:window onView:view];
+        [_touchPool replaceObjectAtIndex:index withObject:touch];
+        [_livingTouches addObject:touch];
+
+        // Страховка: живых касаний не может быть больше, чем пальцев.
+        while (_livingTouches.count > kMaxLivingTouches) {
+            UITouch *oldest = _livingTouches.firstObject;
+            [oldest setPhaseAndUpdateTimestamp:UITouchPhaseCancelled];
+            [self deliverLivingTouches];
+            [_livingTouches removeObjectIdenticalTo:oldest];
+        }
+    } else {
+        touch = _touchPool[index];
+        if (touch == nil || [_livingTouches indexOfObjectIdenticalTo:touch] == NSNotFound) {
+            return;
+        }
+        [touch setLocationInWindow:coordinate];
+        [touch setPhaseAndUpdateTimestamp:phase];
+    }
+
+    [self deliverLivingTouches];
 
     if (phase == UITouchPhaseEnded || phase == UITouchPhaseCancelled) {
         [_livingTouches removeObjectIdenticalTo:touch];
     }
-
-    return 0;
 }
 
 @end
