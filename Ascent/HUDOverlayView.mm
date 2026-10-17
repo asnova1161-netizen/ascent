@@ -140,6 +140,29 @@ static const CGFloat kTabBarHeight   = 40.0;
 static const CGFloat kMargin         = 10.0;
 static const CGFloat kTriggerInset   = 14.0;
 
+// Высота вкладок: строка переключателя, строка слайдера и содержимое вкладки
+// «combot». Держим константами, потому что одни и те же числа нужны и сборке
+// строк, и раскладке, и размеру прокручиваемой области.
+static const CGFloat kSwitchRowHeight  = 40.0;
+static const CGFloat kSwitchRowGap     = 8.0;
+static const CGFloat kSliderGroupHeight = 40.0;
+static const CGFloat kSliderGroupGap   = 6.0;
+static const CGFloat kGameContentHeight = 410.0;
+
+// Что тянет палец в потоке касаний (см. handleRawTouchPhase:...).
+typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
+    HUDRawDragNone = 0,
+    HUDRawDragTrigger,
+    HUDRawDragPanel,
+    HUDRawDragScroll,
+};
+
+// Единственный живой оверлей процесса (см. +currentOverlay). Ссылку держим
+// статиком: владеет оверлеем окно HUD, а статик нужен лишь чтобы поток
+// HID-событий мог найти оверлей, не перебирая окна. Процесс одноразовый, так
+// что держать оверлей до конца жизни процесса можно.
+static HUDOverlayView *_hudCurrentOverlay = nil;
+
 // Делегат прокрутки нужен только ради журнала: по нему видно, начиналась ли
 // прокрутка меню и дожила ли она до конца.
 @interface HUDOverlayView () <UIScrollViewDelegate>
@@ -159,8 +182,6 @@ static const CGFloat kTriggerInset   = 14.0;
     UIImageView *_triggerIcon;
     CAGradientLayer *_triggerGradient;
     CGSize _triggerOffset;          // сохранённое смещение от базовой позиции
-    BOOL _triggerDragging;
-    CGPoint _triggerDragStart;
 
     // Панель
     UIView *_panel;
@@ -177,18 +198,32 @@ static const CGFloat kTriggerInset   = 14.0;
     NSMutableArray<UISlider *> *_sliders;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
     CGSize _panelOffset;
-    BOOL _panelDragging;
-    CGPoint _panelDragStart;
     BOOL _panelOpen;
     NSInteger _tab;
+
+    // Перетаскивание/прокрутка прямо от потока касаний (тап работает и через
+    // синтетические UITouch, а движение — только так).
+    HUDRawDragTarget _rawTarget;
+    CGPoint _rawStart;          // точка начала в координатах _stage
+    CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
+    CGPoint _rawStartOffset;    // contentOffset на момент начала
+    BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
 }
 
 #pragma mark - Создание
+
++ (instancetype)currentOverlay
+{
+    // Оверлей лежит в окне HUD, а окно держится делегатом приложения процесс;
+    // искать его заново по иерархии окон не нужно (и окна доступны не всегда).
+    return _hudCurrentOverlay;
+}
 
 + (instancetype)overlayForWindow:(UIWindow *)window
 {
     HUDOverlayView *overlay = [[HUDOverlayView alloc] initWithFrame:window.bounds];
     overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _hudCurrentOverlay = overlay;
     return overlay;
 }
 
@@ -212,6 +247,14 @@ static const CGFloat kTriggerInset   = 14.0;
                               HUDOverlayNumber(@"hud.panel.y", 0));
     _tab = 0;
 
+    // Читы по умолчанию ВЫКЛЮЧЕНЫ. В общем файле значения переживают
+    // перезапуск, поэтому меню открывалось со всем включённым — сбрасываем
+    // переключатели при каждом подъёме оверлея. Позиции квадрата и панели при
+    // этом сохраняются.
+    HUDOverlaySetFlag(@"cheat.esp", NO);
+    HUDOverlaySetFlag(@"cheat.aimbot", NO);
+    HUDOverlaySetFlag(@"cheat.trigger", NO);
+
     [self buildTrigger];
     [self buildPanel];
     [self startOrientationObserver];
@@ -224,8 +267,129 @@ static const CGFloat kTriggerInset   = 14.0;
     _trigger.hidden = NO;
     _trigger.layer.opacity = 1.0f;
 
-    AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 3), bounds=%@", NSStringFromCGRect(frame));
+    AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 4), bounds=%@", NSStringFromCGRect(frame));
     return self;
+}
+
+#pragma mark - Касания из потока HID (перетаскивание и прокрутка)
+
+/// Кто под пальцем. Считаем по своей иерархии (а не по окну): окно
+/// accessibility-оверлея от системы касаний не получает, но hitTest по нашим
+/// же вью работает всегда.
+- (HUDRawDragTarget)rawDragTargetAtPoint:(CGPoint)point
+{
+    UIView *hit = [self hitTest:point withEvent:nil];
+    if (hit == nil) { return HUDRawDragNone; }
+
+    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragTrigger; }
+    if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragPanel; }
+    if (hit == _scroll || [hit isDescendantOfView:_scroll]) { return HUDRawDragScroll; }
+    return HUDRawDragNone;
+}
+
+- (void)handleRawTouchPhase:(UITouchPhase)phase
+                 atLocation:(CGPoint)location
+                   inWindow:(UIWindow *)window
+{
+    if (window == nil || _stage == nil) { return; }
+
+    // И квадрат, и панель лежат в повёрнутом слое _stage, поэтому смещение
+    // считаем в его координатах: в ландшафте панель тогда идёт за пальцем, а не
+    // «поперёк» экрана.
+    CGPoint point = [self convertPoint:location fromWindow:window];
+    CGPoint stagePoint = [_stage convertPoint:location fromWindow:window];
+
+    if (phase == UITouchPhaseBegan) {
+        _rawTarget = [self rawDragTargetAtPoint:point];
+        _rawStart = stagePoint;
+        _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+        _rawStartOffset = _scroll.contentOffset;
+        _rawMoved = NO;
+        return;
+    }
+
+    if (phase == UITouchPhaseStationary) { return; }
+
+    if (phase == UITouchPhaseMoved) {
+        if (_rawTarget == HUDRawDragNone) { return; }
+        CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
+        // Пока палец не сдвинулся на несколько точек, это ещё тап: иначе дрожь
+        // руки при нажатии уводила бы квадрат с места (и он бы «уползал»).
+        if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < 36.0) { return; }
+        if (!_rawMoved) {
+            _rawMoved = YES;
+            AscentHUDLog(@"[gesture] поток: тянем %@",
+                         _rawTarget == HUDRawDragTrigger ? @"квадрат" :
+                         (_rawTarget == HUDRawDragPanel ? @"панель" : @"содержимое вкладки"));
+        }
+        [self applyRawDragDelta:delta];
+        return;
+    }
+
+    // Ended / Cancelled: фиксируем результат (позицию или смещение прокрутки).
+    if (_rawMoved) {
+        [self commitRawDrag];
+    }
+    _rawTarget = HUDRawDragNone;
+    _rawMoved = NO;
+}
+
+- (void)applyRawDragDelta:(CGPoint)delta
+{
+    if (_rawTarget == HUDRawDragTrigger) {
+        CGPoint center = CGPointMake(_rawStartCenter.x + delta.x, _rawStartCenter.y + delta.y);
+        center = [self clampTriggerCenter:center];
+        _trigger.center = center;
+        CGPoint base = [self triggerBaseCenter];
+        _triggerOffset = CGSizeMake(center.x - base.x, center.y - base.y);
+        return;
+    }
+
+    if (_rawTarget == HUDRawDragPanel) {
+        CGFloat panelWidth = _panel.bounds.size.width;
+        CGPoint center = CGPointMake(_rawStartCenter.x + delta.x, _rawStartCenter.y + delta.y);
+        center = [self clampPanelCenter:center width:panelWidth];
+        _panel.center = center;
+        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
+        return;
+    }
+
+    if (_rawTarget == HUDRawDragScroll) {
+        CGFloat minY = -_scroll.contentInset.top;
+        CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
+                           _scroll.contentInset.bottom, minY);
+        CGFloat y = _rawStartOffset.y - delta.y;
+        _scroll.contentOffset = CGPointMake(_scroll.contentOffset.x, MIN(MAX(y, minY), maxY));
+    }
+}
+
+- (void)commitRawDrag
+{
+    if (_rawTarget == HUDRawDragTrigger) {
+        CGPoint base = [self triggerBaseCenter];
+        CGPoint center = [self clampTriggerCenter:_trigger.center];
+        _triggerOffset = CGSizeMake(center.x - base.x, center.y - base.y);
+        HUDOverlaySetNumber(@"trigger.x", _triggerOffset.width);
+        HUDOverlaySetNumber(@"trigger.y", _triggerOffset.height);
+        AscentHUDLog(@"[gesture] квадрат: перетаскивание закончилось, смещение=(%.0f, %.0f)",
+                     _triggerOffset.width, _triggerOffset.height);
+        return;
+    }
+
+    if (_rawTarget == HUDRawDragPanel) {
+        CGFloat panelWidth = _panel.bounds.size.width;
+        CGPoint center = [self clampPanelCenter:_panel.center width:panelWidth];
+        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
+        HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
+        HUDOverlaySetNumber(@"hud.panel.y", _panelOffset.height);
+        AscentHUDLog(@"[gesture] панель: перетаскивание закончилось, смещение=(%.0f, %.0f)",
+                     _panelOffset.width, _panelOffset.height);
+        return;
+    }
+
+    if (_rawTarget == HUDRawDragScroll) {
+        AscentHUDLog(@"[gesture] прокрутка вкладки: y=%.0f", _scroll.contentOffset.y);
+    }
 }
 
 #pragma mark - Куда пускать касания
@@ -352,17 +516,15 @@ static const CGFloat kTriggerInset   = 14.0;
     _triggerIcon.contentMode = UIViewContentModeCenter;
     [_trigger addSubview:_triggerIcon];
 
-    // ВАЖНО: тап и перетаскивание — РАЗНЫЕ жесты. UIPanGestureRecognizer
+    // ВАЖНО: тап и перетаскивание — РАЗНЫЕ пути. UIPanGestureRecognizer
     // срабатывает только когда палец сдвинулся, поэтому обычное нажатие он
     // вообще не замечал: квадрат «не нажимался». Тап ловим отдельным
-    // UITapGestureRecognizer, а панорама остаётся для переноса.
+    // UITapGestureRecognizer, а перенос ведёт поток касаний напрямую
+    // (см. handleRawTouchPhase:...) — на синтетических UITouch панорама
+    // движения не распознаёт.
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
                                                                          action:@selector(triggerTapped:)];
     [_trigger addGestureRecognizer:tap];
-
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                          action:@selector(triggerPanned:)];
-    [_trigger addGestureRecognizer:pan];
 
     [_stage addSubview:_trigger];
 }
@@ -371,50 +533,6 @@ static const CGFloat kTriggerInset   = 14.0;
 {
     if (gesture.state == UIGestureRecognizerStateEnded) {
         [self togglePanel];
-    }
-}
-
-- (void)triggerPanned:(UIPanGestureRecognizer *)gesture
-{
-    // Координаты считаем в пространстве _stage (а не self): слой повёрнут под
-    // ориентацию, и в повёрнутых координатах перетаскивание должно идти по
-    // пальцу, а не «поперёк».
-    CGPoint t = [gesture translationInView:_stage];
-
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        _triggerDragging = NO;
-        _triggerDragStart = _trigger.center;
-        AscentHUDLog(@"[gesture] квадрат: перетаскивание началось");
-        return;
-    }
-
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        if (t.x * t.x + t.y * t.y > 25.0) { _triggerDragging = YES; }
-        if (_triggerDragging) {
-            CGPoint center = CGPointMake(_triggerDragStart.x + t.x, _triggerDragStart.y + t.y);
-            center = [self clampTriggerCenter:center];
-            _trigger.center = center;
-            // Смещение обновляем сразу — пересчёт раскладки не дёрнет квадрат.
-            CGPoint base = [self triggerBaseCenter];
-            _triggerOffset = CGSizeMake(center.x - base.x, center.y - base.y);
-        }
-        return;
-    }
-
-    if (gesture.state == UIGestureRecognizerStateEnded ||
-        gesture.state == UIGestureRecognizerStateCancelled ||
-        gesture.state == UIGestureRecognizerStateFailed) {
-        if (_triggerDragging) {
-            CGPoint base = [self triggerBaseCenter];
-            CGPoint center = [self clampTriggerCenter:_trigger.center];
-            _triggerOffset = CGSizeMake(center.x - base.x, center.y - base.y);
-            HUDOverlaySetNumber(@"trigger.x", _triggerOffset.width);
-            HUDOverlaySetNumber(@"trigger.y", _triggerOffset.height);
-            _triggerDragging = NO;
-            AscentHUDLog(@"[gesture] квадрат: перетаскивание закончилось, смещение=(%.0f, %.0f)",
-                         _triggerOffset.width, _triggerOffset.height);
-        }
-        // Тап здесь больше не обрабатываем — это делает triggerTapped:.
     }
 }
 
@@ -481,14 +599,6 @@ static const CGFloat kTriggerInset   = 14.0;
     [_panelClose addTarget:self action:@selector(closePanel) forControlEvents:UIControlEventTouchUpInside];
     [_panelHeader addSubview:_panelClose];
 
-    UIPanGestureRecognizer *headerPan = [[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                               action:@selector(panelHeaderPanned:)];
-    [_panelHeader addGestureRecognizer:headerPan];
-
-    // Касания оверлея доставляются синтезированными UITouch (см. HUDApp.mm),
-    // и с ними надёжно срабатывают ЖЕСТЫ, а не раздача касаний контролам —
-    // поэтому на каждую «кнопку» дополнительно вешаем свой UITapGestureRecognizer.
-    // Всё срабатывает идемпотентно, так что двойное срабатывание безопасно.
     [self addTapGesture:_panelClose action:@selector(panelControlTapped:)];
 
     UILabel *headerLine = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -523,6 +633,10 @@ static const CGFloat kTriggerInset   = 14.0;
     // срабатывают мгновенно, а не через долю секунды после касания.
     _scroll.delaysContentTouches = NO;
     _scroll.delegate = self;
+    // Прокрутку ведём сами от потока касаний (см. handleRawTouchPhase:...):
+    // на синтетических UITouch UIScrollView панораму не распознаёт, и если
+    // оставить её включённой, содержимое поедет дважды.
+    _scroll.panGestureRecognizer.enabled = NO;
     [_panel addSubview:_scroll];
 
     [self buildMiscTab];
@@ -566,8 +680,10 @@ static const CGFloat kTriggerInset   = 14.0;
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
         UILabel *label = HUDLabel(switchTitles[i], 13, UIFontWeightMedium);
-        label.frame = CGRectMake(14, 0, 160, 36);
-        label.autoresizingMask = UIViewAutoresizingFlexibleHeight;
+        // Кадр подписи задаёт layoutGameTab (ровно по высоте строки). Здесь
+        // только запрещаем autoresizing: строка рождается нулевой, и «тянущаяся»
+        // высота раздувала подпись вдвое — текст уезжал ниже середины строки.
+        label.autoresizingMask = UIViewAutoresizingNone;
         [row addSubview:label];
 
         UISwitch *toggle = [[UISwitch alloc] init];
@@ -645,7 +761,7 @@ static const CGFloat kTriggerInset   = 14.0;
 
 - (CGFloat)contentHeightForTab:(NSInteger)tab
 {
-    if (tab == 1) { return 376.0; }
+    if (tab == 1) { return kGameContentHeight; }
     return 88.0;
 }
 
@@ -712,7 +828,9 @@ static const CGFloat kTriggerInset   = 14.0;
         }
     }
 
-    CGFloat tabWidth = w / 3.0;
+    // Вкладок может быть меньше, чем три (сейчас misc и combot) — делим полосу
+    // ровно на их число, иначе справа оставалась пустая треть.
+    CGFloat tabWidth = w / (CGFloat)MAX((NSInteger)_tabButtons.count, 1);
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
         UIButton *button = _tabButtons[i];
         button.frame = CGRectMake(tabWidth * i, kHeaderHeight, tabWidth, kTabBarHeight);
@@ -728,7 +846,7 @@ static const CGFloat kTriggerInset   = 14.0;
     CGSize containerSize = CGSizeMake(contentWidth, contentHeight);
 
     _miscView.frame = CGRectMake(0, 0, containerSize.width, 88.0);
-    _gameView.frame = CGRectMake(0, 0, containerSize.width, 376.0);
+    _gameView.frame = CGRectMake(0, 0, containerSize.width, kGameContentHeight);
     _scroll.contentSize = containerSize;
 
     [self layoutMiscTab:(_tab == 0)];
@@ -761,24 +879,38 @@ static const CGFloat kTriggerInset   = 14.0;
     CGFloat rowWidth = w - 32.0;
     for (UISwitch *toggle in _switches) {
         UIView *row = toggle.superview;
-        row.frame = CGRectMake(16, y, rowWidth, 36);
+        row.frame = CGRectMake(16, y, rowWidth, kSwitchRowHeight);
+
+        // Подпись задаём ЯВНО и ровно по высоте строки: у UILabel иначе
+        // «тянется» высота (autoresizing) от нулевого размера строки, и текст
+        // уезжает ниже её середины — надписи esp/aimbot/triggerbot выглядели
+        // сдвинутыми вниз.
+        for (UIView *sub in row.subviews) {
+            if ([sub isKindOfClass:[UILabel class]]) {
+                sub.frame = CGRectMake(14, 0, rowWidth - 80.0, kSwitchRowHeight);
+            }
+        }
+
         CGFloat toggleWidth = toggle.bounds.size.width;
         if (toggleWidth <= 0) { toggleWidth = 51.0; }
-        toggle.frame = CGRectMake(rowWidth - toggleWidth - 10, (36 - toggle.bounds.size.height) / 2.0,
-                                  toggleWidth, toggle.bounds.size.height);
-        y += 36 + 8;
+        CGFloat toggleHeight = toggle.bounds.size.height;
+        if (toggleHeight <= 0) { toggleHeight = 31.0; }
+        toggle.frame = CGRectMake(rowWidth - toggleWidth - 10,
+                                  (kSwitchRowHeight - toggleHeight) / 2.0,
+                                  toggleWidth, toggleHeight);
+        y += kSwitchRowHeight + kSwitchRowGap;
     }
 
     y += 2.0;
     for (UISlider *slider in _sliders) {
         UIView *group = slider.superview;
-        group.frame = CGRectMake(16, y, rowWidth, 40);
+        group.frame = CGRectMake(16, y, rowWidth, kSliderGroupHeight);
         for (UIView *sub in group.subviews) {
             if (sub.tag == 1) { sub.frame = CGRectMake(0, 0, rowWidth / 2.0, 14); }
             if (sub.tag == 2) { sub.frame = CGRectMake(rowWidth / 2.0, 0, rowWidth / 2.0, 14); }
         }
         slider.frame = CGRectMake(0, 16, rowWidth, 24);
-        y += 40 + 6;
+        y += kSliderGroupHeight + kSliderGroupGap;
     }
 
     y += 4.0;
@@ -832,43 +964,6 @@ static const CGFloat kTriggerInset   = 14.0;
     if (view == _panelClose) { [self closePanel]; return; }
     if (view == _unloadButton) { [self unloadTapped]; return; }
     if (view.tag >= 100 && view.tag < 100 + (NSInteger)_tabButtons.count) { [self selectTab:view.tag - 100]; }
-}
-
-- (void)panelHeaderPanned:(UIPanGestureRecognizer *)gesture
-{
-    // Координаты считаем в пространстве _stage (слой повёрнут под ориентацию),
-    // а позицию берём от точки старта перетаскивания: так панель идёт строго за
-    // пальцем и не «отстаёт» из-за накопления translation.
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        _panelDragging = YES;
-        _panelDragStart = _panel.center;
-        AscentHUDLog(@"[gesture] панель: перетаскивание началось");
-        return;
-    }
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [gesture translationInView:_stage];
-        CGPoint center = CGPointMake(_panelDragStart.x + t.x, _panelDragStart.y + t.y);
-        CGFloat panelWidth = _panel.bounds.size.width;
-        center = [self clampPanelCenter:center width:panelWidth];
-        _panel.center = center;
-        // Смещение обновляем сразу: тогда раскладка, если её пересчитают во
-        // время перетаскивания, поставит панель ровно туда же и не рванёт.
-        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
-        return;
-    }
-    if (gesture.state == UIGestureRecognizerStateEnded ||
-        gesture.state == UIGestureRecognizerStateCancelled ||
-        gesture.state == UIGestureRecognizerStateFailed) {
-        _panelDragging = NO;
-        CGFloat panelWidth = _panel.bounds.size.width;
-        CGPoint center = [self clampPanelCenter:_panel.center width:panelWidth];
-        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
-        HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
-        HUDOverlaySetNumber(@"hud.panel.y", _panelOffset.height);
-        [self setNeedsLayout];
-        AscentHUDLog(@"[gesture] панель: перетаскивание закончилось, смещение=(%.0f, %.0f)",
-                     _panelOffset.width, _panelOffset.height);
-    }
 }
 
 #pragma mark - Прокрутка (диагностика)
