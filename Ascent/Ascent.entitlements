@@ -30,6 +30,8 @@
 	<true/>
 	<key>com.apple.springboard.CFUserNotification</key>
 	<true/>
+	<key>com.apple.springboard.ui.client</key>
+	<true/>
 	<key>com.apple.springboard.appbackgroundstyle</key>
 	<true/>
 	<key>com.apple.springboard.disallowControlCenter</key>
