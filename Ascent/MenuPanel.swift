@@ -165,9 +165,8 @@ struct MenuPanel: View {
 
     private var tabBar: some View {
         HStack(spacing: 0) {
-            tabButton("main", 0)
-            tabButton("misc", 1)
-            tabButton("game", 2)
+            tabButton("misc", 0)
+            tabButton("combot", 1)
         }
         .frame(height: tabBarHeight)
         .overlay(Rectangle().fill(line).frame(height: 1), alignment: .bottom)
@@ -195,53 +194,14 @@ struct MenuPanel: View {
 
     private var content: some View {
         Group {
-            if tab == 0 { mainTab }
-            else if tab == 1 { miscTab }
+            if tab == 0 { miscTab }
             else { gameTab }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(16)
     }
 
-    private var mainTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text("статус")
-                    .font(.system(size: 13))
-                    .foregroundColor(dim)
-                Spacer(minLength: 0)
-                Text(isRunning ? "загрузчик активен" : "загрузчик остановлен")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
-            }
 
-            Link(destination: telegramURL) {
-                HStack(spacing: 9) {
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("t.me/ascentios")
-                        .font(.system(size: 13, weight: .medium))
-                        .kerning(0.3)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(Color.white.opacity(0.45))
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .frame(maxWidth: .infinity)
-                .frame(height: 46)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.07))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(line, lineWidth: 1)
-                )
-            }
-        }
-    }
 
     private var miscTab: some View {
         VStack(spacing: 8) {
@@ -264,7 +224,7 @@ struct MenuPanel: View {
         }
     }
 
-    // MARK: - Вкладка «game»
+    // MARK: - Вкладка «combot»
 
     private var gameTab: some View {
         VStack(alignment: .leading, spacing: 10) {
