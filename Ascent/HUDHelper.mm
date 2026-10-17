@@ -748,7 +748,7 @@ static NSString *AscentBuildProbeReport(void)
         "HUDMainApplicationDelegate",
         "HUDRootViewController",
         "HUDMainWindow",
-        "HUDHostFactory",
+        "HUDOverlayView",
         "AppDelegate",
         "SBSAccessibilityWindowHostingController",
         "AXEventRepresentation",
