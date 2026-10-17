@@ -32,4 +32,15 @@ static BOOL _passthroughMode = NO;
     AscentHUDLog(@"rootVC: viewDidAppear, окно=%@", self.view.window);
 }
 
+// Окно держим строго портретным: контент оверлея (квадрат и панель) сам
+// поворачивается вслед за устройством внутри HUDOverlayView. Так же делает
+// TrollSpeed — иначе окно и контент крутились бы дважды.
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return NO;
+}
+
 @end
