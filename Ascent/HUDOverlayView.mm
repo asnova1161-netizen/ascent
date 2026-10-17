@@ -208,6 +208,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
+    NSTimeInterval _rawLastTime; // время последнего события потока
 }
 
 #pragma mark - Создание
@@ -267,7 +268,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _trigger.hidden = NO;
     _trigger.layer.opacity = 1.0f;
 
-    AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 4), bounds=%@", NSStringFromCGRect(frame));
+    AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 5), bounds=%@", NSStringFromCGRect(frame));
     return self;
 }
 
@@ -287,6 +288,19 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     return HUDRawDragNone;
 }
 
+/// Начинает (или заново подхватывает после паузы) жест от указанной точки.
+/// Координаты — точка в своей иерархии (для hitTest) и точка в слое _stage (для
+/// смещения с учётом поворота экрана).
+- (void)beginRawDragAtPoint:(CGPoint)point stagePoint:(CGPoint)stagePoint
+{
+    _rawTarget = [self rawDragTargetAtPoint:point];
+    _rawStart = stagePoint;
+    _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+    _rawStartOffset = _scroll.contentOffset;
+    _rawMoved = NO;
+    _rawLastTime = [[NSProcessInfo processInfo] systemUptime];
+}
+
 - (void)handleRawTouchPhase:(UITouchPhase)phase
                  atLocation:(CGPoint)location
                    inWindow:(UIWindow *)window
@@ -299,12 +313,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint point = [self convertPoint:location fromView:window];
     CGPoint stagePoint = [_stage convertPoint:location fromView:window];
 
+    // Долгая тишина между событиями — палец замер или событие «подъёма»
+    // потерялось. Жест тогда завершён: иначе старое начало осталось бы висеть, и
+    // первый же сдвиг утащил бы квадрат к прежнему месту («телепорт»).
+    NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
+    BOOL stale = (_rawTarget != HUDRawDragNone) && (now - _rawLastTime > 0.35);
+
     if (phase == UITouchPhaseBegan) {
-        _rawTarget = [self rawDragTargetAtPoint:point];
-        _rawStart = stagePoint;
-        _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
-        _rawStartOffset = _scroll.contentOffset;
-        _rawMoved = NO;
+        [self beginRawDragAtPoint:point stagePoint:stagePoint];
         return;
     }
 
@@ -312,6 +328,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
     if (phase == UITouchPhaseMoved) {
         if (_rawTarget == HUDRawDragNone) { return; }
+
+        if (stale) {
+            // Подхватываем жест заново от текущей точки: квадрат и панель
+            // остаются под пальцем и никуда не прыгают.
+            [self beginRawDragAtPoint:point stagePoint:stagePoint];
+            return;
+        }
+
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
         // Пока палец не сдвинулся на несколько точек, это ещё тап: иначе дрожь
         // руки при нажатии уводила бы квадрат с места (и он бы «уползал»).
