@@ -188,7 +188,11 @@ final class LoaderState: ObservableObject {
             heartbeatTimer = nil
             AscentHUDLogMessage("HUD пропал — возвращаем квадрат внутрь приложения")
             DispatchQueue.main.async { [weak self] in
-                self?.refreshFromProcess()
+                guard let self = self else { return }
+                self.refreshFromProcess()
+                // Чтобы не искать причину вслепую: как только оверлей пропал,
+                // сразу показываем отладочное окно с выводом «ПРИЧИНА».
+                self.openDebug()
             }
         }
     }
