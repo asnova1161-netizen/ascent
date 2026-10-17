@@ -97,16 +97,16 @@ static const NSUInteger kMaxLivingTouches = 8;
 
     if (phase == UITouchPhaseBegan) {
         // Если для этого пальца касание ещё числится живым, значит событие
-        // «подъёма» потерялось либо система помечает «вниз» и на движениях.
-        // Новое касание не создаём, а продлеваем текущее как движение: так
-        // панель продолжает ехать за пальцем, а «живые» касания не копятся
-        // (из-за копления оверлей раньше и падал при перетаскивании).
+        // «подъёма» потерялось (например, страховка сбросила палец по тишине).
+        // Старое касание отменяем и создаём новое: продлевать его движением
+        // нельзя — «живое» касание тогда висит вечно, и следующие тапы до
+        // распознавателей уже не доходят.
         UITouch *existing = _touchPool[index];
         if (existing != nil && [_livingTouches indexOfObjectIdenticalTo:existing] != NSNotFound) {
             [existing setLocationInWindow:coordinate];
-            [existing setPhaseAndUpdateTimestamp:UITouchPhaseMoved];
+            [existing setPhaseAndUpdateTimestamp:UITouchPhaseCancelled];
             [self deliverLivingTouches];
-            return;
+            [_livingTouches removeObjectIdenticalTo:existing];
         }
 
         touch = [[UITouch alloc] initAtPoint:coordinate inWindow:window onView:view];
