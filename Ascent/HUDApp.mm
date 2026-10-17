@@ -80,6 +80,50 @@ static Class AscentAXEventRepresentationClass(void)
     return cls;
 }
 
+// Идентификатор пальца, который система прислала последним. Нужен потому, что
+// у событий движения и подъёма список путей часто пуст: без запоминания такие
+// события приходилось бы выбрасывать (панель тогда не едет за пальцем, а
+// касание остаётся «живым» навсегда).
+static NSInteger AscentActivePointerId = 0;
+
+// Касания пишем в журнал с ограничением: при перетаскивании событий сотни, и
+// без ограничения журнал забивался бы, а запись в него тормозила бы оверлей.
+static void AscentLogTouch(UITouchPhase phase, CGPoint location, UIView *keyView, NSInteger pointerId)
+{
+    static NSTimeInterval windowStart = 0;
+    static int linesInWindow = 0;
+    static int moveCount = 0;
+
+    NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
+    if (now - windowStart > 0.5) {
+        windowStart = now;
+        linesInWindow = 0;
+    }
+    if (linesInWindow >= 20) {
+        return;
+    }
+
+    static const char *kPhaseNames[] = { "began", "moved", "stationary", "ended", "cancelled" };
+    const char *phaseName = (phase >= 0 && phase < 5) ? kPhaseNames[phase] : "?";
+
+    if (phase == UITouchPhaseMoved) {
+        moveCount++;
+        // Движения пишем редко: они нужны лишь как доказательство, что до окна
+        // оверлея вообще доходит поток движения.
+        if (moveCount > 3 && moveCount % 25 != 0) {
+            return;
+        }
+    } else {
+        moveCount = 0;
+    }
+
+    linesInWindow++;
+    AscentHUDLog(@"[touch] %s на (%.0f, %.0f) -> %@, pointer=%ld",
+                 phaseName, location.x, location.y,
+                 keyView != nil ? NSStringFromClass([keyView class]) : @"nil",
+                 (long)pointerId);
+}
+
 static void AscentHIDEventCallback(void *target, void *refcon, void *service, void *event)
 {
     Class repClass = AscentAXEventRepresentationClass();
@@ -99,7 +143,40 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     BOOL isTouchCancel = rep.isCancel;
     BOOL isTouchUp = rep.isLift || rep.isInRange || rep.isInRangeLift;
 
+    // Фазу определяем от «конца» к «началу»: подъём/отмена и движение важнее
+    // признака «палец на экране», который система выставляет и на движениях.
+    // Иначе каждое событие перетаскивания принималось бы за новое нажатие, на
+    // каждый кадр создавалось бы новое касание, оверлей копил бы их, и меню
+    // падало бы ровно при перетаскивании и прокрутке.
+    UITouchPhase phase = UITouchPhaseEnded;
+    if (isTouchCancel) {
+        phase = UITouchPhaseCancelled;
+    } else if (isTouchUp) {
+        phase = UITouchPhaseEnded;
+    } else if (isTouchMove) {
+        phase = UITouchPhaseMoved;
+    } else if (isTouchDown) {
+        phase = UITouchPhaseBegan;
+    }
+
+    // Идентификатор пальца приходит не в каждом событии: у движения и подъёма
+    // список путей часто пуст и pathIdentity выходит нулевым. Берём сохранённый
+    // идентификатор, а по завершении касания забываем его.
     NSInteger pointerId = [[[[rep handInfo] paths] firstObject] pathIdentity];
+    if (pointerId > 0) {
+        AscentActivePointerId = pointerId;
+    } else {
+        pointerId = AscentActivePointerId;
+    }
+    if (phase == UITouchPhaseBegan && pointerId <= 0) {
+        // Совсем без идентификатора первое нажатие терять нельзя — берём
+        // запасной слот, он нужен лишь чтобы касание доехало до оверлея.
+        pointerId = 97;
+        AscentActivePointerId = pointerId;
+    }
+    if (phase == UITouchPhaseEnded || phase == UITouchPhaseCancelled) {
+        AscentActivePointerId = 0;
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
 #pragma clang diagnostic push
@@ -112,32 +189,13 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
 
         UIView *keyView = [keyWindow hitTest:location withEvent:nil];
 
-        UITouchPhase phase = UITouchPhaseEnded;
-        if (isTouchDown) {
-            phase = UITouchPhaseBegan;
-        } else if (isTouchMove) {
-            phase = UITouchPhaseMoved;
-        } else if (isTouchCancel) {
-            phase = UITouchPhaseCancelled;
-        }
-
-        // Журналируем всё, КРОМЕ движения: по нему видно, куда и с какой фазой
-        // попадают пасания — в частности, доходит ли «подъём» пальца до конца
-        // и какое вью получило касание. Движения писать нельзя — их сотни.
-        if (phase != UITouchPhaseMoved) {
-            static const char *kPhaseNames[] = { "began", "moved", "stationary", "ended", "cancelled" };
-            const char *phaseName = (phase >= 0 && phase < 5) ? kPhaseNames[phase] : "?";
-            AscentHUDLog(@"[touch] %s на (%.0f, %.0f) -> %@, pointer=%ld",
-                         phaseName, location.x, location.y,
-                         keyView != nil ? NSStringFromClass([keyView class]) : @"nil",
-                         (long)pointerId);
-        }
+        AscentLogTouch(phase, location, keyView, pointerId);
 
         if (pointerId > 0) {
             [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
                           atGlobalCoordinate:location
                               withTouchPhase:phase
-                                    inWindow:[UIApplication sharedApplication].windows.firstObject
+                                    inWindow:keyWindow
                                       onView:keyView];
         }
     });
