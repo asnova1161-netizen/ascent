@@ -36,6 +36,16 @@ struct MenuPanel: View {
     /// сдвинутом положении, если жест перебили.
     @GestureState private var drag: CGSize = .zero
 
+    // Переключатели вкладки «game». Живут в общем файле оверлея, поэтому их
+    // видит и HUD-процесс — именно он держит task-порт игры.
+    @State private var espEnabled = false
+    @State private var aimbotEnabled = false
+    @State private var triggerbotEnabled = false
+    @State private var aimFov: Double = 120
+    @State private var aimSmooth: Double = 4
+    @State private var triggerDelay: Double = 60
+    @State private var gameProcessText = "проверить процесс игры"
+
     private let headerHeight: CGFloat = 44
     private let tabBarHeight: CGFloat = 40
 
@@ -157,6 +167,7 @@ struct MenuPanel: View {
         HStack(spacing: 0) {
             tabButton("main", 0)
             tabButton("misc", 1)
+            tabButton("game", 2)
         }
         .frame(height: tabBarHeight)
         .overlay(Rectangle().fill(line).frame(height: 1), alignment: .bottom)
@@ -184,7 +195,9 @@ struct MenuPanel: View {
 
     private var content: some View {
         Group {
-            if tab == 0 { mainTab } else { miscTab }
+            if tab == 0 { mainTab }
+            else if tab == 1 { miscTab }
+            else { gameTab }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(16)
@@ -249,5 +262,128 @@ struct MenuPanel: View {
                 .font(.system(size: 11.5))
                 .foregroundColor(Color.white.opacity(0.5))
         }
+    }
+
+    // MARK: - Вкладка «game»
+
+    private var gameTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("standoff 2")
+                    .font(.system(size: 13))
+                    .foregroundColor(dim)
+                Spacer(minLength: 0)
+                Text(espEnabled || aimbotEnabled || triggerbotEnabled ? "включено" : "выключено")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+
+            cheatToggle(title: "esp", isOn: $espEnabled)
+            cheatToggle(title: "aimbot", isOn: $aimbotEnabled)
+            cheatToggle(title: "triggerbot", isOn: $triggerbotEnabled)
+
+            cheatSlider(title: "fov", value: $aimFov, range: 20...400, suffix: "px")
+            cheatSlider(title: "smooth", value: $aimSmooth, range: 1...20, suffix: "x")
+            cheatSlider(title: "delay", value: $triggerDelay, range: 0...300, suffix: "мс")
+
+            Button(action: refreshGameProcess) {
+                Text(gameProcessText)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.75))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(line, lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+            }
+
+            Text("память игры читает HUD-процесс: переключатели выше только включают доступ к ней")
+                .font(.system(size: 10.5))
+                .foregroundColor(Color.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear {
+            loadCheatSettings()
+            refreshGameProcess()
+        }
+    }
+
+    private func cheatToggle(title: String, isOn: Binding<Bool>) -> some View {
+        Button(action: {
+            isOn.wrappedValue.toggle()
+            saveCheatSettings()
+        }) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white)
+                Spacer(minLength: 0)
+                Text(isOn.wrappedValue ? "on" : "off")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(isOn.wrappedValue ? .white : dim)
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(isOn.wrappedValue ? 0.14 : 0.07))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(line, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+    }
+
+    private func cheatSlider(title: String, value: Binding<Double>,
+                             range: ClosedRange<Double>, suffix: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 12))
+                    .foregroundColor(dim)
+                Spacer(minLength: 0)
+                Text("\(Int(value.wrappedValue))\(suffix)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            Slider(value: value, in: range, step: 1,
+                   onEditingChanged: { _ in saveCheatSettings() },
+                   label: { EmptyView() })
+            .accentColor(.white)
+        }
+    }
+
+    private func loadCheatSettings() {
+        espEnabled = OverlayStore.flag(for: "cheat.esp")
+        aimbotEnabled = OverlayStore.flag(for: "cheat.aimbot")
+        triggerbotEnabled = OverlayStore.flag(for: "cheat.trigger")
+        aimFov = OverlayStore.number(for: "cheat.fov", default: 120)
+        aimSmooth = OverlayStore.number(for: "cheat.smooth", default: 4)
+        triggerDelay = OverlayStore.number(for: "cheat.delay", default: 60)
+    }
+
+    private func saveCheatSettings() {
+        OverlayStore.setFlag(espEnabled, for: "cheat.esp")
+        OverlayStore.setFlag(aimbotEnabled, for: "cheat.aimbot")
+        OverlayStore.setFlag(triggerbotEnabled, for: "cheat.trigger")
+        OverlayStore.setNumber(aimFov, for: "cheat.fov")
+        OverlayStore.setNumber(aimSmooth, for: "cheat.smooth")
+        OverlayStore.setNumber(triggerDelay, for: "cheat.delay")
+    }
+
+    /// Проверяем, запущена ли игра. Это обычный sysctl-обход процессов —
+    /// прав не требует, поэтому безопасно звать прямо из окна меню.
+    private func refreshGameProcess() {
+        let pid = AscentGameFindProcess("standoff")
+        gameProcessText = pid > 0 ? "процесс: pid \(pid)" : "процесс не найден"
     }
 }
