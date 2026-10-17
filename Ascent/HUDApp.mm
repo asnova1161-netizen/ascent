@@ -32,6 +32,7 @@
 
 #import "IOKit+SPI.h"
 #import "HUDHelper.h"
+#import "GameMemory.h"
 #import "TSEventFetcher.h"
 #import "BackboardServices.h"
 #import "AXEventRepresentation.h"
@@ -460,6 +461,30 @@ int main(int argc, char *argv[])
                 AscentHUDLog(@"-hud: жив уже 2 с, run loop работает");
                 AscentHUDLog(@"-hud: пробы приватных API:\n%@", AscentProbeReport());
             });
+
+            // Проба чужой игры: без task-порта никакие игровые функции
+            // невозможны, поэтому состояние доступа пишем в журнал сразу —
+            // по нему видно, работает ли вся привилегированная часть.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AscentGameReportProcess(@"standoff");
+            });
+
+            // Раз в 1.5 с читаем переключатели меню из общего файла оверлея и
+            // держим task-порт игры в соответствии с ними. Пока включённых
+            // функций нет — таймер только читает файл.
+            static dispatch_source_t gCheatTimer = NULL;
+            gCheatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                 dispatch_get_main_queue());
+            dispatch_source_set_timer(gCheatTimer,
+                                      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                                      (uint64_t)(1.5 * NSEC_PER_SEC),
+                                      (uint64_t)(0.25 * NSEC_PER_SEC));
+            dispatch_source_set_event_handler(gCheatTimer, ^{
+                AscentGameTick();
+            });
+            dispatch_resume(gCheatTimer);
+            AscentHUDLog(@"-hud: таймер игровых функций поднят (%p)", gCheatTimer);
 
             // ГЛАВНОЕ: run loop оверлея не должен быть пустым. Если приватный
             // UIEventDispatcher не отдал своих источников (на новых iOS его
