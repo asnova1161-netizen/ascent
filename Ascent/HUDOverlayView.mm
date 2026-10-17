@@ -747,6 +747,22 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         slider.accessibilityIdentifier = sliderKeys[i];
         slider.minimumTrackTintColor = [UIColor whiteColor];
         slider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+        // Явно задаём иконку ползунка: системный thumb меняет размер при
+        // разных кадрах (иногда кажется «толстым» в момент первого показа),
+        // а кастомный круглый даёт одинаковую толщину сразу и после раскладки.
+        CGSize thumbSize = CGSizeMake(16.0, 16.0);
+        UIGraphicsBeginImageContextWithOptions(thumbSize, NO, 0.0);
+        CGContextRef ctx = UIGraphicsGetCurrentContext();
+        if (ctx != NULL) {
+            CGContextSetFillColorWithColor(ctx, [UIColor whiteColor].CGColor);
+            CGContextFillEllipseInRect(ctx, CGRectMake(0, 0, thumbSize.width, thumbSize.height));
+        }
+        UIImage *thumbImg = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        if (thumbImg != nil) {
+            [slider setThumbImage:thumbImg forState:UIControlStateNormal];
+            [slider setThumbImage:thumbImg forState:UIControlStateHighlighted];
+        }
         [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
         // Слайдер двигает только жест по строке (см. комментарий про переключатель):
         // значение считаем из точки касания, минуя обработку касаний самим UISlider.
