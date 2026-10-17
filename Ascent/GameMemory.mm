@@ -4,6 +4,11 @@
 //
 //  Реализация доступа к памяти чужого процесса. См. GameMemory.h.
 //
+//  ВАЖНО про API: на iOS SDK заголовок <mach/mach_vm.h> — заглушка
+//  ("mach_vm.h unsupported"), поэтому mach_vm_* недоступны. Пользуемся
+//  обычными vm_* (на arm64 vm_address_t/vm_size_t — 64-битные, потерь нет),
+//  а базу главного модуля берём не обходом регионов, а через TASK_DYLD_INFO.
+//
 
 #import "GameMemory.h"
 #import "HUDHelper.h"
@@ -11,14 +16,16 @@
 #import <errno.h>
 #import <stdlib.h>
 #import <string.h>
+#import <unistd.h>
 #import <sys/sysctl.h>
 
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
-#import <mach/vm_region.h>
+#import <mach/task.h>
+#import <mach/task_info.h>
+#import <mach/vm_map.h>
 #import <mach-o/loader.h>
 
-// Объявляем сами: в некоторых SDK прототипа нет в публичных заголовках,
+// Объявляем сами: в части SDK прототипа нет в публичных заголовках,
 // а типы совпадают, поэтому повторное объявление безопасно.
 extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
 
@@ -26,6 +33,21 @@ extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_po
 #ifndef VM_PROT_COPY
 #define VM_PROT_COPY 0x10
 #endif
+
+// Голова dyld_all_image_infos: только стабильные первые поля, без хвоста,
+// который в разных версиях iOS разной длины.
+typedef struct {
+    uint32_t version;
+    uint32_t infoArrayCount;
+    uint64_t infoArray;
+} AscentDyldImagesHead;
+
+// dyld_image_info (arm64): три указателя, размер не менялся.
+typedef struct {
+    uint64_t imageLoadAddress;
+    uint64_t imageFilePath;
+    uint64_t imageFileModDate;
+} AscentDyldImageInfo;
 
 static task_t   gGameTask = MACH_PORT_NULL;
 static int      gGamePid = 0;
@@ -135,13 +157,13 @@ BOOL AscentGameRead(uint64_t address, void *buffer, size_t length)
         return NO;
     }
 
-    mach_vm_size_t readBytes = 0;
-    kern_return_t result = mach_vm_read_overwrite(gGameTask,
-                                                 (mach_vm_address_t)address,
-                                                 (mach_vm_size_t)length,
-                                                 (mach_vm_address_t)buffer,
-                                                 &readBytes);
-    if (result != KERN_SUCCESS || readBytes != (mach_vm_size_t)length) {
+    vm_size_t readBytes = 0;
+    kern_return_t result = vm_read_overwrite(gGameTask,
+                                            (vm_address_t)address,
+                                            (vm_size_t)length,
+                                            (vm_address_t)buffer,
+                                            &readBytes);
+    if (result != KERN_SUCCESS || readBytes != (vm_size_t)length) {
         AscentGameSetErrorFormat(@"чтение 0x%llx (%zu байт) не удалось: 0x%x, errno=%d",
                                  address, length, result, errno);
         return NO;
@@ -162,21 +184,22 @@ BOOL AscentGameWrite(uint64_t address, const void *buffer, size_t length)
 
     // Страница может быть доступна только на чтение: просим ядро сделать
     // приватную копию (VM_PROT_COPY), иначе запись молча не пройдёт.
-    vm_size_t pageSize = 0;
-    if (host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS && pageSize > 0) {
-        mach_vm_address_t pageStart = (mach_vm_address_t)(address & ~((uint64_t)pageSize - 1));
-        mach_vm_size_t pageLength = (mach_vm_size_t)(length + (address - pageStart) + pageSize - 1);
-        kern_return_t protect = mach_vm_protect(gGameTask, pageStart, pageLength, FALSE,
-                                               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    vm_size_t pageSize = (vm_size_t)getpagesize();
+    if (pageSize > 0) {
+        vm_address_t pageStart = (vm_address_t)(address & ~((uint64_t)pageSize - 1));
+        vm_size_t pageLength = (vm_size_t)(length + (address - pageStart) + pageSize - 1);
+        kern_return_t protect = vm_protect(gGameTask, pageStart, pageLength, FALSE,
+                                          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
         if (protect != KERN_SUCCESS) {
-            AscentHUDLog(@"[game] !!! снять защиту страницы 0x%llx не вышло: 0x%x", (uint64_t)pageStart, protect);
+            AscentHUDLog(@"[game] !!! снять защиту страницы 0x%llx не вышло: 0x%x",
+                         (uint64_t)pageStart, protect);
         }
     }
 
-    kern_return_t result = mach_vm_write(gGameTask,
-                                        (mach_vm_address_t)address,
-                                        (vm_offset_t)buffer,
-                                        (mach_msg_type_number_t)length);
+    kern_return_t result = vm_write(gGameTask,
+                                   (vm_address_t)address,
+                                   (vm_offset_t)buffer,
+                                   (mach_msg_type_number_t)length);
     if (result != KERN_SUCCESS) {
         AscentGameSetErrorFormat(@"запись 0x%llx (%zu байт) не удалась: 0x%x",
                                  address, length, result);
@@ -219,48 +242,45 @@ static uint64_t AscentHeaderTextSize(uint64_t base)
     return 0;
 }
 
-static uint64_t AscentFindMainModule(uint64_t *outSize)
+// База главного исполняемого модуля: первый образ в списке dyld.
+static uint64_t AscentMainModuleBase(uint64_t *outSize)
 {
-    mach_vm_address_t address = 0;
-
-    for (int step = 0; step < 400000; step++) {
-        mach_vm_size_t regionSize = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t objectName = MACH_PORT_NULL;
-
-        kern_return_t result = mach_vm_region(gGameTask, &address, &regionSize,
-                                              VM_REGION_BASIC_INFO_64,
-                                              (vm_region_info_t)&info, &infoCount,
-                                              &objectName);
-        if (objectName != MACH_PORT_NULL) {
-            mach_port_deallocate(mach_task_self(), objectName);
-        }
-        if (result != KERN_SUCCESS || regionSize == 0) {
-            break;
-        }
-
-        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE)) {
-            uint32_t magic = 0;
-            mach_vm_size_t readBytes = 0;
-            kern_return_t readResult = mach_vm_read_overwrite(gGameTask, address,
-                                                              sizeof(magic),
-                                                              (mach_vm_address_t)&magic,
-                                                              &readBytes);
-            if (readResult == KERN_SUCCESS && readBytes == sizeof(magic) &&
-                (magic == MH_MAGIC_64 || magic == MH_CIGAM_64 ||
-                 magic == MH_MAGIC || magic == MH_CIGAM)) {
-                if (outSize != NULL) {
-                    *outSize = AscentHeaderTextSize((uint64_t)address);
-                }
-                return (uint64_t)address;
-            }
-        }
-
-        address += regionSize;
+    task_dyld_info_data_t dyldInfo;
+    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+    kern_return_t result = task_info(gGameTask, TASK_DYLD_INFO,
+                                    (task_info_t)&dyldInfo, &count);
+    if (result != KERN_SUCCESS) {
+        AscentGameSetErrorFormat(@"TASK_DYLD_INFO не дался: 0x%x", result);
+        return 0;
+    }
+    if (dyldInfo.all_image_info_addr == 0) {
+        AscentGameSetError(@"dyld не отдал список образов");
+        return 0;
     }
 
-    return 0;
+    AscentDyldImagesHead head;
+    if (!AscentGameRead((uint64_t)dyldInfo.all_image_info_addr, &head, sizeof(head))) {
+        return 0;
+    }
+    if (head.infoArray == 0 || head.infoArrayCount == 0) {
+        AscentGameSetError(@"список образов dyld пуст");
+        return 0;
+    }
+
+    AscentDyldImageInfo firstImage;
+    if (!AscentGameRead(head.infoArray, &firstImage, sizeof(firstImage))) {
+        return 0;
+    }
+
+    uint64_t base = firstImage.imageLoadAddress;
+    if (base == 0) {
+        AscentGameSetError(@"dyld отдал нулевую базу образа");
+        return 0;
+    }
+    if (outSize != NULL) {
+        *outSize = AscentHeaderTextSize(base);
+    }
+    return base;
 }
 
 #pragma mark - Подключение/отключение
@@ -303,10 +323,10 @@ BOOL AscentGameAttach(NSString *nameHint)
 
     gGamePid = pid;
     gGameTask = task;
-    gGameBase = AscentFindMainModule(&gGameSize);
+    gGameBase = AscentMainModuleBase(&gGameSize);
     gGameError = nil;
 
-    if (gGameBase == 0) {
+    if (gGameBase == 0 && gGameError == nil) {
         AscentGameSetError(@"task-порт есть, но главный модуль не найден");
     }
     return YES;
