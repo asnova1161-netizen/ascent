@@ -12,7 +12,14 @@
 #import <errno.h>
 #import <dlfcn.h>
 #import <dispatch/dispatch.h>
-#import <ucontext.h>
+
+// SDK требует _XOPEN_SOURCE для <ucontext.h>, но менять его на весь файл нельзя
+// (это задело бы другие системные заголовки). Определяем только на время
+// включения: из него нужен лишь тип ucontext_t, чтобы в обработчике сигнала
+// достать pc/lr/fp.
+#define _XOPEN_SOURCE 600
+#include <ucontext.h>
+#undef _XOPEN_SOURCE
 
 // Заголовок разворачивателя стека есть не во всех SDK, а обход по цепочке
 // кадров (x29) на arm64 доступен всегда — поэтому он основной.
