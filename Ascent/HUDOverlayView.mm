@@ -224,7 +224,7 @@ static const CGFloat kTriggerInset   = 14.0;
     _trigger.hidden = NO;
     _trigger.layer.opacity = 1.0f;
 
-    AscentHUDLog(@"HUD: UIKit-оверлей создан, bounds=%@", NSStringFromCGRect(frame));
+    AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 3), bounds=%@", NSStringFromCGRect(frame));
     return self;
 }
 
