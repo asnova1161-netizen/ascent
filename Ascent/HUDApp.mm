@@ -375,8 +375,13 @@ int main(int argc, char *argv[])
                          pidString, pidPath, pidWritten ? @"записан" : @"НЕ ЗАПИСАН", pidError);
 
             // Только чтение собственной подписи — ничего не загружает, поэтому
-            // безопасно писать это до инициализации сервисов.
-            AscentHUDLog(@"-hud: entitlements:\n%@", AscentOwnEntitlements() ?: @"(не прочитались)");
+            // безопасно писать это до инициализации сервисов. В журнал пишем
+            // коротко: полный дамп прав вытеснял из диагностики всё полезное.
+            NSString *entitlements = AscentOwnEntitlements();
+            AscentHUDLog(@"-hud: entitlements: %@, accessibility-window-hosting=%d, persona-mgmt=%d",
+                         entitlements.length > 0 ? @"прочитаны" : @"НЕ ПРОЧИТАЛИСЬ",
+                         (int)(entitlements.length > 0 && [entitlements containsString:@"accessibility-window-hosting"]),
+                         (int)(entitlements.length > 0 && [entitlements containsString:@"persona-mgmt"]));
 
             [UIScreen initialize];
             CFRunLoopGetCurrent();
