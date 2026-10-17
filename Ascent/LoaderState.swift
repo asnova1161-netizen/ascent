@@ -347,7 +347,7 @@ final class LoaderState: ObservableObject {
         if logLines.isEmpty {
             lines.append("(журнал пуст)")
         } else {
-            lines.append(logLines.suffix(30).joined(separator: "\n"))
+            lines.append(logLines.suffix(40).joined(separator: "\n"))
         }
 
         return lines.joined(separator: "\n")
