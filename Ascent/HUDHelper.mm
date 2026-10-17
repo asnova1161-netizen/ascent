@@ -143,7 +143,10 @@ static void AscentLogPathsInit(void)
     }
 }
 
-void AscentHUDLogRaw(const char *text)
+// Синхронная запись строки в файлы журнала. Выполняется только внутри
+// AscentHUDLogRaw на выделенной последовательной очереди, чтобы open/write/close
+// не блокировали главный поток и не вызывали подвисания интерфейса.
+static void AscentHUDLogRawSync(const char *text)
 {
     if (text == NULL) {
         return;
@@ -158,9 +161,48 @@ void AscentHUDLogRaw(const char *text)
             continue;
         }
 
-        // Запись в лог делаем синхронно только для редких случаев; в основном — асинхронно.
-    AscentHUDLogRawSync(copy);
-    free(copy);
+        // Ротация: если журнал вырос больше ASCENT_LOG_MAX_BYTES — обрезаем,
+        // чтобы файл не рос бесконечно.
+        struct stat fileInfo;
+        if (fstat(fd, &fileInfo) == 0 && fileInfo.st_size > (off_t)ASCENT_LOG_MAX_BYTES) {
+            (void)ftruncate(fd, 0);
+        }
+
+        size_t written = 0;
+        while (written < length) {
+            ssize_t result = write(fd, text + written, length - written);
+            if (result <= 0) {
+                break;
+            }
+            written += (size_t)result;
+        }
+        close(fd);
+    }
+}
+
+// Асинхронная обёртка: копируем строку в кучу и пишем на фоновой очереди,
+// чтобы вызывающий поток (обработка касаний) не тратил время на диск.
+void AscentHUDLogRaw(const char *text)
+{
+    if (text == NULL) {
+        return;
+    }
+
+    char *copy = strdup(text);
+    if (copy == NULL) {
+        return;
+    }
+
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.ascentios.ascent.hudlog", DISPATCH_QUEUE_SERIAL);
+    });
+
+    dispatch_async(queue, ^{
+        AscentHUDLogRawSync(copy);
+        free(copy);
+    });
 }
 
 void AscentHUDLogMessage(NSString *message)
