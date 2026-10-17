@@ -29,15 +29,15 @@ struct LoaderView: View {
 
                 LoaderContent(state: state, topInset: top, bottomInset: bottom)
 
-                // квадратик и меню живут, пока их не убрали кнопкой Exit:
-                // unload останавливает лоадер, но НЕ прячет их.
+                // Квадратик и меню живут всё время, пока оверлей включён (от
+                // Start до Exit): unload останавливает лоадер, но НЕ прячет их.
                 //
-                // Когда поднят HUD-процесс, квадрат и панель рисует ОН (поверх
-                // всех приложений). Внутри app их тогда не дублируем — иначе
-                // получалось бы два квадрата: один в приложении, другой поверх.
-                // Пока HUD не подтверждён, показываем квадрат внутри app, чтобы
-                // он не пропадал во время запуска.
-                if state.engaged && !state.showing {
+                // Когда HUD-процесс поднялся И отрисовал свой UIKit-квадрат
+                // (метка hud.overlay в общем файле), квадрат рисует ОН — поверх
+                // всех приложений. Внутри app тогда не дублируем. Пока HUD не
+                // подтвердил свой квадрат, показываем запасной внутри app, чтобы
+                // он не пропадал.
+                if state.engaged && !(state.showing && state.hudOverlayReady) {
                     trigger(size: size, top: top, bottom: bottom)
                         .zIndex(3)
 
@@ -58,25 +58,11 @@ struct LoaderView: View {
                     .allowsHitTesting(false)
                     .zIndex(10)
 
-                // Отладочное окно: длинный тап по «ascent» или автооткрытие,
-                // если оверлей не поднялся.
+                // Отладочное окно: открывается ТОЛЬКО длинным тапом по «ascent».
+                // Само по себе на экране ничего не пишет.
                 if state.debugVisible {
                     DebugOverlay(state: state, topInset: top, bottomInset: bottom)
                         .zIndex(20)
-                }
-
-                // Диагностика висит внизу, пока оверлей включён — а также если
-                // прошлый запуск не дошёл до конца (упал): тогда причину видно
-                // сразу, без длинных тапов.
-                // Тап по полоске раскрывает полное отладочное окно.
-                if state.engaged || state.showing || state.lastRunCrashed {
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        HUDDiagnosticsStrip(state: state)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, bottom + 6)
-                    .zIndex(15)
                 }
             }
             .frame(width: size.width, height: size.height)
@@ -271,56 +257,7 @@ private final class BackdropUIView: UIView {
     }
 }
 
-// MARK: - Короткая диагностика оверлея
-
-/// Полоска внизу экрана: «ПРИЧИНА: …» и последние шаги HUD-процесса.
-///
-/// Висит всё время, пока оверлей включён (от Start до Exit), чтобы причину не
-/// приходилось искать вслепую: длинное отладочное окно открывается по нажатию.
-private struct HUDDiagnosticsStrip: View {
-    @ObservedObject var state: LoaderState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(state.diagnosticsVerdict)
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundColor(.yellow)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if !state.diagnosticsCrash.isEmpty {
-                Text(state.diagnosticsCrash)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(.orange.opacity(0.9))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineLimit(9)
-            }
-
-            if !state.diagnosticsSteps.isEmpty {
-                Text(state.diagnosticsSteps)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.8))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineLimit(6)
-            }
-
-            Text("нажми, чтобы раскрыть подробности")
-                .font(.system(size: 9))
-                .foregroundColor(.white.opacity(0.45))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.black.opacity(0.55))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Theme.grayLine, lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .onTapGesture { state.openDebug() }
-    }
-}
+// MARK: - Короткая диагностика оверлея (полоска убрана)
 
 struct LoaderView_Previews: PreviewProvider {
     static var previews: some View {
