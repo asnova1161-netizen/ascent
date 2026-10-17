@@ -34,6 +34,7 @@
 #import "HUDHelper.h"
 #import "GameMemory.h"
 #import "TSEventFetcher.h"
+#import "HUDOverlayView.h"
 #import "BackboardServices.h"
 #import "AXEventRepresentation.h"
 #import "UIApplication+Private.h"
@@ -86,6 +87,11 @@ static Class AscentAXEventRepresentationClass(void)
 // касание остаётся «живым» навсегда).
 static NSInteger AscentActivePointerId = 0;
 
+// Время последнего HID-события. Если палец «висит» и события пропали надолго,
+// значит подъём мы не увидели — касание сбрасываем, иначе следующий тап
+// потерялся бы (он был бы принят за движение старого пальца).
+static NSTimeInterval AscentLastEventTime = 0;
+
 // Касания пишем в журнал с ограничением: при перетаскивании событий сотни, и
 // без ограничения журнал забивался бы, а запись в него тормозила бы оверлей.
 static void AscentLogTouch(UITouchPhase phase, CGPoint location, UIView *keyView, NSInteger pointerId)
@@ -124,6 +130,26 @@ static void AscentLogTouch(UITouchPhase phase, CGPoint location, UIView *keyView
                  (long)pointerId);
 }
 
+// Признаки первых событий «жеста» пишем как есть (не больше 14 строк на
+// касание): по ним видно, какими флагами система помечает протяжку. Без этого
+// приходилось угадывать, почему движение не доходит до оверлея.
+static void AscentLogRawFlags(BOOL isTouchDown, BOOL isMove, BOOL isLift, BOOL isCancel,
+                              BOOL isInRange, BOOL isInRangeLift, CGPoint location)
+{
+    static int budget = 0;
+    if (isTouchDown) {
+        budget = 14;
+    }
+    if (budget <= 0) {
+        return;
+    }
+    budget--;
+
+    AscentHUDLog(@"[raw] D%d M%d L%d C%d IR%d IRL%d на (%.0f, %.0f)",
+                 (int)isTouchDown, (int)isMove, (int)isLift, (int)isCancel,
+                 (int)isInRange, (int)isInRangeLift, location.x, location.y);
+}
+
 static void AscentHIDEventCallback(void *target, void *refcon, void *service, void *event)
 {
     Class repClass = AscentAXEventRepresentationClass();
@@ -141,22 +167,39 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     BOOL isTouchDown = rep.isTouchDown;
     BOOL isTouchMove = rep.isMove;
     BOOL isTouchCancel = rep.isCancel;
-    BOOL isTouchUp = rep.isLift || rep.isInRange || rep.isInRangeLift;
+    BOOL isTouchLift = rep.isLift;
+    BOOL isInRange = rep.isInRange;
+    BOOL isInRangeLift = rep.isInRangeLift;
 
-    // Порядок проверок важен. Движение проверяем РАНЬШЕ подъёма: система
-    // выставляет признаки «в зоне» (isInRange/isInRangeLift) и на событиях
-    // движения, а если счесть их подъёмом пальца — касание обрывается на первом
-    // же кадре и панель перестаёт ехать. Движение также важнее признака «палец
-    // на экране», который система выставляет и на движениях: иначе каждый кадр
-    // перетаскивания считался бы новым нажатием и касания копились бы.
-    UITouchPhase phase = UITouchPhaseEnded;
+    // Палец уже на экране, если «вниз» мы видели, а «подъёма» ещё нет. На этой
+    // iOS события протяжки часто приходят БЕЗ признака isMove (зато с
+    // признаками «в зоне»), поэтому движение определяем по состоянию пальца:
+    // всё, что пришло между «вниз» и «подъём», — движение. Иначе касание
+    // обрывалось на первом же кадре протяжки, и панель с квадратом не ехали
+    // (а тап работал, потому что ему движение не нужно).
+    BOOL fingerDown = (AscentActivePointerId != 0);
+
+    // Страховка от потерянного «подъёма»: долгая тишина между событиями —
+    // палец давно отпущен.
+    NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
+    if (fingerDown && now - AscentLastEventTime > 0.6) {
+        AscentActivePointerId = 0;
+        fingerDown = NO;
+    }
+    AscentLastEventTime = now;
+
+    UITouchPhase phase;
     if (isTouchCancel) {
         phase = UITouchPhaseCancelled;
-    } else if (isTouchMove) {
+    } else if (isTouchLift || isInRangeLift) {
+        phase = UITouchPhaseEnded;
+    } else if (fingerDown) {
         phase = UITouchPhaseMoved;
     } else if (isTouchDown) {
         phase = UITouchPhaseBegan;
-    } else if (isTouchUp) {
+    } else if (isTouchMove || isInRange) {
+        phase = UITouchPhaseMoved;
+    } else {
         phase = UITouchPhaseEnded;
     }
 
@@ -191,6 +234,15 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
         UIView *keyView = [keyWindow hitTest:location withEvent:nil];
 
         AscentLogTouch(phase, location, keyView, pointerId);
+        AscentLogRawFlags(isTouchDown, isTouchMove, isTouchLift, isTouchCancel,
+                          isInRange, isInRangeLift, location);
+
+        // Перетаскивание и прокрутку ведёт сам оверлей прямо от этих точек: на
+        // синтетических UITouch распознаватели движения срабатывают ненадёжно.
+        HUDOverlayView *overlay = [HUDOverlayView currentOverlay];
+        if (overlay != nil) {
+            [overlay handleRawTouchPhase:phase atLocation:location inWindow:keyWindow];
+        }
 
         if (pointerId > 0) {
             [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
