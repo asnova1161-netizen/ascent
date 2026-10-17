@@ -296,8 +296,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // И квадрат, и панель лежат в повёрнутом слое _stage, поэтому смещение
     // считаем в его координатах: в ландшафте панель тогда идёт за пальцем, а не
     // «поперёк» экрана.
-    CGPoint point = [self convertPoint:location fromWindow:window];
-    CGPoint stagePoint = [_stage convertPoint:location fromWindow:window];
+    CGPoint point = [self convertPoint:location fromView:window];
+    CGPoint stagePoint = [_stage convertPoint:location fromView:window];
 
     if (phase == UITouchPhaseBegan) {
         _rawTarget = [self rawDragTargetAtPoint:point];
