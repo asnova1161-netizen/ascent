@@ -3,6 +3,7 @@
 #import "GameMemory.h"
 
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 #import <sys/stat.h>
 #import <math.h>
 
@@ -85,6 +86,50 @@ static UIView *HUDRoundedBox(CGFloat radius, UIColor *fill)
     return view;
 }
 
+/// Иконка квадратика. Размер/вес ровно как у SwiftUI-версии в приложении
+/// (`.font(.system(size: 20, weight: .bold))`), иначе при передаче эстафеты от
+/// квадрата в приложении к квадрату HUD иконка «толстела/худела» на глазах.
+static UIImage *HUDTriggerImage(BOOL open)
+{
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:20.0 weight:UIImageSymbolWeightBold];
+    return [UIImage systemImageNamed:(open ? @"xmark" : @"slider.horizontal.3") withConfiguration:config];
+}
+
+#pragma mark - Ориентация
+
+// Окно HUD всегда портретное (см. HUDRootViewController.supportedInterfaceOrientations).
+// Чтобы квадрат и панель стояли «ровно» при любом положении устройства, весь
+// контент лежит в отдельном слое _stage, который мы сами поворачиваем — так же
+// делает TrollSpeed.
+static CGFloat HUDOrientationAngle(UIInterfaceOrientation orientation)
+{
+    switch (orientation) {
+        case UIInterfaceOrientationPortraitUpsideDown: return M_PI;
+        case UIInterfaceOrientationLandscapeLeft:      return -M_PI_2;
+        case UIInterfaceOrientationLandscapeRight:     return M_PI_2;
+        default:                                       return 0;
+    }
+}
+
+static CGRect HUDOrientationBounds(UIInterfaceOrientation orientation, CGRect bounds)
+{
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+        case UIInterfaceOrientationLandscapeRight:
+            return CGRectMake(0, 0, bounds.size.height, bounds.size.width);
+        default:
+            return bounds;
+    }
+}
+
+/// Приватный FBSOrientationObserver. Заголовков у нас нет, поэтому объявляем
+/// только то, что вызываем; ориентацию из апдейта читаем через KVC.
+@protocol HUDOrientationObserving <NSObject>
+- (void)setHandler:(void (^)(id update))handler;
+- (void)invalidate;
+@end
+
 #pragma mark - Оверлей
 
 static const CGFloat kTriggerSide    = 54.0;
@@ -97,6 +142,13 @@ static const CGFloat kTriggerInset   = 14.0;
 
 @implementation HUDOverlayView
 {
+    // Слой, который поворачивается вслед за устройством: в нём лежат квадрат и
+    // панель. Само вью оверлея остаётся ровным контейнером на всё окно.
+    UIView *_stage;
+    UIInterfaceOrientation _orientation;
+    id<HUDOrientationObserving> _orientationObserver;
+    BOOL _usesDeviceOrientationFallback;
+
     // Квадратик-триггер
     UIView *_trigger;
     UIImageView *_triggerIcon;
@@ -145,6 +197,12 @@ static const CGFloat kTriggerInset   = 14.0;
     self.backgroundColor = [UIColor clearColor];
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
+    _orientation = UIInterfaceOrientationPortrait;
+
+    _stage = [[UIView alloc] initWithFrame:self.bounds];
+    _stage.backgroundColor = [UIColor clearColor];
+    [self addSubview:_stage];
+
     _triggerOffset = CGSizeMake(HUDOverlayNumber(@"trigger.x", 0),
                                 HUDOverlayNumber(@"trigger.y", 0));
     _panelOffset = CGSizeMake(HUDOverlayNumber(@"hud.panel.x", 0),
@@ -153,6 +211,7 @@ static const CGFloat kTriggerInset   = 14.0;
 
     [self buildTrigger];
     [self buildPanel];
+    [self startOrientationObserver];
 
     // Сообщаем приложению, что квадрат рисует HUD и дублировать его в app не
     // нужно. Приложение покажет свой запасной квадрат, только если этой метки
@@ -169,11 +228,12 @@ static const CGFloat kTriggerInset   = 14.0;
 #pragma mark - Куда пускать касания
 
 // Пустые места оверлея касаний не забирают: если под пальцем нет ни квадрата,
-// ни панели, окно отдаёт касание приложению под ним.
+// ни панели, окно отдаёт касание приложению под ним. Слой _stage сам по себе
+// тоже не интерактивен — иначе он перехватывал бы всё.
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event
 {
     UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self) { return nil; }
+    if (hit == self || hit == _stage) { return nil; }
     return hit;
 }
 
@@ -183,35 +243,54 @@ static const CGFloat kTriggerInset   = 14.0;
 {
     [super layoutSubviews];
 
+    [self layoutStage];
     if (!_triggerDragging) { [self layoutTrigger]; }
     [self layoutPanel];
 }
 
+/// Поворачиваем слой с контентом под текущую ориентацию. Окно остаётся
+/// портретным, поэтому в ландшафте слой разворачивается на ±90° и его bounds
+/// меняются местами (ширина <-> высота).
+- (void)layoutStage
+{
+    CGRect screen = self.bounds;
+    _stage.bounds = HUDOrientationBounds(_orientation, screen);
+    _stage.center = CGPointMake(CGRectGetMidX(screen), CGRectGetMidY(screen));
+    _stage.transform = CGAffineTransformMakeRotation(HUDOrientationAngle(_orientation));
+}
+
+- (CGRect)stageBounds
+{
+    return _stage.bounds;
+}
+
 - (CGFloat)safeTop
 {
-    return MAX(self.safeAreaInsets.top, 44.0);
+    return MIN(MAX(self.safeAreaInsets.top, 10.0), 44.0);
 }
 
 - (CGFloat)safeBottom
 {
-    return MAX(self.safeAreaInsets.bottom, 16.0);
+    return MIN(MAX(self.safeAreaInsets.bottom, 10.0), 34.0);
 }
 
 - (CGPoint)triggerBaseCenter
 {
     CGFloat side = kTriggerSide;
+    CGRect stage = [self stageBounds];
     CGPoint center;
-    center.x = self.bounds.size.width - side - kTriggerInset + side / 2.0;
+    center.x = stage.size.width - side - kTriggerInset + side / 2.0;
     center.y = [self safeTop] + kTriggerInset + side / 2.0;
     return center;
 }
 
 - (CGRect)triggerArea
 {
+    CGRect stage = [self stageBounds];
     return CGRectMake(kMargin,
                       [self safeTop] + kMargin,
-                      MAX(self.bounds.size.width - kMargin * 2.0, 0),
-                      MAX(self.bounds.size.height - [self safeTop] - [self safeBottom] - kMargin * 2.0, 0));
+                      MAX(stage.size.width - kMargin * 2.0, 0),
+                      MAX(stage.size.height - [self safeTop] - [self safeBottom] - kMargin * 2.0, 0));
 }
 
 - (CGPoint)clampTriggerCenter:(CGPoint)center
@@ -257,21 +336,39 @@ static const CGFloat kTriggerInset   = 14.0;
     [_trigger.layer insertSublayer:_triggerGradient atIndex:0];
 
     _triggerIcon = [[UIImageView alloc] init];
-    _triggerIcon.image = [UIImage systemImageNamed:@"slider.horizontal.3"];
+    _triggerIcon.image = HUDTriggerImage(NO);
     _triggerIcon.tintColor = [UIColor whiteColor];
     _triggerIcon.contentMode = UIViewContentModeCenter;
     [_trigger addSubview:_triggerIcon];
+
+    // ВАЖНО: тап и перетаскивание — РАЗНЫЕ жесты. UIPanGestureRecognizer
+    // срабатывает только когда палец сдвинулся, поэтому обычное нажатие он
+    // вообще не замечал: квадрат «не нажимался». Тап ловим отдельным
+    // UITapGestureRecognizer, а панорама остаётся для переноса.
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                         action:@selector(triggerTapped:)];
+    [_trigger addGestureRecognizer:tap];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
                                                                           action:@selector(triggerPanned:)];
     [_trigger addGestureRecognizer:pan];
 
-    [self addSubview:_trigger];
+    [_stage addSubview:_trigger];
+}
+
+- (void)triggerTapped:(UITapGestureRecognizer *)gesture
+{
+    if (gesture.state == UIGestureRecognizerStateEnded) {
+        [self togglePanel];
+    }
 }
 
 - (void)triggerPanned:(UIPanGestureRecognizer *)gesture
 {
-    CGPoint t = [gesture translationInView:self];
+    // Координаты считаем в пространстве _stage (а не self): слой повёрнут под
+    // ориентацию, и в повёрнутых координатах перетаскивание должно идти по
+    // пальцу, а не «поперёк».
+    CGPoint t = [gesture translationInView:_stage];
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _triggerDragging = NO;
@@ -298,15 +395,14 @@ static const CGFloat kTriggerInset   = 14.0;
             HUDOverlaySetNumber(@"trigger.x", _triggerOffset.width);
             HUDOverlaySetNumber(@"trigger.y", _triggerOffset.height);
             _triggerDragging = NO;
-        } else {
-            [self togglePanel];
         }
+        // Тап здесь больше не обрабатываем — это делает triggerTapped:.
     }
 }
 
 - (void)updateTriggerIcon
 {
-    _triggerIcon.image = [UIImage systemImageNamed:_panelOpen ? @"xmark" : @"slider.horizontal.3"];
+    _triggerIcon.image = HUDTriggerImage(_panelOpen);
 }
 
 #pragma mark - Открытие/закрытие панели
@@ -399,7 +495,7 @@ static const CGFloat kTriggerInset   = 14.0;
     [self buildMiscTab];
     [self buildGameTab];
 
-    [self addSubview:_panel];
+    [_stage addSubview:_panel];
 }
 
 - (void)buildMainTab
@@ -530,10 +626,11 @@ static const CGFloat kTriggerInset   = 14.0;
 {
     if (_panel == nil) { return; }
 
-    CGFloat panelWidth = MIN(MAX(self.bounds.size.width - 44.0, 0), kPanelWidthMax);
+    CGRect stage = [self stageBounds];
+    CGFloat panelWidth = MIN(MAX(stage.size.width - 44.0, 0), kPanelWidthMax);
     CGSize panelSize = CGSizeMake(panelWidth, kPanelHeight);
-    CGFloat baseX = (self.bounds.size.width - panelWidth) / 2.0;
-    CGFloat baseY = self.bounds.size.height * 0.74 - kPanelHeight / 2.0;
+    CGFloat baseX = (stage.size.width - panelWidth) / 2.0;
+    CGFloat baseY = stage.size.height * 0.74 - kPanelHeight / 2.0;
 
     CGPoint center = CGPointMake(baseX + panelWidth / 2.0 + _panelOffset.width,
                                  baseY + kPanelHeight / 2.0 + _panelOffset.height);
@@ -680,7 +777,7 @@ static const CGFloat kTriggerInset   = 14.0;
 
 - (void)panelHeaderPanned:(UIPanGestureRecognizer *)gesture
 {
-    CGPoint t = [gesture translationInView:self];
+    CGPoint t = [gesture translationInView:_stage];
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _panelDragging = YES;
@@ -688,7 +785,7 @@ static const CGFloat kTriggerInset   = 14.0;
     }
     if (gesture.state == UIGestureRecognizerStateChanged) {
         _panel.center = CGPointMake(_panel.center.x + t.x, _panel.center.y + t.y);
-        [gesture setTranslation:CGPointZero inView:self];
+        [gesture setTranslation:CGPointZero inView:_stage];
         return;
     }
     if (gesture.state == UIGestureRecognizerStateEnded ||
@@ -696,8 +793,9 @@ static const CGFloat kTriggerInset   = 14.0;
         gesture.state == UIGestureRecognizerStateFailed) {
         _panelDragging = NO;
         CGFloat panelWidth = _panel.bounds.size.width;
-        CGFloat baseX = (self.bounds.size.width - panelWidth) / 2.0;
-        CGFloat baseY = self.bounds.size.height * 0.74 - kPanelHeight / 2.0;
+        CGRect stage = [self stageBounds];
+        CGFloat baseX = (stage.size.width - panelWidth) / 2.0;
+        CGFloat baseY = stage.size.height * 0.74 - kPanelHeight / 2.0;
         _panelOffset = CGSizeMake(_panel.center.x - (baseX + panelWidth / 2.0),
                                   _panel.center.y - (baseY + kPanelHeight / 2.0));
         HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
@@ -781,6 +879,80 @@ static const CGFloat kTriggerInset   = 14.0;
     int pid = AscentGameFindProcess(@"standoff");
     _gameProcLabel.text = pid > 0 ? [NSString stringWithFormat:@"процесс: pid %d", pid]
                                   : @"процесс не найден";
+}
+
+#pragma mark - Ориентация (реализация)
+
+- (void)startOrientationObserver
+{
+    Class observerClass = objc_getClass("FBSOrientationObserver");
+    if (observerClass != Nil) {
+        id<HUDOrientationObserving> observer = (id<HUDOrientationObserving>)[[observerClass alloc] init];
+        __weak HUDOverlayView *weakSelf = self;
+        [observer setHandler:^(id update) {
+            NSNumber *rawOrientation = [update valueForKey:@"orientation"];
+            NSNumber *rawDuration = [update valueForKey:@"duration"];
+            UIInterfaceOrientation orientation =
+                (UIInterfaceOrientation)(rawOrientation != nil ? rawOrientation.integerValue
+                                                               : UIInterfaceOrientationPortrait);
+            NSTimeInterval duration = rawDuration != nil ? rawDuration.doubleValue : 0.28;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf applyOrientation:orientation duration:duration];
+            });
+        }];
+        _orientationObserver = observer;
+        AscentHUDLog(@"HUD: ориентация через FBSOrientationObserver");
+        return;
+    }
+
+    // Запасной путь, если приватного наблюдателя нет: публичные уведомления.
+    _usesDeviceOrientationFallback = YES;
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(deviceOrientationChanged:)
+                                                 name:UIDeviceOrientationDidChangeNotification
+                                               object:nil];
+    AscentHUDLog(@"HUD: ориентация через UIDevice (запасной путь)");
+}
+
+- (void)deviceOrientationChanged:(NSNotification *)note
+{
+    UIInterfaceOrientation orientation;
+    switch ([UIDevice currentDevice].orientation) {
+        case UIDeviceOrientationPortrait:           orientation = UIInterfaceOrientationPortrait; break;
+        case UIDeviceOrientationPortraitUpsideDown: orientation = UIInterfaceOrientationPortraitUpsideDown; break;
+        // У устройства и интерфейса ландшафты «зеркальные» — так у iOS.
+        case UIDeviceOrientationLandscapeLeft:      orientation = UIInterfaceOrientationLandscapeRight; break;
+        case UIDeviceOrientationLandscapeRight:     orientation = UIInterfaceOrientationLandscapeLeft; break;
+        default: return;
+    }
+    [self applyOrientation:orientation duration:0.28];
+}
+
+- (void)applyOrientation:(UIInterfaceOrientation)orientation duration:(NSTimeInterval)duration
+{
+    if (orientation == UIInterfaceOrientationUnknown || orientation == _orientation) { return; }
+    _orientation = orientation;
+    AscentHUDLog(@"HUD: ориентация -> %ld", (long)orientation);
+
+    // Пересобираем раскладку внутри анимации: и слой, и квадрат, и панель
+    // поворачиваются/переезжают одним движением.
+    [UIView animateWithDuration:(duration > 0.01 ? duration : 0.28)
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseInOut
+                     animations:^{
+        [self layoutSubviews];
+    } completion:nil];
+}
+
+- (void)dealloc
+{
+    if (_usesDeviceOrientationFallback) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self];
+        [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+    } else {
+        [_orientationObserver invalidate];
+    }
 }
 
 @end
