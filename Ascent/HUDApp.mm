@@ -92,6 +92,98 @@ static NSInteger AscentActivePointerId = 0;
 // потерялся бы (он был бы принят за движение старого пальца).
 static NSTimeInterval AscentLastEventTime = 0;
 
+#pragma mark - Состояние пальца из самого HID-события
+
+// Флаги AXEventRepresentation (isMove/isLift/isInRange) на разных версиях iOS
+// означают разное, и на одном только «подъём» ловить нельзя: если его принять
+// за движение, касание зависает — тапы перестают доходить, а перетаскивание
+// «прыгает» к старому месту. Поэтому состояние пальца спрашиваем у самого
+// HID-события: у цифрового слоя есть признак касания (touch) и маска того, что
+// в событии изменилось.
+#define AscentIOHIDEventFieldBase(type) (type << 16)
+
+enum {
+    AscentIOHIDEventTypeDigitizer = 11,
+};
+
+enum {
+    AscentIOHIDDigitizerEventRange    = 1 << 0,
+    AscentIOHIDDigitizerEventTouch    = 1 << 1,
+    AscentIOHIDDigitizerEventPosition = 1 << 2,
+    AscentIOHIDDigitizerEventCancel   = 1 << 7,
+};
+
+// Порядок полей ровно как в IOHIDEvent+KIF.mm (IOHIDFamily/IOHIDEventTypes.h):
+// от него зависят номера EventMask/Range/Touch.
+enum {
+    AscentIOHIDEventFieldDigitizerX = AscentIOHIDEventFieldBase(AscentIOHIDEventTypeDigitizer),
+    AscentIOHIDEventFieldDigitizerY,
+    AscentIOHIDEventFieldDigitizerZ,
+    AscentIOHIDEventFieldDigitizerButtonMask,
+    AscentIOHIDEventFieldDigitizerType,
+    AscentIOHIDEventFieldDigitizerIndex,
+    AscentIOHIDEventFieldDigitizerIdentity,
+    AscentIOHIDEventFieldDigitizerEventMask,
+    AscentIOHIDEventFieldDigitizerRange,
+    AscentIOHIDEventFieldDigitizerTouch,
+    AscentIOHIDEventFieldDigitizerPressure,
+    AscentIOHIDEventFieldDigitizerAuxiliaryPressure,
+    AscentIOHIDEventFieldDigitizerTwist,
+    AscentIOHIDEventFieldDigitizerTiltX,
+    AscentIOHIDEventFieldDigitizerTiltY,
+    AscentIOHIDEventFieldDigitizerAltitude,
+    AscentIOHIDEventFieldDigitizerAzimuth,
+    AscentIOHIDEventFieldDigitizerQuality,
+    AscentIOHIDEventFieldDigitizerDensity,
+    AscentIOHIDEventFieldDigitizerIrregularity,
+    AscentIOHIDEventFieldDigitizerMajorRadius,
+    AscentIOHIDEventFieldDigitizerMinorRadius,
+    AscentIOHIDEventFieldDigitizerCollection,
+    AscentIOHIDEventFieldDigitizerCollectionChord,
+    AscentIOHIDEventFieldDigitizerChildEventMask,
+};
+
+typedef uint32_t (*AscentIOHIDEventGetTypeFn)(IOHIDEventRef event);
+typedef int64_t (*AscentIOHIDEventGetIntegerValueFn)(IOHIDEventRef event, uint32_t field);
+
+// Возвращает: 1 — палец на экране, 0 — палец оторван, -1 — понять нельзя.
+static int AscentHIDTouchState(IOHIDEventRef event, unsigned *outMask)
+{
+    static AscentIOHIDEventGetTypeFn getType = NULL;
+    static AscentIOHIDEventGetIntegerValueFn getIntegerValue = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void *handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",
+                              RTLD_NOW | RTLD_GLOBAL);
+        getType = (AscentIOHIDEventGetTypeFn)dlsym(RTLD_DEFAULT, "IOHIDEventGetType");
+        getIntegerValue = (AscentIOHIDEventGetIntegerValueFn)dlsym(RTLD_DEFAULT, "IOHIDEventGetIntegerValue");
+        if (getType == NULL && handle != NULL) {
+            getType = (AscentIOHIDEventGetTypeFn)dlsym(handle, "IOHIDEventGetType");
+        }
+        if (getIntegerValue == NULL && handle != NULL) {
+            getIntegerValue = (AscentIOHIDEventGetIntegerValueFn)dlsym(handle, "IOHIDEventGetIntegerValue");
+        }
+    });
+
+    if (getType == NULL || getIntegerValue == NULL || event == NULL) {
+        return -1;
+    }
+    if ((uint32_t)getType(event) != AscentIOHIDEventTypeDigitizer) {
+        return -1;
+    }
+
+    unsigned mask = (unsigned)getIntegerValue(event, AscentIOHIDEventFieldDigitizerEventMask);
+    if (outMask != NULL) {
+        *outMask = mask;
+    }
+    // Признак касания осмыслен только там, где он менялся (нажатие/отрыв);
+    // на движении меняется лишь позиция.
+    if ((mask & AscentIOHIDDigitizerEventTouch) == 0) {
+        return -1;
+    }
+    return (int)getIntegerValue(event, AscentIOHIDEventFieldDigitizerTouch);
+}
+
 // Касания пишем в журнал с ограничением: при перетаскивании событий сотни, и
 // без ограничения журнал забивался бы, а запись в него тормозила бы оверлей.
 static void AscentLogTouch(UITouchPhase phase, CGPoint location, UIView *keyView, NSInteger pointerId)
@@ -134,7 +226,8 @@ static void AscentLogTouch(UITouchPhase phase, CGPoint location, UIView *keyView
 // касание): по ним видно, какими флагами система помечает протяжку. Без этого
 // приходилось угадывать, почему движение не доходит до оверлея.
 static void AscentLogRawFlags(BOOL isTouchDown, BOOL isMove, BOOL isLift, BOOL isCancel,
-                              BOOL isInRange, BOOL isInRangeLift, CGPoint location)
+                              BOOL isInRange, BOOL isInRangeLift, unsigned hidMask,
+                              int hidTouch, CGPoint location)
 {
     static int budget = 0;
     if (isTouchDown) {
@@ -145,9 +238,10 @@ static void AscentLogRawFlags(BOOL isTouchDown, BOOL isMove, BOOL isLift, BOOL i
     }
     budget--;
 
-    AscentHUDLog(@"[raw] D%d M%d L%d C%d IR%d IRL%d на (%.0f, %.0f)",
+    AscentHUDLog(@"[raw] D%d M%d L%d C%d IR%d IRL%d mask=%#x touch=%d на (%.0f, %.0f)",
                  (int)isTouchDown, (int)isMove, (int)isLift, (int)isCancel,
-                 (int)isInRange, (int)isInRangeLift, location.x, location.y);
+                 (int)isInRange, (int)isInRangeLift, hidMask, hidTouch,
+                 location.x, location.y);
 }
 
 static void AscentHIDEventCallback(void *target, void *refcon, void *service, void *event)
@@ -171,12 +265,24 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     BOOL isInRange = rep.isInRange;
     BOOL isInRangeLift = rep.isInRangeLift;
 
-    // Палец уже на экране, если «вниз» мы видели, а «подъёма» ещё нет. На этой
-    // iOS события протяжки часто приходят БЕЗ признака isMove (зато с
-    // признаками «в зоне»), поэтому движение определяем по состоянию пальца:
-    // всё, что пришло между «вниз» и «подъём», — движение. Иначе касание
-    // обрывалось на первом же кадре протяжки, и панель с квадратом не ехали
-    // (а тап работал, потому что ему движение не нужно).
+    // Отрыв пальца у AX-признаков на разных версиях iOS отмечен по-разному, и
+    // «в зоне» (isInRange) приходит и на нажатии, и на движении. Поэтому
+    // состояние пальца спрашиваем у самого HID-события: у цифрового слоя есть
+    // признак касания (touch) и маска того, что изменилось в событии.
+    unsigned hidMask = 0;
+    int hidTouch = AscentHIDTouchState((IOHIDEventRef)event, &hidMask);
+    BOOL hidTouchTransition = (hidMask & AscentIOHIDDigitizerEventTouch) != 0;
+    BOOL hidDown = hidTouchTransition && hidTouch == 1;
+    BOOL hidUp = hidTouchTransition && hidTouch == 0;
+    BOOL hidCancel = (hidMask & AscentIOHIDDigitizerEventCancel) != 0;
+
+    // Похоже на протяжку? Признак берём и из AX, и из маски HID — по нему
+    // отличаем движение от подъёма: подъём приходит с признаком «в зоне», но без
+    // изменения позиции, поэтому «в зоне» на движении отрывом считать нельзя.
+    BOOL hidPosition = (hidMask & AscentIOHIDDigitizerEventPosition) != 0;
+    BOOL looksLikeMove = isTouchMove || (hidPosition && !hidTouchTransition);
+
+    // Палец уже на экране, если «вниз» мы видели, а «подъёма» ещё нет.
     BOOL fingerDown = (AscentActivePointerId != 0);
 
     // Страховка от потерянного «подъёма»: долгая тишина между событиями —
@@ -188,16 +294,25 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
     }
     AscentLastEventTime = now;
 
+    // Отрыв, увиденный по AX-признакам: явные «подъём»/«подъём из зоны», либо
+    // «в зоне» на событии, которое не похоже на протяжку и при этом достоверно
+    // не «палец внизу» по HID.
+    BOOL axEndsTouch = isTouchLift || isInRangeLift ||
+                       (isInRange && !looksLikeMove && !hidDown);
+
     UITouchPhase phase;
-    if (isTouchCancel) {
+    if (isTouchCancel || hidCancel) {
         phase = UITouchPhaseCancelled;
-    } else if (isTouchLift || isInRangeLift) {
+    } else if (hidUp) {
+        // Самый надёжный признак отрыва — прямо из HID-события.
+        phase = UITouchPhaseEnded;
+    } else if ((isTouchDown || hidDown) && !fingerDown) {
+        phase = UITouchPhaseBegan;
+    } else if (axEndsTouch) {
         phase = UITouchPhaseEnded;
     } else if (fingerDown) {
         phase = UITouchPhaseMoved;
-    } else if (isTouchDown) {
-        phase = UITouchPhaseBegan;
-    } else if (isTouchMove || isInRange) {
+    } else if (looksLikeMove) {
         phase = UITouchPhaseMoved;
     } else {
         phase = UITouchPhaseEnded;
@@ -235,7 +350,7 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
 
         AscentLogTouch(phase, location, keyView, pointerId);
         AscentLogRawFlags(isTouchDown, isTouchMove, isTouchLift, isTouchCancel,
-                          isInRange, isInRangeLift, location);
+                          isInRange, isInRangeLift, hidMask, hidTouch, location);
 
         // Перетаскивание и прокрутку ведёт сам оверлей прямо от этих точек: на
         // синтетических UITouch распознаватели движения срабатывают ненадёжно.
