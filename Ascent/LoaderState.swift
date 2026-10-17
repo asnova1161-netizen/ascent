@@ -131,10 +131,20 @@ final class LoaderState: ObservableObject {
                 // HUD пишет метку hud.overlay в момент создания своего квадрата;
                 // к этому моменту PID-файл уже есть, а метка может появиться на
                 // долю секунды позже. Перечитаем её чуть позже и в пульсе.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                    guard let self = self else { return }
-                    self.hudOverlayReady = IsHUDEnabled() && OverlayStore.flag(for: "hud.overlay")
+                // Быстрый опрос метки hud.overlay сразу после появления HUD,
+                // чтобы окно двойного квадрата сократилось до минимума.
+                let startWait = Date()
+                let poll = Timer(timeInterval: 0.15, repeats: true) { [weak self] t in
+                    guard let self = self else {
+                        t.invalidate()
+                        return
+                    }
+                    if OverlayStore.flag(for: "hud.overlay") || Date().timeIntervalSince(startWait) > 5.0 {
+                        t.invalidate()
+                        self.hudOverlayReady = IsHUDEnabled() && OverlayStore.flag(for: "hud.overlay")
+                    }
                 }
+                RunLoop.main.add(poll, forMode: .common)
                 let pid = AscentHUDProcessID()
                 AscentHUDLogMessage("Swift: оверлей подтверждён, pid=\(pid)")
                 self.startHeartbeat()
