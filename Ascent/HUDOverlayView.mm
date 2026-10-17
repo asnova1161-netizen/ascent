@@ -164,11 +164,8 @@ static const CGFloat kTriggerInset   = 14.0;
     UIButton *_panelClose;
     NSMutableArray<UIButton *> *_tabButtons;
     UIScrollView *_scroll;
-    UIView *_mainView;
     UIView *_miscView;
     UIView *_gameView;
-    UILabel *_statusLabel;
-    UIButton *_telegramButton;
     UIButton *_unloadButton;
     UILabel *_gameProcLabel;
     NSMutableArray<UISwitch *> *_switches;
@@ -176,6 +173,7 @@ static const CGFloat kTriggerInset   = 14.0;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
     CGSize _panelOffset;
     BOOL _panelDragging;
+    CGPoint _panelDragStart;
     BOOL _panelOpen;
     NSInteger _tab;
 }
@@ -244,7 +242,11 @@ static const CGFloat kTriggerInset   = 14.0;
     [super layoutSubviews];
 
     [self layoutStage];
-    if (!_triggerDragging) { [self layoutTrigger]; }
+    // layoutTrigger/layoutPanel пересчитывают позицию из сохранённого смещения
+    // и клампа — то же самое, что расставляет жест во время перетаскивания.
+    // Поэтому их можно вызывать всегда: раскладка идемпотентна, ничего не
+    // «откатывается» и панель с квадратом никогда не выезжают за край.
+    [self layoutTrigger];
     [self layoutPanel];
 }
 
@@ -264,14 +266,18 @@ static const CGFloat kTriggerInset   = 14.0;
     return _stage.bounds;
 }
 
+// Отступы считаем ТОЧНО так же, как запасной квадрат внутри приложения
+// (LoaderView: top = max(safeArea.top, 44), bottom = max(safeArea.bottom, 16)).
+// Иначе базовые позиции квадрата app и квадрата HUD разъезжаются на 20+ точек,
+// и в момент «передачи эстафеты» после Start на секунду видно ДВА квадрата.
 - (CGFloat)safeTop
 {
-    return MIN(MAX(self.safeAreaInsets.top, 10.0), 44.0);
+    return MAX(self.safeAreaInsets.top, 44.0);
 }
 
 - (CGFloat)safeBottom
 {
-    return MIN(MAX(self.safeAreaInsets.bottom, 10.0), 34.0);
+    return MAX(self.safeAreaInsets.bottom, 16.0);
 }
 
 - (CGPoint)triggerBaseCenter
@@ -380,7 +386,11 @@ static const CGFloat kTriggerInset   = 14.0;
         if (t.x * t.x + t.y * t.y > 25.0) { _triggerDragging = YES; }
         if (_triggerDragging) {
             CGPoint center = CGPointMake(_triggerDragStart.x + t.x, _triggerDragStart.y + t.y);
-            _trigger.center = [self clampTriggerCenter:center];
+            center = [self clampTriggerCenter:center];
+            _trigger.center = center;
+            // Смещение обновляем сразу — пересчёт раскладки не дёрнет квадрат.
+            CGPoint base = [self triggerBaseCenter];
+            _triggerOffset = CGSizeMake(center.x - base.x, center.y - base.y);
         }
         return;
     }
@@ -420,6 +430,11 @@ static const CGFloat kTriggerInset   = 14.0;
     }
     [self updateTriggerIcon];
     [self setNeedsLayout];
+    [self layoutIfNeeded];
+    // Геометрия в журнал: по ней сразу видно, попадает ли панель на экран.
+    AscentHUDLog(@"HUD: панель frame=%@, stage=%@, смещение=(%.0f, %.0f), квадрат center=%@",
+                 NSStringFromCGRect(_panel.frame), NSStringFromCGRect([self stageBounds]),
+                 _panelOffset.width, _panelOffset.height, NSStringFromCGPoint(_trigger.center));
 }
 
 - (UIButton *)makeFlatButton:(NSString *)title
@@ -462,6 +477,12 @@ static const CGFloat kTriggerInset   = 14.0;
                                                                                action:@selector(panelHeaderPanned:)];
     [_panelHeader addGestureRecognizer:headerPan];
 
+    // Касания оверлея доставляются синтезированными UITouch (см. HUDApp.mm),
+    // и с ними надёжно срабатывают ЖЕСТЫ, а не раздача касаний контролам —
+    // поэтому на каждую «кнопку» дополнительно вешаем свой UITapGestureRecognizer.
+    // Всё срабатывает идемпотентно, так что двойное срабатывание безопасно.
+    [self addTapGesture:_panelClose action:@selector(panelControlTapped:)];
+
     UILabel *headerLine = [[UILabel alloc] initWithFrame:CGRectZero];
     headerLine.backgroundColor = HUDLine();
     headerLine.tag = 0;
@@ -469,13 +490,14 @@ static const CGFloat kTriggerInset   = 14.0;
 
     // Вкладки
     _tabButtons = [NSMutableArray array];
-    NSArray<NSString *> *titles = @[ @"main", @"misc", @"game" ];
+    NSArray<NSString *> *titles = @[ @"misc", @"combot" ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
         UIButton *button = [self makeFlatButton:titles[i]];
         button.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
         button.tag = 100 + i;
         button.layer.cornerRadius = 0.0;
         [button addTarget:self action:@selector(tabTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [self addTapGesture:button action:@selector(panelControlTapped:)];
         [_panel addSubview:button];
         [_tabButtons addObject:button];
     }
@@ -485,35 +507,19 @@ static const CGFloat kTriggerInset   = 14.0;
     tabLine.tag = 1;
     [_panel addSubview:tabLine];
 
-    // Прокручиваемая область содержимого — вкладка «game» длиннее остальных
+    // Прокручиваемая область содержимого — вкладка «combot» длиннее остальных
     _scroll = [[UIScrollView alloc] initWithFrame:CGRectZero];
     _scroll.showsVerticalScrollIndicator = NO;
     _scroll.alwaysBounceVertical = NO;
+    // Без задержки касаний для содержимого: жесты на кнопках/строках вкладок
+    // срабатывают мгновенно, а не через долю секунды после касания.
+    _scroll.delaysContentTouches = NO;
     [_panel addSubview:_scroll];
 
-    [self buildMainTab];
     [self buildMiscTab];
     [self buildGameTab];
 
     [_stage addSubview:_panel];
-}
-
-- (void)buildMainTab
-{
-    _mainView = [[UIView alloc] initWithFrame:CGRectZero];
-    [_scroll addSubview:_mainView];
-
-    _statusLabel = HUDLabel(@"загрузчик активен", 13, UIFontWeightSemibold);
-    [_mainView addSubview:_statusLabel];
-
-    _telegramButton = [self makeFlatButton:@"t.me/ascentios"];
-    _telegramButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    _telegramButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
-    _telegramButton.layer.cornerRadius = 12.0;
-    _telegramButton.layer.borderWidth = 1.0;
-    _telegramButton.layer.borderColor = HUDLine().CGColor;
-    [_telegramButton addTarget:self action:@selector(openTelegram) forControlEvents:UIControlEventTouchUpInside];
-    [_mainView addSubview:_telegramButton];
 }
 
 - (void)buildMiscTab
@@ -526,6 +532,7 @@ static const CGFloat kTriggerInset   = 14.0;
     _unloadButton.backgroundColor = HUDGray();
     _unloadButton.layer.cornerRadius = 12.0;
     [_unloadButton addTarget:self action:@selector(unloadTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
     [_miscView addSubview:_unloadButton];
 
     UILabel *caption = HUDLabel(@"стоп лоадера, меню остаётся", 11.5, UIFontWeightRegular);
@@ -558,8 +565,13 @@ static const CGFloat kTriggerInset   = 14.0;
         toggle.onTintColor = [UIColor colorWithWhite:0.85 alpha:1.0];
         toggle.accessibilityIdentifier = switchKeys[i];
         [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+        // Переключатель сам касания не обрабатывает (иначе они воюют с жестом
+        // на строке и получается двойное переключение) — состояние двигает только
+        // наш жест, а сам переключатель остаётся индикатором.
+        toggle.userInteractionEnabled = NO;
         [row addSubview:toggle];
 
+        [self addTapGesture:row action:@selector(switchRowTapped:)];
         [_gameView addSubview:row];
         [_switches addObject:toggle];
     }
@@ -587,7 +599,13 @@ static const CGFloat kTriggerInset   = 14.0;
         slider.minimumTrackTintColor = [UIColor whiteColor];
         slider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
         [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+        // Слайдер двигает только жест по строке (см. комментарий про переключатель):
+        // значение считаем из точки касания, минуя обработку касаний самим UISlider.
+        // Жест только ТАП — иначе он воюет со скроллом вкладки за pan-жест.
+        slider.userInteractionEnabled = NO;
         [group addSubview:slider];
+
+        [self addTapGesture:group action:@selector(sliderRowTouched:)];
 
         [_gameView addSubview:group];
         [_sliders addObject:slider];
@@ -618,8 +636,36 @@ static const CGFloat kTriggerInset   = 14.0;
 
 - (CGFloat)contentHeightForTab:(NSInteger)tab
 {
-    if (tab == 2) { return 376.0; }
+    if (tab == 1) { return 376.0; }
     return 88.0;
+}
+
+/// Держим панель внутри безопасной зоны. Считается всегда — и во время
+/// перетаскивания тоже: уехать за край экрана панель не может в принципе, а
+/// любой повторный расчёт раскладки даёт ровно ту же точку (перетаскивание
+/// двигало панель «рывками» именно потому, что раскладка откатывала её назад).
+- (CGPoint)clampPanelCenter:(CGPoint)center width:(CGFloat)panelWidth
+{
+    CGRect area = [self triggerArea];
+    CGFloat halfW = panelWidth / 2.0;
+    CGFloat halfH = kPanelHeight / 2.0;
+    CGFloat minX = area.origin.x + halfW;
+    CGFloat maxX = MAX(area.origin.x + area.size.width - halfW, minX);
+    CGFloat minY = area.origin.y + halfH;
+    CGFloat maxY = MAX(area.origin.y + area.size.height - halfH, minY);
+    center.x = MIN(MAX(center.x, minX), maxX);
+    center.y = MIN(MAX(center.y, minY), maxY);
+    return center;
+}
+
+/// Смещение панели от базовой позиции — то, что сохраняется в общий файл.
+- (CGSize)panelOffsetForCenter:(CGPoint)center width:(CGFloat)panelWidth
+{
+    CGRect stage = [self stageBounds];
+    CGFloat baseX = (stage.size.width - panelWidth) / 2.0;
+    CGFloat baseY = stage.size.height * 0.74 - kPanelHeight / 2.0;
+    return CGSizeMake(center.x - (baseX + panelWidth / 2.0),
+                      center.y - (baseY + kPanelHeight / 2.0));
 }
 
 - (void)layoutPanel
@@ -634,23 +680,12 @@ static const CGFloat kTriggerInset   = 14.0;
 
     CGPoint center = CGPointMake(baseX + panelWidth / 2.0 + _panelOffset.width,
                                  baseY + kPanelHeight / 2.0 + _panelOffset.height);
+    center = [self clampPanelCenter:center width:panelWidth];
 
-    if (!_panelDragging) {
-        // Не даём панели уехать за пределы безопасной зоны.
-        CGRect area = [self triggerArea];
-        CGFloat halfW = panelWidth / 2.0;
-        CGFloat halfH = kPanelHeight / 2.0;
-        CGFloat minX = area.origin.x + halfW;
-        CGFloat maxX = MAX(area.origin.x + area.size.width - halfW, minX);
-        CGFloat minY = area.origin.y + halfH;
-        CGFloat maxY = MAX(area.origin.y + area.size.height - halfH, minY);
-        center.x = MIN(MAX(center.x, minX), maxX);
-        center.y = MIN(MAX(center.y, minY), maxY);
-
-        _panel.bounds = CGRectMake(0, 0, panelSize.width, panelSize.height);
-        _panel.center = center;
-    }
+    _panel.bounds = CGRectMake(0, 0, panelSize.width, panelSize.height);
+    _panel.center = center;
     _panel.layer.cornerRadius = 20.0;
+    _panel.layer.masksToBounds = YES;
 
     CGFloat w = panelSize.width;
     CGFloat h = panelSize.height;
@@ -683,23 +718,15 @@ static const CGFloat kTriggerInset   = 14.0;
     CGFloat contentHeight = [self contentHeightForTab:_tab];
     CGSize containerSize = CGSizeMake(contentWidth, contentHeight);
 
-    _mainView.frame = CGRectMake(0, 0, containerSize.width, 88.0);
     _miscView.frame = CGRectMake(0, 0, containerSize.width, 88.0);
     _gameView.frame = CGRectMake(0, 0, containerSize.width, 376.0);
     _scroll.contentSize = containerSize;
 
-    [self layoutMainTab:(_tab == 0)];
-    [self layoutMiscTab:(_tab == 1)];
-    [self layoutGameTab:(_tab == 2)];
+    [self layoutMiscTab:(_tab == 0)];
+    [self layoutGameTab:(_tab == 1)];
 }
 
-- (void)layoutMainTab:(BOOL)visible
-{
-    _mainView.hidden = !visible;
-    CGFloat w = _mainView.bounds.size.width;
-    _statusLabel.frame = CGRectMake(16, 16, w - 32, 20);
-    _telegramButton.frame = CGRectMake(16, 48, w - 32, 46);
-}
+
 
 - (void)layoutMiscTab:(BOOL)visible
 {
@@ -775,17 +802,46 @@ static const CGFloat kTriggerInset   = 14.0;
     _scroll.contentOffset = CGPointZero;
 }
 
+/// Жесты вешаем на все «кнопки» панели дополнительно к target'ам: касания
+/// оверлея доставляются синтезированными UITouch (см. HUDApp.mm), и с ними
+/// надёжно срабатывают распознаватели жестов, а не раздача касаний UIControls —
+/// именно на жестах целиком построено меню эталонного TrollSpeed.
+- (void)addTapGesture:(UIView *)target action:(SEL)action
+{
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:action];
+    [target addGestureRecognizer:tap];
+}
+
+/// Один обработчик для простых «кнопок» панели: крестик, вкладки, unload.
+/// Все действия идемпотентны, поэтому совпадение жеста и target
+/// безвредно.
+- (void)panelControlTapped:(UITapGestureRecognizer *)gesture
+{
+    UIView *view = gesture.view;
+    if (view == _panelClose) { [self closePanel]; return; }
+    if (view == _unloadButton) { [self unloadTapped]; return; }
+    if (view.tag >= 100 && view.tag < 100 + (NSInteger)_tabButtons.count) { [self selectTab:view.tag - 100]; }
+}
+
 - (void)panelHeaderPanned:(UIPanGestureRecognizer *)gesture
 {
-    CGPoint t = [gesture translationInView:_stage];
-
+    // Координаты считаем в пространстве _stage (слой повёрнут под ориентацию),
+    // а позицию берём от точки старта перетаскивания: так панель идёт строго за
+    // пальцем и не «отстаёт» из-за накопления translation.
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _panelDragging = YES;
+        _panelDragStart = _panel.center;
         return;
     }
     if (gesture.state == UIGestureRecognizerStateChanged) {
-        _panel.center = CGPointMake(_panel.center.x + t.x, _panel.center.y + t.y);
-        [gesture setTranslation:CGPointZero inView:_stage];
+        CGPoint t = [gesture translationInView:_stage];
+        CGPoint center = CGPointMake(_panelDragStart.x + t.x, _panelDragStart.y + t.y);
+        CGFloat panelWidth = _panel.bounds.size.width;
+        center = [self clampPanelCenter:center width:panelWidth];
+        _panel.center = center;
+        // Смещение обновляем сразу: тогда раскладка, если её пересчитают во
+        // время перетаскивания, поставит панель ровно туда же и не рванёт.
+        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
         return;
     }
     if (gesture.state == UIGestureRecognizerStateEnded ||
@@ -793,23 +849,15 @@ static const CGFloat kTriggerInset   = 14.0;
         gesture.state == UIGestureRecognizerStateFailed) {
         _panelDragging = NO;
         CGFloat panelWidth = _panel.bounds.size.width;
-        CGRect stage = [self stageBounds];
-        CGFloat baseX = (stage.size.width - panelWidth) / 2.0;
-        CGFloat baseY = stage.size.height * 0.74 - kPanelHeight / 2.0;
-        _panelOffset = CGSizeMake(_panel.center.x - (baseX + panelWidth / 2.0),
-                                  _panel.center.y - (baseY + kPanelHeight / 2.0));
+        CGPoint center = [self clampPanelCenter:_panel.center width:panelWidth];
+        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
         HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
         HUDOverlaySetNumber(@"hud.panel.y", _panelOffset.height);
         [self setNeedsLayout];
     }
 }
 
-- (void)openTelegram
-{
-    NSURL *url = [NSURL URLWithString:@"https://t.me/ascentios"];
-    if (url == nil) { return; }
-    [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-}
+
 
 - (void)unloadTapped
 {
@@ -819,6 +867,53 @@ static const CGFloat kTriggerInset   = 14.0;
 }
 
 #pragma mark - Игровые настройки
+
+- (UISwitch *)switchInRow:(UIView *)row
+{
+    for (UIView *sub in row.subviews) {
+        if ([sub isKindOfClass:[UISwitch class]]) { return (UISwitch *)sub; }
+    }
+    return nil;
+}
+
+- (UISlider *)sliderInGroup:(UIView *)group
+{
+    for (UIView *sub in group.subviews) {
+        if ([sub isKindOfClass:[UISlider class]]) { return (UISlider *)sub; }
+    }
+    return nil;
+}
+
+/// Тап по строке переключает её свитч — состояние двигает только наш жест.
+- (void)switchRowTapped:(UITapGestureRecognizer *)gesture
+{
+    UISwitch *toggle = [self switchInRow:gesture.view];
+    if (toggle == nil) { return; }
+    toggle.on = !toggle.on;
+    [self switchChanged:toggle];
+}
+
+/// Тап или протяжка по строке двигают слайдер ровно под пальцем: значение
+/// считаем из точки касания, минуя обработку касаний самим UISlider.
+- (void)sliderRowTouched:(UIGestureRecognizer *)gesture
+{
+    UISlider *slider = [self sliderInGroup:gesture.view];
+    if (slider == nil) { return; }
+
+    CGPoint point = [gesture locationInView:slider];
+    CGFloat width = MAX(slider.bounds.size.width, 1.0);
+    CGFloat ratio = MIN(MAX(point.x / width, 0.0), 1.0);
+    slider.value = slider.minimumValue + (float)(ratio * (slider.maximumValue - slider.minimumValue));
+    [self updateSliderLabel:slider.accessibilityIdentifier];
+
+    // В общий файл пишем только в конце жеста: пока палец на экране слайдер
+    // просто едет и показывает текущее значение.
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        [self sliderChanged:slider];
+    }
+}
 
 - (void)reloadCheatControls
 {
