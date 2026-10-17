@@ -349,7 +349,7 @@ int main(int argc, char *argv[])
                 pid_t selfPid = getpid();
                 AscentRemovePIDFile();
                 SetHUDEnabled(YES);
-                kill(self_pid, SIGKILL);
+                kill(selfPid, SIGKILL);
             });
 
             // ВАЖНО: здесь больше нет watchdog'а по родителю. Оверлей должен
