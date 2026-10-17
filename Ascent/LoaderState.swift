@@ -96,19 +96,22 @@ final class LoaderState: ObservableObject {
 
         // Поднимаем HUD-процесс. Повторный Start дублей не создаёт (проверка
         // по PID-файлу внутри SetHUDEnabled).
-        SetHUDEnabled(true)
-        AscentHUDLogMessage("Swift: Start — HUD поднят, собираю диагностику")
-
-        // Оверлей НЕ считаем запущенным, пока дочерний процесс не записал свой
-        // PID и не оказался жив. До этого кнопка остаётся Start.
-        // Оверлей поднят — держим диагностику свежей всё время, пока он включён:
-        // её короткая версия висит внизу экрана, а не только в отдельном окне.
-        refreshDebug()
-        AscentHUDLogMessage("Swift: Start — диагностика собрана, жду PID-файл")
-        startDiagnosticsRefresh()
-
-        waitForHUDStart()
-        AscentHUDLogMessage("Swift: Start — готово, показываю: \(showing ? "Exit" : "Start")")
+        // Запуск делаем асинхронно, чтобы не блокировать основной поток
+        // (спавн хелпера и файловые операции могут чуть подвисать на старых устройствах).
+        DispatchQueue.global(qos: .userInitiated).async {
+            SetHUDEnabled(true)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                AscentHUDLogMessage("Swift: Start — HUD поднят, собираю диагностику")
+                // Оверлей поднят — держим диагностику свежей всё время, пока он включён.
+                self.refreshDebug()
+                AscentHUDLogMessage("Swift: Start — диагностика собрана, жду PID-файл")
+                self.startDiagnosticsRefresh()
+                self.waitForHUDStart()
+                AscentHUDLogMessage("Swift: Start — готово, показываю: \(self.showing ? "Exit" : "Start")")
+            }
+        }
+        // Не блокируем UI: диагностика и ожидание продолжатся в фоне.
     }
 
     /// Ждём до 3 секунд, пока HUD-процесс запишет PID-файл и окажется живым.
@@ -176,10 +179,18 @@ final class LoaderState: ObservableObject {
         showing = false
         hudOverlayReady = false
         menuOpen = false
-        SetHUDEnabled(false)
         refreshDebug()
         if !debugVisible {
             stopDiagnosticsRefresh()
+        }
+        // Делаем остановку HUD-процесса в фоне, чтобы кнопка
+        // «Start/Exit» сразу перестала показывать Exit и не была с анимацией
+        // с задержкой ~1 секунду из-за синхронного ожидания.
+        DispatchQueue.global(qos: .userInitiated).async {
+            SetHUDEnabled(false)
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshFromProcess()
+            }
         }
     }
 
