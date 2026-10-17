@@ -52,4 +52,27 @@ enum OverlayStore {
         values[key + ".y"] = Double(size.height)
         save(values)
     }
+
+    // MARK: - Настройки игровых функций
+
+    /// Числовая настройка. Хранится в том же общем файле, поэтому HUD-процесс
+    /// (он бежит от root) видит переключатели меню без всякой связи между
+    /// процессами.
+    static func number(for key: String, default defaultValue: Double = 0) -> Double {
+        return load()[key] ?? defaultValue
+    }
+
+    static func setNumber(_ value: Double, for key: String) {
+        var values = load()
+        values[key] = value
+        save(values)
+    }
+
+    static func flag(for key: String, default defaultValue: Bool = false) -> Bool {
+        return number(for: key, default: defaultValue ? 1 : 0) > 0.5
+    }
+
+    static func setFlag(_ value: Bool, for key: String) {
+        setNumber(value ? 1 : 0, for: key)
+    }
 }
