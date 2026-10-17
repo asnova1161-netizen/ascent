@@ -24,6 +24,8 @@ struct StartButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-            .animation(.easeOut(duration: 0.12))
+            // Анимируем ТОЛЬКО нажатие: без value: под анимацию попадала и
+            // смена подписи Start/Exit, из-за чего она менялась с задержкой.
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
