@@ -170,6 +170,12 @@ static const CGFloat kHeaderHeight   = 46.0;
 static const NSTimeInterval kRawGestureStale    = 0.40;  // пауза, после которой жест протух
 static const NSTimeInterval kRawGestureLifetime = 2.50;  // предельная длина одного жеста
 static const NSTimeInterval kRawTapDebounce     = 0.12;  // гасит повторный «подъём» одного тапа
+// Предел одного шага пальца между событиями, в точках. Поток HID иногда
+// присылает событие движения с координатами ЧУЖОГО касания (остаток прошлого
+// жеста) — это скачок на сотни точек за один кадр. Настоящий палец столько не
+// проходит (120 pt за 16 мс — это 7500 pt/с), поэтому такой шаг считается
+// мусором: элемент не двигается, жест просто перебазируется.
+static const CGFloat kRawJumpLimit = 120.0;
 
 // Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
 // карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
@@ -472,6 +478,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // синтетические UITouch, а движение — только так).
     HUDRawDragTarget _rawTarget;
     CGPoint _rawStart;          // точка начала в координатах _stage
+    CGPoint _rawLastPoint;      // точка предыдущего события потока (для отсева скачков)
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
@@ -580,19 +587,22 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *hit = [self hitTest:point withEvent:nil];
     if (hit == nil) { return HUDRawDragNone; }
 
-    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragTrigger; }
+    // Квадрат НЕ таскается вообще. Нажатие на него обязано только открывать
+    // меню и НИКОГДА не сдвигать его: раньше любое нажатие с дрожью руки
+    // уводило квадрат с места, а смещение сохранялось — он «убегал».
+    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragNone; }
     // Управляющие элементы проверяем ДО шапки и карточки: вкладки, переключатели
     // и слайдеры лежат в панели, и без этого порядка их нажатие превращалось бы
     // в перетаскивание панели.
     if ([self isInteractiveView:hit]) { return HUDRawDragControl; }
-    if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragPanel; }
+    // Панель тоже НЕ таскается: её положение задаёт приложение, а любое
+    // перетаскивание из HUD только уводило её «куда-то» и сохранялось в файл.
+    if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragNone; }
     if (hit == _scroll || [hit isDescendantOfView:_scroll]) { return HUDRawDragScroll; }
-    // Пустая область карточки (заголовок раздела, поля вокруг стека) больше НЕ
-    // таскает панель. Раньше таскала — и любое нажатие на тело меню сдвигало
-    // панель с места, а смещение сохранялось, поэтому панель «уползала».
-    // Теперь её двигают ТОЛЬКО за шапку, а тело ведёт себя как содержимое.
+    // Тело карточки (заголовок раздела, поля вокруг стека) — прокрутка
+    // содержимого вкладки, а не сдвиг панели.
     if (hit == _contentCard || [hit isDescendantOfView:_contentCard]) { return HUDRawDragScroll; }
-    if (hit == _panel) { return HUDRawDragPanel; }
+    if (hit == _panel) { return HUDRawDragNone; }
     return HUDRawDragNone;
 }
 
@@ -620,6 +630,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawTarget = [self rawDragTargetAtPoint:point];
     _rawThreshold = [self rawThresholdForTarget:_rawTarget];
     _rawStart = stagePoint;
+    _rawLastPoint = stagePoint;
     _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
@@ -691,6 +702,23 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 
     if (phase == UITouchPhaseMoved) {
+        // Отсев скачков. Шаг от ПРЕДЫДУЩЕГО события больше предела — это не
+        // палец, а мусорное событие с координатами чужого касания. Раньше
+        // такой шаг сразу пробивал порог и элемент уезжал на сотни точек за
+        // один кадр — это и был «телепорт». Теперь событие игнорируется, а
+        // жест просто перебазируется на текущую точку.
+        CGFloat stepX = stagePoint.x - _rawLastPoint.x;
+        CGFloat stepY = stagePoint.y - _rawLastPoint.y;
+        _rawLastPoint = stagePoint;
+        CGFloat stepLen = sqrt(stepX * stepX + stepY * stepY);
+        if (stepLen > kRawJumpLimit) {
+            AscentHUDLog(@"[gesture] скачок %.0f pt — мусорное событие, элемент не двигаю", stepLen);
+            _rawStart = stagePoint;
+            _rawStartOffset = _scroll.contentOffset;
+            _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+            return;
+        }
+
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
         // Пока палец не сдвинулся на порог, это ещё тап: иначе дрожь руки при
         // нажатии уводила бы квадрат с места (и он бы «уползал»).
@@ -754,53 +782,82 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     [self performTapAtPoint:point];
 }
 
+/// Попадание в вью ГЕОМЕТРИЧЕСКИ, независимо от того, интерактивно ли оно и что
+/// вернул hitTest. Переключатели и слайдеры намеренно неинтерактивны (их
+/// состояние двигает только наш жест), а строки лежат внутри скролла — hitTest
+/// в этом случае возвращает сам скролл, и нажатие «не находило» переключатель.
+/// Именно поэтому нажатие на Enable на вкладке ESP ничего не делало.
+- (BOOL)point:(CGPoint)point insideView:(UIView *)view
+{
+    if (view == nil || view.hidden || view.alpha < 0.01) { return NO; }
+    CGPoint local = [view convertPoint:point fromView:self];
+    return CGRectContainsPoint(view.bounds, local);
+}
+
+/// Строка видна внутри прокрутки и точка попадает в неё. Строки ниже видимой
+/// части обрезаны скроллом — нажиматься они не должны.
+- (BOOL)pointIsOnScrollRow:(CGPoint)point row:(UIView *)row
+{
+    if (_scroll == nil || row == nil || row.hidden) { return NO; }
+    CGPoint inScroll = [_scroll convertPoint:point fromView:self];
+    // bounds скролла в его же координатах начинаются с contentOffset — здесь
+    // это ровно проверка «строка сейчас видна на экране».
+    if (!CGRectContainsPoint(_scroll.bounds, inScroll)) { return NO; }
+    return CGRectContainsPoint(row.frame, inScroll);
+}
+
 /// Тап прямо от потока касаний: попадаем в вид под точкой и выполняем его
-/// действие (те же обработчики, что вешаны на жесты и target'ы UIControls).
+/// действие (те же обработчики, что вешаны на target'ы UIControls).
 - (void)performTapAtPoint:(CGPoint)point
 {
     UIView *hit = [self hitTest:point withEvent:nil];
-    if (hit == nil) { return; }
-    AscentHUDLog(@"[gesture] тап по %@ (tag=%ld)", NSStringFromClass([hit class]), (long)hit.tag);
 
-    // Квадратик-триггер.
-    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { [self togglePanel]; return; }
+    // Квадратик-триггер: нажатие только открывает/закрывает меню и никогда не
+    // двигает квадрат.
+    if (hit != nil && (hit == _trigger || [hit isDescendantOfView:_trigger])) { [self togglePanel]; return; }
 
-    // Шапка панели — только таскается: тап по ней ничего не делает.
-    if (hit == _panelHeader) { return; }
+    // Шапка панели ничего не делает — панель не таскается.
+    if (hit != nil && (hit == _panelHeader || [hit isDescendantOfView:_panelHeader])) { return; }
 
     // Подпись «процесс игры».
-    if (hit == _gameProcLabel || [hit isDescendantOfView:_gameProcLabel]) { [self refreshGameProcess]; return; }
+    if (hit != nil && (hit == _gameProcLabel || [hit isDescendantOfView:_gameProcLabel])) {
+        [self refreshGameProcess];
+        return;
+    }
 
     // Кнопки вкладок лежат прямо в панели (tag = 100 + индекс).
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
         UIButton *tab = _tabButtons[i];
-        if (hit == tab || [hit isDescendantOfView:tab]) { [self selectTab:i]; return; }
+        if (hit != nil && (hit == tab || [hit isDescendantOfView:tab])) { [self selectTab:i]; return; }
     }
 
     // Кнопка unload.
-    if (_unloadButton != nil && (hit == _unloadButton || [hit isDescendantOfView:_unloadButton])) {
+    if (hit != nil && _unloadButton != nil &&
+        (hit == _unloadButton || [hit isDescendantOfView:_unloadButton])) {
         [self unloadTapped];
         return;
     }
 
-    // Строки переключателей и группы слайдеров: под пальцем сама строка/группа.
-    UIView *cursor = hit;
-    while (cursor != nil && cursor != _stage && cursor != _panel && cursor != _scroll) {
-        UISwitch *toggle = [self switchInRow:cursor];
-        if (toggle != nil) {
-            toggle.on = !toggle.on;
-            AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
-            [self switchChanged:toggle];
-            return;
-        }
-        UISlider *slider = [self sliderInGroup:cursor];
-        if (slider != nil) {
-            CGPoint local = [self convertPoint:point toView:slider];
-            [self applyTapToSlider:slider atPoint:local];
-            return;
-        }
-        cursor = cursor.superview;
+    // Строки переключателей и группы слайдеров ищем ГЕОМЕТРИЧЕСКИ, а не по
+    // hitTest: только так нажатие находит переключатель под строкой.
+    for (UISwitch *toggle in _switches) {
+        UIView *row = toggle.superview;
+        if (![self pointIsOnScrollRow:point row:row]) { continue; }
+        toggle.on = !toggle.on;
+        AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
+        [self switchChanged:toggle];
+        return;
     }
+
+    for (UISlider *slider in _sliders) {
+        UIView *group = slider.superview;
+        if (![self pointIsOnScrollRow:point row:group]) { continue; }
+        CGPoint local = [slider convertPoint:point fromView:self];
+        [self applyTapToSlider:slider atPoint:local];
+        return;
+    }
+
+    AscentHUDLog(@"[gesture] тап ни по чему не пришёлся (%.0f, %.0f)", point.x, point.y);
 }
 
 /// Значение слайдера из точки тапа (слайдер сам касания не обрабатывает).
@@ -1001,15 +1058,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _triggerIcon.contentMode = UIViewContentModeCenter;
     [_trigger addSubview:_triggerIcon];
 
-    // ВАЖНО: тап и перетаскивание — РАЗНЫЕ пути. UIPanGestureRecognizer
-    // срабатывает только когда палец сдвинулся, поэтому обычное нажатие он
-    // вообще не замечал: квадрат «не нажимался». Тап ловим отдельным
-    // UITapGestureRecognizer, а перенос ведёт поток касаний напрямую
-    // (см. handleRawTouchPhase:...) — на синтетических UITouch панорама
-    // движения не распознаёт.
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
-                                                                         action:@selector(triggerTapped:)];
-    [_trigger addGestureRecognizer:tap];
+    // Распознаватель тапа квадрату НЕ нужен и вреден: касания оверлея идут
+    // через поток HID (handleRawTouchPhase:...), и когда рядом висел ещё и
+    // UITapGestureRecognizer, одно нажатие обрабатывалось ДВАЖДЫ — панель
+    // успевала открыться и тут же закрыться, а квадрат при этом дёргался.
+    // Тап квадрата целиком ведёт performTapAtPoint:.
 
     [_stage addSubview:_trigger];
 }
@@ -1548,14 +1601,17 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _scroll.contentOffset = CGPointZero;
 }
 
-/// Жесты вешаем на все «кнопки» панели дополнительно к target'ам: касания
-/// оверлея доставляются синтезированными UITouch (см. HUDApp.mm), и с ними
-/// надёжно срабатывают распознаватели жестов, а не раздача касаний UIControls —
-/// именно на жестах целиком построено меню эталонного TrollSpeed.
+/// Распознаватели жестов больше НЕ вешаем — и это важно.
+///
+/// Касания оверлея разбираются ТОЛЬКО потоком HID (handleRawTouchPhase:...).
+/// Пока сюда ещё вешались UITapGestureRecognizer, одно и то же нажатие
+/// обрабатывалось ДВАЖДЫ: распознавателем и потоком. Переключатель успевал
+/// включиться и тут же выключиться, панель — открыться и закрыться. Снаружи это
+/// выглядело как «нажимаю, а ничего не происходит» и «меню баганое».
 - (void)addTapGesture:(UIView *)target action:(SEL)action
 {
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:action];
-    [target addGestureRecognizer:tap];
+    (void)target;
+    (void)action;
 }
 
 /// Один обработчик для простых «кнопок» панели: вкладки, unload.
