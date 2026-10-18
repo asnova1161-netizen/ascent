@@ -224,9 +224,12 @@ static void AscentLogTouch(UITouchPhase phase, CGPoint location, UIView *keyView
     }
 
     linesInWindow++;
+    // На движениях hitTest не считается (см. обработку касаний), поэтому там
+    // класса вью под пальцем нет — пишем прочерк, а не «nil», чтобы в журнале
+    // это не читалось как «попадания не было».
     AscentHUDLog(@"[touch] %s на (%.0f, %.0f) -> %@, pointer=%ld",
                  phaseName, location.x, location.y,
-                 keyView != nil ? NSStringFromClass([keyView class]) : @"nil",
+                 keyView != nil ? NSStringFromClass([keyView class]) : @"-",
                  (long)pointerId);
 }
 
@@ -361,7 +364,17 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
             return;
         }
 
-        UIView *keyView = [keyWindow hitTest:location withEvent:nil];
+        // hitTest по всему окну нужен только строке журнала (имя вью под
+        // пальцем) и синтетическим касаниям, которые у нас выключены
+        // (ASCENT_DIRECT_TAPS = 1). На ДВИЖЕНИИ событий десятки в секунду, и
+        // полный обход иерархии ради строки лога — лишняя работа прямо в
+        // горячей пути протяжки: позиция доезжает до панели позже, и движение
+        // выглядит «ступеньками». Тапы (Began/Ended) диагностику получают
+        // как раньше.
+        UIView *keyView = nil;
+        if (phase != UITouchPhaseMoved && phase != UITouchPhaseStationary) {
+            keyView = [keyWindow hitTest:location withEvent:nil];
+        }
 
         AscentLogTouch(phase, location, keyView, pointerId);
         AscentLogRawFlags(isTouchDown, isTouchMove, isTouchLift, isTouchCancel,
@@ -380,6 +393,7 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
 
 #if !ASCENT_DIRECT_TAPS
         if (pointerId > 0) {
+            if (keyView == nil) { keyView = [keyWindow hitTest:location withEvent:nil]; }
             [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
                           atGlobalCoordinate:location
                               withTouchPhase:phase
