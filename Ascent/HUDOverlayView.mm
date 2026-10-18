@@ -160,6 +160,12 @@ static const CGFloat kTriggerSide    = 54.0;
 // размер считает panelSizeForArea: — он же держит пропорцию горизонтальной.
 static const CGFloat kPanelWidthMax  = 340.0;   // ширина меню
 static const CGFloat kPanelHeightMax = 240.0;   // высота меню (влезает и в ландшафт)
+// Запас на перенос панели ВЛЕВО-ВПРАВО: по kPanelTravelMin с каждой стороны
+// экрана всегда остаётся свободно. Без него панель «во всю ширину» физически
+// некуда двигать в портрете — ход был ~50 pt, и панель упиралась в невидимый
+// барьер по бокам. С запасом панель доезжает и до левого края, и до правого,
+// и проезжает между ними; по вертикали ограничений нет вовсе.
+static const CGFloat kPanelTravelMin = 45.0;
 static const CGFloat kHeaderHeight   = 46.0;
 
 // Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
@@ -195,7 +201,6 @@ static const CGFloat kSidebarWidth   = 60.0;    // ширина колонки �
 static const CGFloat kTabRowHeight   = 31.0;    // высота строки вкладки
 static const CGFloat kCardInset      = 8.0;     // отступ карточки от края панели
 static const CGFloat kSectionTop     = 32.0;    // высота полосы заголовка раздела
-static const CGFloat kMargin         = 10.0;
 static const CGFloat kTriggerInset   = 14.0;
 // Край экрана для перетаскивания: квадрат и панель ездят по ВЕСЬМУ экрану и
 // зажимаются только так, чтобы не выйти за границу. 6 pt — чтобы скруглённые
@@ -1055,18 +1060,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     return _stage.bounds;
 }
 
-// Отступы считаем ТОЧНО так же, как запасной квадрат внутри приложения
-// (LoaderView: top = max(safeArea.top, 44), bottom = max(safeArea.bottom, 16)).
-// Иначе базовые позиции квадрата app и квадрата HUD разъезжаются на 20+ точек,
-// и в момент «передачи эстафеты» после Start на секунду видно ДВА квадрата.
+// Отступ сверху берём тем же, что было в запасном квадрате приложения
+// (LoaderView: top = max(safeArea.top, 44)). Запасной квадрат приложения больше
+// не рисуется — его убрали, рисует только HUD — но правило оставили: оно держит
+// базовую позицию квадрата и шапку панели ниже статус-бара на любых устройствах.
 - (CGFloat)safeTop
 {
     return MAX(self.safeAreaInsets.top, 44.0);
-}
-
-- (CGFloat)safeBottom
-{
-    return MAX(self.safeAreaInsets.bottom, 16.0);
 }
 
 - (CGPoint)triggerBaseCenter
@@ -1089,18 +1089,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 {
     CGRect stage = [self stageBounds];
     return CGRectInset(stage, kEdgeMargin, kEdgeMargin);
-}
-
-/// Площадь РАЗМЕРА панели (не переноса!). От неё считается ширина меню, и она
-/// не должна меняться при каждом движении пальца. Держим прежнюю площадь с
-/// безопасными отступами — панель остаётся прежнего размера.
-- (CGRect)triggerArea
-{
-    CGRect stage = [self stageBounds];
-    return CGRectMake(kMargin,
-                      [self safeTop] + kMargin,
-                      MAX(stage.size.width - kMargin * 2.0, 0),
-                      MAX(stage.size.height - [self safeTop] - [self safeBottom] - kMargin * 2.0, 0));
 }
 
 - (CGPoint)clampTriggerCenter:(CGPoint)center
@@ -1469,7 +1457,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 /// меню должно расходиться влево-вправо, а не вверх.
 - (CGSize)panelSizeForArea:(CGRect)area
 {
-    CGFloat width = MIN(MAX(area.size.width - 44.0, 0), kPanelWidthMax);
+    // Ширина: сначала оставляем запас на перенос (по kPanelTravelMin с каждой
+    // стороны экрана), и только потом ограничиваем константой. Раньше здесь
+    // стоял фиксированный отступ 44 pt, ширина упиралась в границы экрана и
+    // в портрете оставалось ~50 pt хода — панель «упиралась в барьер».
+    CGFloat width = MIN(MAX(area.size.width - kPanelTravelMin * 2.0, 0), kPanelWidthMax);
     CGFloat height = MIN(kPanelHeightMax, MAX(area.size.height, 0));
 
     // Меню горизонтальное: ширина обязана быть заметно больше высоты. Если
@@ -1522,7 +1514,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (_dragging && _rawMoved) { return; }
 
     CGRect stage = [self stageBounds];
-    CGSize panelSize = [self panelSizeForArea:[self triggerArea]];
+    CGSize panelSize = [self panelSizeForArea:[self dragArea]];
     CGFloat baseX = (stage.size.width - panelSize.width) / 2.0;
     CGFloat baseY = stage.size.height * 0.74 - panelSize.height / 2.0;
 
