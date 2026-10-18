@@ -12,6 +12,7 @@
 
 #import "GameMemory.h"
 #import "HUDHelper.h"
+#import "GameESP.h"
 
 #import <errno.h>
 #import <stdlib.h>
@@ -467,11 +468,18 @@ void AscentGameTick(void)
                  esp > 0.5, aimbot > 0.5, trigger > 0.5);
 
     if (anyOn && !AscentGameIsAttached()) {
-        // Пока это только доступ к памяти: самих смещений игры здесь ещё нет,
-        // поэтому рисовать/целиться нечем — но видно, что доступ есть.
         AscentGameProbe(@"standoff");
     } else if (!anyOn && AscentGameIsAttached()) {
         AscentGameDetach();
         AscentHUDLog(@"[game] все функции выключены — task-порт отпущен");
+    }
+
+    // ESP живёт своим потоком: включаем чтение только когда есть и
+    // переключатель, и task-порт. Иначе фоновый цикл крутился бы впустую.
+    AscentESPSetEnabled(anyOn && AscentGameIsAttached());
+    if (esp > 0.5 && AscentGameIsAttached()) {
+        // Первое включение — прогон диагностики: по её строкам в журнале
+        // видно, какие смещения правильные, а какие надо поправить.
+        AscentESPRunProbe();
     }
 }
