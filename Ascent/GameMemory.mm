@@ -59,7 +59,6 @@ static NSString *gGameError = nil;
 // Последние прочитанные переключатели: чтобы писать в журнал только изменения.
 static double gLastEsp = -1.0;
 static double gLastAimbot = -1.0;
-static double gLastTrigger = -1.0;
 
 static void AscentGameSetError(NSString *message)
 {
@@ -453,19 +452,16 @@ void AscentGameTick(void)
 {
     double esp = AscentSharedNumber(@"cheat.esp");
     double aimbot = AscentSharedNumber(@"cheat.aimbot");
-    double trigger = AscentSharedNumber(@"cheat.trigger");
 
-    if (esp == gLastEsp && aimbot == gLastAimbot && trigger == gLastTrigger) {
+    if (esp == gLastEsp && aimbot == gLastAimbot) {
         return;
     }
 
     gLastEsp = esp;
     gLastAimbot = aimbot;
-    gLastTrigger = trigger;
 
-    BOOL anyOn = (esp > 0.5) || (aimbot > 0.5) || (trigger > 0.5);
-    AscentHUDLog(@"[game] переключатели: esp=%d, aimbot=%d, triggerbot=%d",
-                 esp > 0.5, aimbot > 0.5, trigger > 0.5);
+    BOOL anyOn = (esp > 0.5) || (aimbot > 0.5);
+    AscentHUDLog(@"[game] переключатели: esp=%d, aimbot=%d", esp > 0.5, aimbot > 0.5);
 
     if (anyOn && !AscentGameIsAttached()) {
         AscentGameProbe(@"standoff");
