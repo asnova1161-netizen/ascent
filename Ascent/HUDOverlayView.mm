@@ -187,12 +187,6 @@ static const CGFloat kPanelHeightMax = 190.0;   // высота меню (вле
 // ниже прежнего, при этом и в портрете, и в ландшафте панель остаётся
 // читаемой: по высоте всё равно ограничивает kPanelHeightMax и площадь.
 static const CGFloat kPanelRatio     = 1.55;
-// Запас на перенос панели ВЛЕВО-ВПРАВО: по kPanelTravelMin с каждой стороны
-// экрана всегда остаётся свободно. Без него панель «во всю ширину» физически
-// некуда двигать в портрете — ход был ~50 pt, и панель упиралась в невидимый
-// барьер по бокам. С запасом панель доезжает и до левого края, и до правого,
-// и проезжает между ними; по вертикали ограничений нет вовсе.
-static const CGFloat kPanelTravelMin = 45.0;
 
 // Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
 // жёсткого контроля старое начало жеста оставалось бы висеть навсегда: следующее
@@ -519,7 +513,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    UILabel *_miscCaption;
     UILabel *_configCaption;
     NSMutableArray<UISwitch *> *_switches;
     NSMutableArray<UISlider *> *_sliders;
@@ -1513,10 +1506,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
     [_scroll addSubview:_unloadButton];
 
-    _miscCaption = HUDLabel(@"стоп лоадера, меню остаётся", 11.5, UIFontWeightRegular);
-    _miscCaption.textColor = [UIColor colorWithWhite:1.0 alpha:0.5];
-    [_scroll addSubview:_miscCaption];
-
     _configCaption = HUDLabel(@"память игры читает HUD-процесс: переключатели выше только включают доступ к ней",
                               10.5, UIFontWeightRegular);
     _configCaption.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
@@ -1586,11 +1575,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 /// меню должно расходиться влево-вправо, а не вверх.
 - (CGSize)panelSizeForArea:(CGRect)area
 {
-    // Ширина: сначала оставляем запас на перенос (по kPanelTravelMin с каждой
-    // стороны экрана), и только потом ограничиваем константой. Раньше здесь
-    // стоял фиксированный отступ 44 pt, ширина упиралась в границы экрана и
-    // в портрете оставалось ~50 pt хода — панель «упиралась в барьер».
-    CGFloat width = MIN(MAX(area.size.width - kPanelTravelMin * 2.0, 0), kPanelWidthMax);
+    // Ширина — просто константа, пока влезает в площадь: в портрете и в
+    // горизонтали меню ОДИНАКОВОГО размера (340×190 на iPhone 7). Раньше тут
+    // резервировался запас на боковой перенос, и в портрете меню сжималось
+    // до 273 pt, а в горизонтали было 340 — это и заметно. Теперь ход в
+    // портрете небольшой (панель почти во всю ширину), ограничение одно —
+    // не выйти за экран (см. clampPanelCenter).
+    CGFloat width = MIN(MAX(area.size.width, 0), kPanelWidthMax);
     CGFloat height = MIN(kPanelHeightMax, MAX(area.size.height, 0));
 
     // Меню горизонтальное: ширина обязана быть заметно больше высоты, иначе
@@ -1733,7 +1724,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (UISwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
-    _miscCaption.hidden = YES;
     _configCaption.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
@@ -1747,13 +1737,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Вкладка Aim: только основной переключатель. Triggerbot убран.
         [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
     } else if (tab == 2) {
+        // Misc: только кнопка unload — подписи под ней больше нет.
         _unloadButton.hidden = NO;
         _unloadButton.frame = CGRectMake(x, y, rowWidth, 46);
         y += 46 + 10;
-
-        _miscCaption.hidden = NO;
-        _miscCaption.frame = CGRectMake(x, y, rowWidth, 18);
-        y += 18 + 4;
     } else {
         [self layoutSliderGroup:_sliders[0] x:x y:&y width:rowWidth];
         [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];
