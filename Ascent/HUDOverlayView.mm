@@ -154,15 +154,28 @@ static CGRect HUDOrientationBounds(UIInterfaceOrientation orientation, CGRect bo
 #pragma mark - Оверлей
 
 static const CGFloat kTriggerSide    = 54.0;
-static const CGFloat kPanelWidthMax  = 272.0;   // компактная ширина карточки
-static const CGFloat kPanelHeight    = 330.0;   // выше ширины — вертикальное меню
+// Меню вертикальное: 244x448, выше ширины примерно вдвое (≈1:1.84). Раньше
+// карточка была 272x330 — шире, чем выше, из-за чего меню читалось как
+// горизонтальное. Колонку вкладок слева сохраняем, но сужаем до 64: карточка
+// содержимого при этом остаётся 158 pt, и подписи строк не обрезаются.
+static const CGFloat kPanelWidthMax  = 244.0;
+static const CGFloat kPanelHeight    = 448.0;
 static const CGFloat kHeaderHeight   = 46.0;
+
+// Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
+// жёсткого контроля старое начало жеста оставалось бы висеть навсегда: следующее
+// движение считалось протяжкой ОТ старой точки, и квадрат/панель прыгали назад —
+// ровно на то место, где они появились. Жест жив, только пока по нему идут
+// события и только ограниченное время.
+static const NSTimeInterval kRawGestureStale    = 0.40;  // пауза, после которой жест протух
+static const NSTimeInterval kRawGestureLifetime = 2.50;  // предельная длина одного жеста
+static const NSTimeInterval kRawTapDebounce     = 0.12;  // гасит повторный «подъём» одного тапа
 
 // Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
 // карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
 // раскладки, поэтому они — константы. Вкладки держим плотными, как на макете:
-// строка в 31 pt на 330 pt карточки даёт те же пропорции, что и на фото.
-static const CGFloat kSidebarWidth   = 84.0;    // ширина колонки вкладок
+// строка в 31 pt на 448 pt карточки даёт те же пропорции, что и на фото.
+static const CGFloat kSidebarWidth   = 64.0;    // ширина колонки вкладок
 static const CGFloat kTabRowHeight   = 31.0;    // высота строки вкладки
 static const CGFloat kCardInset      = 8.0;     // отступ карточки от края панели
 static const CGFloat kSectionTop     = 32.0;    // высота полосы заголовка раздела
@@ -460,7 +473,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // синтетические UITouch, а движение — только так).
     HUDRawDragTarget _rawTarget;
     CGPoint _rawStart;          // точка начала в координатах _stage
-    CGPoint _rawTapStart;       // то же, но в координатах оверлея (для тапа)
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
@@ -468,6 +480,10 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
     CGFloat _rawThreshold;      // порог «это уже протяжка, а не тап»
     NSTimeInterval _rawLastTime; // время последнего события потока
+    NSTimeInterval _rawStartTime; // момент начала жеста (для контроля длины)
+    NSTimeInterval _rawLastTapTime; // последний отработанный тап (для гашения
+                                    // повторного «подъёма» одного и того же касания)
+    CGPoint _rawLastTapPoint;
 }
 
 #pragma mark - Создание
@@ -599,13 +615,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawTarget = [self rawDragTargetAtPoint:point];
     _rawThreshold = [self rawThresholdForTarget:_rawTarget];
     _rawStart = stagePoint;
-    _rawTapStart = point;
     _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
     _rawTapFired = NO;
     _dragging = YES;
-    _rawLastTime = [[NSProcessInfo processInfo] systemUptime];
+    _rawStartTime = [[NSProcessInfo processInfo] systemUptime];
+    _rawLastTime = _rawStartTime;
 }
 
 - (void)handleRawTouchPhase:(UITouchPhase)phase
@@ -620,17 +636,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint point = [self convertPoint:location fromView:window];
     CGPoint stagePoint = [_stage convertPoint:location fromView:window];
 
-    // Долгая тишина между событиями — палец замер или событие «подъёма»
-    // потерялось. Жест тогда завершён: иначе старое начало осталось бы висеть, и
-    // первый же сдвиг утащил бы квадрат к прежнему месту («телепорт»).
-    //
-    // ВРЕМЯ ОБНОВЛЯЕМ НА КАЖДОМ СОБЫТИИ, иначе порог срабатывал бы каждые 0.35 с
-    // во время ДЛИТЕЛЬНОГО касания: жест «заново подхватывался», _rawMoved
-    // сбрасывался, и отпускание после протяжки считалось тапом — панель
-    // «teleпортировалась» и нажатия превращались в случайные действия.
     NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
-    BOOL stale = (_rawTarget != HUDRawDragNone) && (now - _rawLastTime > 0.35);
-    _rawLastTime = now;
 
     if (phase == UITouchPhaseBegan) {
         [self beginRawDragAtPoint:point stagePoint:stagePoint];
@@ -639,16 +645,47 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
     if (phase == UITouchPhaseStationary) { return; }
 
-    if (phase == UITouchPhaseMoved) {
-        if (_rawTarget == HUDRawDragNone) { return; }
+    // Жест жив, только пока по нему идут события и только ограниченное время.
+    //
+    // Это главный ремонт «телепорта». AX/HID-поток на iOS 15 нередко теряет
+    // событие «подъём»: тогда старое начало жеста висело бы навсегда, и
+    // СЛЕДУЮЩЕЕ движение считалось бы протяжкой от устаревшей точки. Квадрат и
+    // панель при этом прыгали назад — ровно на то место, где они появились
+    // (у квадрата — где он оказался после Start, у панели — где она открылась).
+    //
+    // Раньше проверялась только пауза между событиями, и она не ловила главный
+    // случай: _rawLastTime обновлялся на КАЖДОМ событии, поэтому пока палец
+    // водит по экрану, залипший жест никогда не «протухал». Теперь добавлен
+    // контроль общей длины жеста (kRawGestureLifetime), и залипшее состояние в
+    // любом случае переподхватывается заново — БЕЗ движения элементов: только
+    // перебазируется начало, поэтому квадрат и панель остаются на месте.
+    BOOL dead = (_rawTarget == HUDRawDragNone) ||
+                ((now - _rawLastTime) > kRawGestureStale) ||
+                ((now - _rawStartTime) > kRawGestureLifetime);
+    _rawLastTime = now;
 
-        if (stale) {
-            // Подхватываем жест заново от текущей точки: квадрат и панель
-            // остаются под пальцем и никуда не прыгают.
-            [self beginRawDragAtPoint:point stagePoint:stagePoint];
-            return;
+    if (dead && _rawTarget != HUDRawDragNone) {
+        AscentHUDLog(@"[gesture] жест протух — переподхватываю от текущей точки");
+        [self beginRawDragAtPoint:point stagePoint:stagePoint];
+        if (phase == UITouchPhaseEnded) {
+            [self fireRawTapAtPoint:point now:now];
         }
+        [self endRawGesture];
+        return;
+    }
 
+    if (_rawTarget == HUDRawDragNone) {
+        // Жеста нет: «подъём» уже обработан, либо Began до оверлея не доехал.
+        // Тап берём ОТ ТЕКУЩЕЙ ТОЧКИ: запомненная точка нажатия к этому моменту
+        // устарела бы и указывала на чужой элемент. Повторный «подъём» того же
+        // касания гасит debounce внутри fireRawTapAtPoint:now:.
+        if (phase == UITouchPhaseEnded) {
+            [self fireRawTapAtPoint:point now:now];
+        }
+        return;
+    }
+
+    if (phase == UITouchPhaseMoved) {
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
         // Пока палец не сдвинулся на порог, это ещё тап: иначе дрожь руки при
         // нажатии уводила бы квадрат с места (и он бы «уползал»).
@@ -674,18 +711,42 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Ended / Cancelled: фиксируем результат (позицию или смещение прокрутки).
     if (_rawMoved) {
         [self commitRawDrag];
-    } else if (phase == UITouchPhaseEnded && !_rawTapFired) {
+    } else if (phase == UITouchPhaseEnded) {
         // Палец не сдвинулся — это тап. Обрабатываем его САМИ прямо от потока
         // касаний: на синтетических UITouch распознаватели жестов срабатывают
         // ненадёжно (за них конкурирует pan-скролл, и Began/Ended местами
         // теряется), из-за чего кнопки «не нажимались». Точка — та, где палец
-        // сошёл вниз: от неё и выбираем, что именно нажали.
-        _rawTapFired = YES;
-        [self performTapAtPoint:_rawTapStart];
+        // сошёл вверх: от неё и выбираем, что именно нажали.
+        [self fireRawTapAtPoint:point now:now];
     }
+    [self endRawGesture];
+}
+
+/// Завершает жест, сбрасывая всё его состояние. Без этого следующее касание
+/// продолжало бы старый жест и двигало элементы от устаревшей стартовой точки.
+- (void)endRawGesture
+{
     _rawTarget = HUDRawDragNone;
     _rawMoved = NO;
+    _rawTapFired = NO;
     _dragging = NO;
+}
+
+/// Тап с гашением повторного «подъёма» одного и того же касания: AX/HID-поток
+/// иногда присылает «подъём» дважды, и без этого одно нажатие переключало бы
+/// дважды (включил — тут же выключил). Гасим только похожий повтор: настоящий
+/// второй тап по тому же месту отличается по времени.
+- (void)fireRawTapAtPoint:(CGPoint)point now:(NSTimeInterval)now
+{
+    if (now - _rawLastTapTime < kRawTapDebounce) {
+        CGFloat dx = point.x - _rawLastTapPoint.x;
+        CGFloat dy = point.y - _rawLastTapPoint.y;
+        if (dx * dx + dy * dy < 60.0 * 60.0) { return; }
+    }
+    _rawTapFired = YES;
+    _rawLastTapTime = now;
+    _rawLastTapPoint = point;
+    [self performTapAtPoint:point];
 }
 
 /// Тап прямо от потока касаний: попадаем в вид под точкой и выполняем его
@@ -1025,9 +1086,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     NSArray<NSString *> *titles = @[ @"Esp", @"Aim", @"Misc", @"Config" ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
         UIButton *button = [self makeFlatButton:titles[i]];
-        button.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        // Колонка вкладок сужена до 64 pt (меню вертикальное), поэтому отступ
+        // подписи уменьшаем: иначе «Config» не влезало в 44 pt текста.
+        button.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
         button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-        button.titleEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 0);
+        button.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
         button.tag = 100 + i;
         button.layer.cornerRadius = 0.0;
         [button addTarget:self action:@selector(tabTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1100,7 +1163,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                                            @"Snapline" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
-        UILabel *label = HUDLabel(switchTitles[i], 13, UIFontWeightMedium);
+        // Шрифт 12 (а не 13): карточка содержимого сузилась до 158 pt, чтобы
+        // панель стала вертикальной, и «Distance» при 13 упиралось в край.
+        UILabel *label = HUDLabel(switchTitles[i], 12, UIFontWeightMedium);
         // Кадр подписи задаёт раскладка строки (см. layoutSwitchRow:). Здесь
         // только запрещаем autoresizing: строка рождается нулевой, и «тянущаяся»
         // высота раздувала подпись вдвое — текст уезжал ниже середины строки.
