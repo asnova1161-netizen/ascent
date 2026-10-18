@@ -210,6 +210,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
     BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
+    BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
     NSTimeInterval _rawLastTime; // время последнего события потока
 }
 
@@ -302,6 +303,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
     _rawTapFired = NO;
+    _dragging = YES;
     _rawLastTime = [[NSProcessInfo processInfo] systemUptime];
 }
 
@@ -368,6 +370,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
     _rawTarget = HUDRawDragNone;
     _rawMoved = NO;
+    _dragging = NO;
 }
 
 /// Тап прямо от потока касаний: попадаем в вид под точкой и выполняем его
@@ -579,6 +582,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 - (void)layoutTrigger
 {
+    // Пока палец тянет квадрат, его позицией владеет жест (applyRawDragDelta):
+    // раскладка не должна откатывать его к сохранённому смещению — иначе
+    // перетаскивание «дёргалось», а после него квадрат телепортировался обратно
+    // на стартовую точку при первом же layout (например, при открытии панели).
+    if (_dragging && _rawTarget == HUDRawDragTrigger) { return; }
     CGPoint base = [self triggerBaseCenter];
     CGPoint center = CGPointMake(base.x + _triggerOffset.width, base.y + _triggerOffset.height);
     _trigger.bounds = CGRectMake(0, 0, kTriggerSide, kTriggerSide);
@@ -653,10 +661,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     [self updateTriggerIcon];
     [self setNeedsLayout];
     [self layoutIfNeeded];
-    // Геометрия в журнал: по ней сразу видно, попадает ли панель на экран.
-    AscentHUDLog(@"HUD: панель frame=%@, stage=%@, смещение=(%.0f, %.0f), квадрат center=%@",
+    // Геометрия в журнал: по ней сразу видно, попадает ли панель на экран и
+    // не «уплыл» ли квадрат (смещение хранится отдельно от центра).
+    AscentHUDLog(@"HUD: панель frame=%@, stage=%@, панель.смещение=(%.0f, %.0f), квадрат center=%@ смещение=(%.0f, %.0f)",
                  NSStringFromCGRect(_panel.frame), NSStringFromCGRect([self stageBounds]),
-                 _panelOffset.width, _panelOffset.height, NSStringFromCGPoint(_trigger.center));
+                 _panelOffset.width, _panelOffset.height, NSStringFromCGPoint(_trigger.center),
+                 _triggerOffset.width, _triggerOffset.height);
 }
 
 - (UIButton *)makeFlatButton:(NSString *)title
@@ -908,6 +918,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)layoutPanel
 {
     if (_panel == nil) { return; }
+    // Во время любой протяжки панель либо едет самим жестом, либо стоит
+    // неподвижно — пересчитывать её раскладку на каждый кадр незачем (на старых
+    // устройствах это и давало «лаг» при перетаскивании). Раскладка вернётся
+    // сразу, как только палец отпущен, и при тапе (там _rawMoved = NO), чтобы
+    // панель успела открыться на своём месте.
+    if (_dragging && _rawMoved) { return; }
 
     CGRect stage = [self stageBounds];
     CGFloat panelWidth = MIN(MAX(stage.size.width - 44.0, 0), kPanelWidthMax);
