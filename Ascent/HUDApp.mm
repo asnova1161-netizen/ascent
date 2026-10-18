@@ -355,26 +355,7 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
         AscentActivePointerId = 0;
     }
 
-    // Панель и квадрат должны идти ЗА ПАЛЬЦЕМ без опоздания. Раньше каждое
-    // событие уезжало в конец главной очереди: пока главный поток занят, они
-    // копились там, и элемент отставал от пальца. Теперь:
-    //  1) если колбэк пришёл уже на главном потоке — обрабатываем СРАЗУ, без
-    //     ожидания очереди;
-    //  2) движения (Moved) коалесцируются: устаревшее событие не
-    //     обрабатывается вовсе — позицию двигает САМОЕ СВЕЖЕЕ движение, и
-    //     очередь не копит старые точки. Тапы и подъёмы не пропускаются ни
-    //     в коем случае — они идут строго по порядку.
-    static int64_t sMoveSeq = 0;
-    int64_t moveSeq = 0;
-    BOOL coalesce = (phase == UITouchPhaseMoved);
-    if (coalesce) {
-        moveSeq = ++sMoveSeq;   // 64-бит на arm64 пишется атомарно
-    }
-
-    void (^processTouch)(void) = ^{
-        if (coalesce && moveSeq != sMoveSeq) {
-            return;   // уже пришло более свежее движение — это событие мертво
-        }
+    dispatch_async(dispatch_get_main_queue(), ^{
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         UIWindow *keyWindow = [[[UIApplication sharedApplication] windows] firstObject];
@@ -420,13 +401,7 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
                                       onView:keyView];
         }
 #endif
-    };
-
-    if ([NSThread isMainThread]) {
-        processTouch();
-    } else {
-        dispatch_async(dispatch_get_main_queue(), processTouch);
-    }
+    });
 }
 
 #pragma mark - Диагностика падений HUD
