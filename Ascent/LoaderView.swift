@@ -72,10 +72,12 @@ private struct LoaderContent: View {
             Spacer(minLength: 0)
 
             Text("ascent")
-                .font(.system(size: 46, weight: .heavy, design: .rounded))
+                // Шрифт — моноширинный (как у заголовка в меню-эталоне,
+                // там своя «техничная» гарнитура), и чуть ниже прежнего.
+                .font(.system(size: 44, weight: .heavy, design: .monospaced))
                 .foregroundColor(.white)
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
-                .offset(y: -26)
+                .offset(y: -8)
                 // Отладочное окно: длинный тап по заголовку.
                 .onLongPressGesture(minimumDuration: 0.6) {
                     state.toggleDebug()
@@ -105,16 +107,28 @@ private struct LoaderContent: View {
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
+                        // Start — красный акцент (как в меню), Exit — прежний
+                        // серый: по цвету сразу видно, в каком состоянии кнопка.
+                        .fill(LinearGradient(colors: state.showing
+                                             ? [Theme.grayTop, Theme.grayBottom]
+                                             : [Color(red: 1.00, green: 0.30, blue: 0.32),
+                                                Color(red: 0.80, green: 0.05, blue: 0.08)],
                                              startPoint: .top, endPoint: .bottom))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Theme.grayLine, lineWidth: 1)
+                        .stroke(state.showing ? Theme.grayLine
+                                               : Color(red: 1.0, green: 0.1, blue: 0.1).opacity(0.9),
+                                lineWidth: 1)
                 )
         }
         .buttonStyle(StartButtonStyle())
-        .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 10)
+        // У Start — красное свечение, у Exit — прежняя чёрная тень.
+        .shadow(color: state.showing
+                ? Color.black.opacity(0.35)
+                : Color(red: 1.0, green: 0.1, blue: 0.1).opacity(0.45),
+                radius: state.showing ? 18 : 16,
+                x: 0, y: state.showing ? 10 : 8)
         .offset(y: 40)          // кнопка Start/Exit чуть ниже центра
     }
 
