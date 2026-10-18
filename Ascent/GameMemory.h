@@ -58,7 +58,7 @@ void AscentGameReportProcess(NSString *nameHint);
 void AscentGameProbe(NSString *nameHint);
 
 /// Периодическая работа: читает переключатели из общего файла оверлея
-/// (cheat.esp / cheat.aimbot / cheat.trigger) и держит task-порт в
+/// (cheat.esp / cheat.aimbot) и держит task-порт в
 /// соответствии с ними. Вызывается таймером из HUD-процесса.
 void AscentGameTick(void);
 
