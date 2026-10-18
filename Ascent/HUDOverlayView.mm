@@ -205,9 +205,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // синтетические UITouch, а движение — только так).
     HUDRawDragTarget _rawTarget;
     CGPoint _rawStart;          // точка начала в координатах _stage
+    CGPoint _rawTapStart;       // то же, но в координатах оверлея (для тапа)
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
+    BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
     NSTimeInterval _rawLastTime; // время последнего события потока
 }
 
@@ -295,9 +297,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 {
     _rawTarget = [self rawDragTargetAtPoint:point];
     _rawStart = stagePoint;
+    _rawTapStart = point;
     _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
+    _rawTapFired = NO;
     _rawLastTime = [[NSProcessInfo processInfo] systemUptime];
 }
 
@@ -353,9 +357,77 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Ended / Cancelled: фиксируем результат (позицию или смещение прокрутки).
     if (_rawMoved) {
         [self commitRawDrag];
+    } else if (phase == UITouchPhaseEnded && !_rawTapFired) {
+        // Палец не сдвинулся — это тап. Обрабатываем его САМИ прямо от потока
+        // касаний: на синтетических UITouch распознаватели жестов срабатывают
+        // ненадёжно (за них конкурирует pan-скролл, и Began/Ended местами
+        // теряется), из-за чего кнопки «не нажимались». Точка — та, где палец
+        // сошёл вниз: от неё и выбираем, что именно нажали.
+        _rawTapFired = YES;
+        [self performTapAtPoint:_rawTapStart];
     }
     _rawTarget = HUDRawDragNone;
     _rawMoved = NO;
+}
+
+/// Тап прямо от потока касаний: попадаем в вид под точкой и выполняем его
+/// действие (те же обработчики, что вешаны на жесты и target'ы UIControls).
+- (void)performTapAtPoint:(CGPoint)point
+{
+    UIView *hit = [self hitTest:point withEvent:nil];
+    if (hit == nil) { return; }
+    AscentHUDLog(@"[gesture] тап по %@ (tag=%ld)", NSStringFromClass([hit class]), (long)hit.tag);
+
+    // Квадратик-триггер.
+    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { [self togglePanel]; return; }
+
+    // Крестик и заголовок шапки: крестик закрывает, заголовок — только таскается.
+    if (hit == _panelClose || [hit isDescendantOfView:_panelClose]) { [self closePanel]; return; }
+
+    // Подпись «процесс игры».
+    if (hit == _gameProcLabel || [hit isDescendantOfView:_gameProcLabel]) { [self refreshGameProcess]; return; }
+
+    // Кнопки вкладок лежат прямо в панели (tag = 100 + индекс).
+    for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
+        UIButton *tab = _tabButtons[i];
+        if (hit == tab || [hit isDescendantOfView:tab]) { [self selectTab:i]; return; }
+    }
+
+    // Кнопка unload.
+    if (_unloadButton != nil && (hit == _unloadButton || [hit isDescendantOfView:_unloadButton])) {
+        [self unloadTapped];
+        return;
+    }
+
+    // Строки переключателей и группы слайдеров: под пальцем сама строка/группа.
+    UIView *cursor = hit;
+    while (cursor != nil && cursor != _stage && cursor != _panel && cursor != _scroll) {
+        UISwitch *toggle = [self switchInRow:cursor];
+        if (toggle != nil) {
+            toggle.on = !toggle.on;
+            AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
+            [self switchChanged:toggle];
+            return;
+        }
+        UISlider *slider = [self sliderInGroup:cursor];
+        if (slider != nil) {
+            CGPoint local = [self convertPoint:point toView:slider];
+            [self applyTapToSlider:slider atPoint:local];
+            return;
+        }
+        cursor = cursor.superview;
+    }
+}
+
+/// Значение слайдера из точки тапа (слайдер сам касания не обрабатывает).
+- (void)applyTapToSlider:(UISlider *)slider atPoint:(CGPoint)point
+{
+    CGFloat width = MAX(slider.bounds.size.width, 1.0);
+    CGFloat ratio = MIN(MAX(point.x / width, 0.0), 1.0);
+    slider.value = slider.minimumValue + (float)(ratio * (slider.maximumValue - slider.minimumValue));
+    [self updateSliderLabel:slider.accessibilityIdentifier];
+    [self sliderChanged:slider];
+    AscentHUDLog(@"[gesture] %@ = %.2f (тап)", slider.accessibilityIdentifier, slider.value);
 }
 
 - (void)applyRawDragDelta:(CGPoint)delta
