@@ -176,6 +176,11 @@ static const NSTimeInterval kRawTapDebounce     = 0.12;  // гасит повт�
 // проходит (120 pt за 16 мс — это 7500 pt/с), поэтому такой шаг считается
 // мусором: элемент не двигается, жест просто перебазируется.
 static const CGFloat kRawJumpLimit = 120.0;
+// Сколько держать палец, прежде чем жест станет ПЕРЕНОСОМ квадрата или панели.
+// Тап короче (обычно 60-120 мс), поэтому нажатие на кнопку всегда остаётся
+// нажатием, а перенос — только осознанное «зажал и повёл». Именно этого не
+// хватало: без удержания дрожь руки при нажатии сдвигала элементы с места.
+static const NSTimeInterval kRawDragHold = 0.25;
 
 // Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
 // карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
@@ -482,6 +487,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
+    BOOL _rawArmed;             // удержание прошло — жест стал переносом
+    BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
     BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
     BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
     CGFloat _rawThreshold;      // порог «это уже протяжка, а не тап»
@@ -587,35 +594,32 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *hit = [self hitTest:point withEvent:nil];
     if (hit == nil) { return HUDRawDragNone; }
 
-    // Квадрат НЕ таскается вообще. Нажатие на него обязано только открывать
-    // меню и НИКОГДА не сдвигать его: раньше любое нажатие с дрожью руки
-    // уводило квадрат с места, а смещение сохранялось — он «убегал».
-    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragNone; }
+    // Квадрат: нажатие открывает меню, а перенос идёт только по УДЕРЖАНИЮ
+    // (см. kRawDragHold). Дрожь руки при нажатии его не сдвинет.
+    if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragTrigger; }
     // Управляющие элементы проверяем ДО шапки и карточки: вкладки, переключатели
     // и слайдеры лежат в панели, и без этого порядка их нажатие превращалось бы
     // в перетаскивание панели.
     if ([self isInteractiveView:hit]) { return HUDRawDragControl; }
-    // Панель тоже НЕ таскается: её положение задаёт приложение, а любое
-    // перетаскивание из HUD только уводило её «куда-то» и сохранялось в файл.
-    if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragNone; }
+    // Шапка панели — штатное место переноса меню, как заголовок окна.
+    if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragPanel; }
     if (hit == _scroll || [hit isDescendantOfView:_scroll]) { return HUDRawDragScroll; }
-    // Тело карточки (заголовок раздела, поля вокруг стека) — прокрутка
-    // содержимого вкладки, а не сдвиг панели.
-    if (hit == _contentCard || [hit isDescendantOfView:_contentCard]) { return HUDRawDragScroll; }
-    if (hit == _panel) { return HUDRawDragNone; }
+    // Полоса заголовка раздела и поля вокруг стека — тоже перенос панели, чтобы
+    // меню можно было утащить не только за шапку.
+    if (hit == _contentCard || [hit isDescendantOfView:_contentCard]) { return HUDRawDragPanel; }
+    if (hit == _panel) { return HUDRawDragPanel; }
     return HUDRawDragNone;
 }
 
-/// Порог «палец реально тянет», в точках. Раньше у панели он был 6 pt, у
-/// квадрата 12 — и обычное нажатие (дрожь руки при касании легко даёт 10-15 pt)
-/// превращалось в перетаскивание: квадрат и панель сдвигались с места, а
-/// смещение тут же сохранялось в файл, поэтому они «уползали» навсегда. Теперь
-/// порог большой: нажатие НИКОГДА не двигает элементы, а таскает только явное,
-/// осознанное протягивание.
+/// Порог протяжки для ПРОКРУТКИ содержимого вкладки, в точках. Квадрат и панель
+/// переносятся не порогом, а УДЕРЖАНИЕМ (kRawDragHold): порог не спасал —
+/// дрожь руки при нажатии легко даёт 10-15 pt, и элементы сдвигались прямо во
+/// время нажатия. Здесь порог нужен только для того, чтобы протяжка по строке
+/// не сбивала нажатие на неё.
 - (CGFloat)rawThresholdForTarget:(HUDRawDragTarget)target
 {
     switch (target) {
-        case HUDRawDragTrigger: return 22.0;
+        case HUDRawDragTrigger: return 24.0;
         case HUDRawDragPanel:   return 30.0;
         case HUDRawDragControl: return 48.0;
         default:                return 30.0;
@@ -634,6 +638,16 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
+    _rawArmed = NO;
+    // Где удержание вообще разрешено. Квадрат и панель — всегда. Управляющие
+    // элементы — только ВНЕ области прокрутки (кнопки вкладок): внутри неё
+    // удержание оставляем прокрутке, иначе медленная протяжка по строке
+    // превращалась бы в перенос меню вместо прокрутки списка ESP.
+    UIView *hit = [self hitTest:point withEvent:nil];
+    BOOL insideScroll = (hit != nil && [hit isDescendantOfView:_scroll]);
+    _rawHoldable = (_rawTarget == HUDRawDragTrigger ||
+                    _rawTarget == HUDRawDragPanel ||
+                    (_rawTarget == HUDRawDragControl && !insideScroll));
     _rawTapFired = NO;
     _dragging = YES;
     _rawStartTime = [[NSProcessInfo processInfo] systemUptime];
@@ -675,9 +689,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // контроль общей длины жеста (kRawGestureLifetime), и залипшее состояние в
     // любом случае переподхватывается заново — БЕЗ движения элементов: только
     // перебазируется начало, поэтому квадрат и панель остаются на месте.
+    // Начатый перенос (после удержания) протухшим НЕ считаем: палец может вести
+    // меню дольше предельной длины жеста, и обрывать его на полпути нельзя.
+    // Ограничение нужно только для НЕначатого жеста — чтобы залипшее состояние
+    // не тянулось через следующие касания.
     BOOL dead = (_rawTarget == HUDRawDragNone) ||
-                ((now - _rawLastTime) > kRawGestureStale) ||
-                ((now - _rawStartTime) > kRawGestureLifetime);
+                (!_rawArmed && (((now - _rawLastTime) > kRawGestureStale) ||
+                                ((now - _rawStartTime) > kRawGestureLifetime)));
     _rawLastTime = now;
 
     if (dead && _rawTarget != HUDRawDragNone) {
@@ -719,23 +737,47 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             return;
         }
 
+        // Перенос квадрата и панели включается ТОЛЬКО удержанием. Пока
+        // удержание не прошло, эти два элемента не двигаются вообще: нажатие на
+        // них не должно ничего сдвигать — это и была главная жалоба.
+        if (!_rawArmed) {
+            if (_rawHoldable && (now - _rawStartTime) >= kRawDragHold) {
+                _rawArmed = YES;
+                _rawMoved = YES;
+                // Удержание на кнопке вкладки тоже переносит панель — так меню
+                // можно утащить не только за шапку. Тапу это не мешает: он
+                // короче удержания и сюда просто не доходит.
+                if (_rawTarget == HUDRawDragControl) { _rawTarget = HUDRawDragPanel; }
+                _rawStart = stagePoint;
+                _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+                AscentHUDLog(@"[gesture] удержание %.2f с — тяну %@",
+                             now - _rawStartTime,
+                             _rawTarget == HUDRawDragTrigger ? @"квадрат" : @"панель");
+                return;
+            }
+            if (_rawTarget == HUDRawDragTrigger || _rawTarget == HUDRawDragPanel) {
+                return;
+            }
+        }
+
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
-        // Пока палец не сдвинулся на порог, это ещё тап: иначе дрожь руки при
-        // нажатии уводила бы квадрат с места (и он бы «уползал»).
+        if (_rawArmed) {
+            [self applyRawDragDelta:delta];
+            return;
+        }
+
+        // Прокрутка содержимого вкладки: порог нужен, чтобы протяжка не сбивала
+        // нажатие на строку.
         CGFloat limit = _rawThreshold > 0 ? _rawThreshold : 6.0;
         if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < limit * limit) { return; }
         if (!_rawMoved) {
             _rawMoved = YES;
-            // Перебазируем начало прямо на точку, где палец перешёл порог.
-            // Иначе элемент «прыгал» бы на величину порога в первый же кадр
-            // (для панели это 24 pt — заметный рывок). Теперь и квадрат, и
-            // панель, и прокрутка просто идут за пальцем от текущего места.
+            // Перебазируем начало прямо на точку, где палец перешёл порог:
+            // содержимое не должно «прыгнуть» на величину порога в один кадр.
             _rawStart = stagePoint;
             _rawStartOffset = _scroll.contentOffset;
             delta = CGPointZero;
-            AscentHUDLog(@"[gesture] поток: тянем %@",
-                         _rawTarget == HUDRawDragTrigger ? @"квадрат" :
-                         (_rawTarget == HUDRawDragPanel ? @"панель" : @"содержимое вкладки"));
+            AscentHUDLog(@"[gesture] поток: тяну содержимое вкладки");
         }
         [self applyRawDragDelta:delta];
         return;
@@ -761,6 +803,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 {
     _rawTarget = HUDRawDragNone;
     _rawMoved = NO;
+    _rawArmed = NO;
     _rawTapFired = NO;
     _dragging = NO;
 }
