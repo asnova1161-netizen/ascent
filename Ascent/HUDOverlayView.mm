@@ -135,17 +135,18 @@ static CGRect HUDOrientationBounds(UIInterfaceOrientation orientation, CGRect bo
 #pragma mark - Оверлей
 
 static const CGFloat kTriggerSide    = 54.0;
-static const CGFloat kPanelWidthMax  = 300.0;
-static const CGFloat kPanelHeight    = 300.0;
+static const CGFloat kPanelWidthMax  = 272.0;   // компактная ширина карточки
+static const CGFloat kPanelHeight    = 330.0;   // выше ширины — вертикальное меню
 static const CGFloat kHeaderHeight   = 46.0;
 
 // Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
 // карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
-// раскладки, поэтому они — константы.
-static const CGFloat kSidebarWidth   = 104.0;   // ширина колонки вкладок
-static const CGFloat kTabRowHeight   = 40.0;    // высота строки вкладки
-static const CGFloat kCardInset      = 10.0;    // отступ карточки от края панели
-static const CGFloat kSectionTop     = 36.0;    // высота полосы заголовка раздела
+// раскладки, поэтому они — константы. Вкладки держим плотными, как на макете:
+// строка в 31 pt на 330 pt карточки даёт те же пропорции, что и на фото.
+static const CGFloat kSidebarWidth   = 84.0;    // ширина колонки вкладок
+static const CGFloat kTabRowHeight   = 31.0;    // высота строки вкладки
+static const CGFloat kCardInset      = 8.0;     // отступ карточки от края панели
+static const CGFloat kSectionTop     = 32.0;    // высота полосы заголовка раздела
 static const CGFloat kMargin         = 10.0;
 static const CGFloat kTriggerInset   = 14.0;
 
@@ -200,7 +201,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *_panel;
     UIView *_panelHeader;
     UILabel *_panelTitle;
-    UIButton *_panelClose;
     NSMutableArray<UIButton *> *_tabButtons;
     UIView *_tabIndicator;        // красная полоска у выбранной вкладки
     UIView *_contentCard;         // тёмная карточка справа
@@ -321,11 +321,17 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (hit == nil) { return HUDRawDragNone; }
 
     if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragTrigger; }
-    // Управляющие элементы проверяем ДО шапки: крестик и вкладки лежат в панели,
-    // и без этого порядка их нажатие превращалось бы в перетаскивание панели.
+    // Управляющие элементы проверяем ДО шапки и карточки: вкладки, переключатели
+    // и слайдеры лежат в панели, и без этого порядка их нажатие превращалось бы
+    // в перетаскивание панели.
     if ([self isInteractiveView:hit]) { return HUDRawDragControl; }
     if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragPanel; }
     if (hit == _scroll || [hit isDescendantOfView:_scroll]) { return HUDRawDragScroll; }
+    // Пустая область карточки (заголовок раздела, поля вокруг стека) и сама
+    // панель тоже таскают панель — иначе панель можно было сдвинуть только за
+    // узкую шапку.
+    if (hit == _contentCard || [hit isDescendantOfView:_contentCard]) { return HUDRawDragPanel; }
+    if (hit == _panel) { return HUDRawDragPanel; }
     return HUDRawDragNone;
 }
 
@@ -448,8 +454,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Квадратик-триггер.
     if (hit == _trigger || [hit isDescendantOfView:_trigger]) { [self togglePanel]; return; }
 
-    // Крестик и заголовок шапки: крестик закрывает, заголовок — только таскается.
-    if (hit == _panelClose || [hit isDescendantOfView:_panelClose]) { [self closePanel]; return; }
+    // Шапка панели — только таскается: тап по ней ничего не делает.
+    if (hit == _panelHeader) { return; }
 
     // Подпись «процесс игры».
     if (hit == _gameProcLabel || [hit isDescendantOfView:_gameProcLabel]) { [self refreshGameProcess]; return; }
@@ -753,7 +759,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _panel.layer.borderColor = HUDLine().CGColor;
     _panel.hidden = YES;
 
-    // Шапка: за неё таскаем, слева красная подпись @ascentios, справа крестик.
+    // Шапка: за неё таскаем панель. Кнопки-крестика больше нет — панель
+    // закрывается тапом по квадрату (как и было задумано).
     _panelHeader = [[UIView alloc] initWithFrame:CGRectZero];
     _panelHeader.backgroundColor = [UIColor clearColor];
     [_panel addSubview:_panelHeader];
@@ -761,16 +768,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _panelTitle = HUDLabel(@"@ascentios", 15, UIFontWeightHeavy);
     _panelTitle.textColor = HUDAccent();
     [_panelHeader addSubview:_panelTitle];
-
-    _panelClose = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_panelClose setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
-    _panelClose.tintColor = [UIColor colorWithWhite:1.0 alpha:0.85];
-    _panelClose.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
-    _panelClose.layer.cornerRadius = 14.0;
-    [_panelClose addTarget:self action:@selector(closePanel) forControlEvents:UIControlEventTouchUpInside];
-    [_panelHeader addSubview:_panelClose];
-
-    [self addTapGesture:_panelClose action:@selector(panelControlTapped:)];
 
     UILabel *headerLine = [[UILabel alloc] initWithFrame:CGRectZero];
     headerLine.backgroundColor = HUDLine();
@@ -783,9 +780,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     NSArray<NSString *> *titles = @[ @"Esp", @"Aim", @"Misc", @"Config" ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
         UIButton *button = [self makeFlatButton:titles[i]];
-        button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        button.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
         button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-        button.titleEdgeInsets = UIEdgeInsetsMake(0, 14, 0, 0);
+        button.titleEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 0);
         button.tag = 100 + i;
         button.layer.cornerRadius = 0.0;
         [button addTarget:self action:@selector(tabTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1003,9 +1000,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGFloat h = panelSize.height;
 
     _panelHeader.frame = CGRectMake(0, 0, w, kHeaderHeight);
-    _panelTitle.frame = CGRectMake(16, 0, w - 60, kHeaderHeight);
-    _panelClose.frame = CGRectMake(w - 14 - 28, (kHeaderHeight - 28) / 2.0, 28, 28);
-    _panelClose.layer.cornerRadius = 14.0;
+    _panelTitle.frame = CGRectMake(16, 0, w - 32, kHeaderHeight);
 
     for (UIView *sub in _panel.subviews) {
         if ([sub isKindOfClass:[UILabel class]] && sub.tag == 0) {
@@ -1161,7 +1156,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     [target addGestureRecognizer:tap];
 }
 
-/// Один обработчик для простых «кнопок» панели: крестик, вкладки, unload.
+/// Один обработчик для простых «кнопок» панели: вкладки, unload.
 /// Все действия идемпотентны, поэтому совпадение жеста и target
 /// безвредно.
 - (void)panelControlTapped:(UITapGestureRecognizer *)gesture
@@ -1169,7 +1164,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *view = gesture.view;
     AscentHUDLog(@"[gesture] панель: нажатие на %@ (tag=%ld)",
                  NSStringFromClass([view class]), (long)view.tag);
-    if (view == _panelClose) { [self closePanel]; return; }
     if (view == _unloadButton) { [self unloadTapped]; return; }
     if (view.tag >= 100 && view.tag < 100 + (NSInteger)_tabButtons.count) { [self selectTab:view.tag - 100]; }
 }
