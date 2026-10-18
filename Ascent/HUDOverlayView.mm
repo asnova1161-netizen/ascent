@@ -1478,56 +1478,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [_switches addObject:toggle];
     }
 
+    // Слайдеры fov/smooth/delay из меню убраны по заказу: вкладка Config
+    // осталась с полем имени, кнопкой создания и списком конфигов. Массивы
+    // слайдеров оставляем пустыми — обходы по ним (снапшот конфига,
+    // перезагрузка элементов) просто ничего не делают.
     _sliders = [NSMutableArray array];
     _sliderValueLabels = [NSMutableDictionary dictionary];
-    NSArray<NSString *> *sliderKeys = @[ @"cheat.fov", @"cheat.smooth", @"cheat.delay" ];
-    NSArray<NSString *> *sliderTitles = @[ @"fov", @"smooth", @"delay" ];
-    for (NSInteger i = 0; i < (NSInteger)sliderKeys.count; i++) {
-        UIView *group = [[UIView alloc] initWithFrame:CGRectZero];
-
-        UILabel *caption = HUDLabel(sliderTitles[i], 12, UIFontWeightRegular);
-        caption.textColor = HUDDim();
-        caption.tag = 1;
-        [group addSubview:caption];
-
-        UILabel *value = HUDLabel(@"", 12, UIFontWeightSemibold);
-        value.textAlignment = NSTextAlignmentRight;
-        value.tag = 2;
-        [group addSubview:value];
-        _sliderValueLabels[sliderKeys[i]] = value;
-
-        UISlider *slider = [[UISlider alloc] initWithFrame:CGRectZero];
-        slider.accessibilityIdentifier = sliderKeys[i];
-        slider.minimumTrackTintColor = HUDAccent();
-        slider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
-        // Явно задаём иконку ползунка: системный thumb меняет размер при
-        // разных кадрах (иногда кажется «толстым» в момент первого показа),
-        // а кастомный круглый даёт одинаковую толщину сразу и после раскладки.
-        CGSize thumbSize = CGSizeMake(16.0, 16.0);
-        UIGraphicsBeginImageContextWithOptions(thumbSize, NO, 0.0);
-        CGContextRef ctx = UIGraphicsGetCurrentContext();
-        if (ctx != NULL) {
-            CGContextSetFillColorWithColor(ctx, [UIColor whiteColor].CGColor);
-            CGContextFillEllipseInRect(ctx, CGRectMake(0, 0, thumbSize.width, thumbSize.height));
-        }
-        UIImage *thumbImg = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        if (thumbImg != nil) {
-            [slider setThumbImage:thumbImg forState:UIControlStateNormal];
-            [slider setThumbImage:thumbImg forState:UIControlStateHighlighted];
-        }
-        [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-        // Слайдер двигает только жест по строке (см. комментарий про переключатель):
-        // значение считаем из точки касания, минуя обработку касаний самим UISlider.
-        // Жест только ТАП — иначе он воюет со скроллом вкладки за pan-жест.
-        slider.userInteractionEnabled = NO;
-        [group addSubview:slider];
-
-        [self addTapGesture:group action:@selector(sliderRowTouched:)];
-
-        [_scroll addSubview:group];
-        [_sliders addObject:slider];
-    }
 
     _unloadButton = [self makeFlatButton:@"unload"];
     _unloadButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];
@@ -1566,11 +1522,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                forControlEvents:UIControlEventEditingDidEndOnExit];
     [_scroll addSubview:_configNameField];
 
-    // «создать конфиг»: сохраняет текущие переключатели и слайдеры под именем
+    // «создать конфиг»: сохраняет текущие переключатели под именем
     // из поля (без имени — автоимя «Config N», см. createConfigTapped).
+    // Цвет — обычный серый, как у кнопки unload.
     _configCreateButton = [self makeFlatButton:@"создать конфиг"];
     _configCreateButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
-    _configCreateButton.backgroundColor = HUDAccent();
+    _configCreateButton.backgroundColor = HUDGray();
     _configCreateButton.layer.cornerRadius = 12.0;
     [_configCreateButton addTarget:self
                             action:@selector(createConfigTapped)
@@ -1773,10 +1730,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _unloadButton.frame = CGRectMake(x, y, rowWidth, 46);
         y += 46 + 10;
     } else {
-        [self layoutSliderGroup:_sliders[0] x:x y:&y width:rowWidth];
-        [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];
-        [self layoutSliderGroup:_sliders[2] x:x y:&y width:rowWidth];
-        y += 4;
+        // Слайдеры fov/smooth/delay из вкладки убраны — сразу список конфигов.
 
         // Список конфигов перечитываем только когда он поменялся
         // (создали/удалили) — см. _configRowsDirty.
