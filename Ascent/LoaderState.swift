@@ -207,7 +207,16 @@ final class LoaderState: ObservableObject {
 
         let alive = IsHUDEnabled()
         showing = alive
-        hudOverlayReady = alive && OverlayStore.flag(for: "hud.overlay")
+        if !alive {
+            hudOverlayReady = false
+        } else if OverlayStore.flag(for: "hud.overlay") {
+            // Метку ЗАПОМИНАЕМ: пока HUD жив, запасной квадрат и меню внутри app
+            // больше не показываем. Раньше здесь стояло «alive && метка», и
+            // любое мимолётное чтение метки=false возвращало запасную панель
+            // ПРИЛОЖЕНИЯ поверх HUD: квадрат «телепортировался» на стартовую
+            // позицию, а нажатия уходили в чужое меню.
+            hudOverlayReady = true
+        }
         if alive {
             // Оверлей уже поднят — значит мы «включены», даже если приложение
             // перезапускали: так кнопка, запасной квадрат и диагностика видят
@@ -244,7 +253,14 @@ final class LoaderState: ObservableObject {
     private func heartbeat(_ timer: Timer) {
         let pid = AscentHUDProcessID()
         let alive = IsHUDEnabled()
-        hudOverlayReady = alive && OverlayStore.flag(for: "hud.overlay")
+        // Как и в refreshFromProcess: пока HUD жив и метка хоть раз была true,
+        // запасной квадрат/меню внутри app не возвращаем — иначе они на секунду
+        // выскакивали поверх оверлея и «телепортировали» квадрат на место старта.
+        if !alive {
+            hudOverlayReady = false
+        } else if OverlayStore.flag(for: "hud.overlay") {
+            hudOverlayReady = true
+        }
         AscentHUDLogMessage("HUD alive: pid=\(pid) жив=\(alive ? "да" : "нет")")
 
         // HUD пропал — отмечаем это один раз и прекращаем пульс, чтобы журнал
