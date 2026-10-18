@@ -154,12 +154,12 @@ static CGRect HUDOrientationBounds(UIInterfaceOrientation orientation, CGRect bo
 #pragma mark - Оверлей
 
 static const CGFloat kTriggerSide    = 54.0;
-// Меню вертикальное: выше, чем шире. Габарит задаём ДИАПАЗОНОМ, а не жёстко:
-// в ландшафте высота сцены всего ≈375 pt минус безопасные зоны, поэтому панель
-// высотой 448 физически не помещалась и рисовалась обрезанной. Фактический
-// размер считает panelSizeForArea: — он же держит пропорцию вертикальной.
-static const CGFloat kPanelWidthMax  = 232.0;   // ширина меню
-static const CGFloat kPanelHeightMax = 300.0;   // высота меню (влезает и в ландшафт)
+// Меню ГОРИЗОНТАЛЬНОЕ: расходится влево-вправо, ширина больше высоты. Габарит
+// задаём ДИАПАЗОНОМ, а не жёстко: в ландшафте высота сцены всего ≈375 pt минус
+// безопасные зоны, поэтому высокая панель уходила за верх экрана. Фактический
+// размер считает panelSizeForArea: — он же держит пропорцию горизонтальной.
+static const CGFloat kPanelWidthMax  = 340.0;   // ширина меню
+static const CGFloat kPanelHeightMax = 240.0;   // высота меню (влезает и в ландшафт)
 static const CGFloat kHeaderHeight   = 46.0;
 
 // Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
@@ -1307,20 +1307,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 #pragma mark - Панель (раскладка)
 
-/// Размер панели под фактическую площадь сцены. Высота ограничена площадью
-/// (в ландшафте сцена всего ≈375 pt, и панель в 448 не помещалась), ширина —
-/// константой. Пропорцию держим ВЕРТИКАЛЬНОЙ: панель обязана быть выше, чем
-/// шире, иначе меню читается как горизонтальное — это и было главной жалобой.
+/// Размер панели под фактическую площадь сцены. Ширина ограничена константой,
+/// высота — и константой, и площадью: в ландшафте сцена всего ≈375 pt, поэтому
+/// высокая панель уходила за верх экрана. Пропорцию держим ГОРИЗОНТАЛЬНОЙ —
+/// меню должно расходиться влево-вправо, а не вверх.
 - (CGSize)panelSizeForArea:(CGRect)area
 {
     CGFloat width = MIN(MAX(area.size.width - 44.0, 0), kPanelWidthMax);
     CGFloat height = MIN(kPanelHeightMax, MAX(area.size.height, 0));
 
-    // Если площадь низкая, высоту подрезаем — тогда подрезаем и ширину, иначе
-    // пропорция «перевернётся» в горизонталь.
-    CGFloat limit = floor(height / 1.2);
-    if (width > limit) {
-        width = MAX(limit, 180.0);
+    // Меню горизонтальное: ширина обязана быть заметно больше высоты. Если
+    // площадь узкая, режем высоту вместе с шириной, иначе пропорция
+    // «перевернётся» обратно в вертикаль.
+    CGFloat limit = floor(width / 1.25);
+    if (height > limit) {
+        height = MAX(limit, 150.0);
     }
     return CGSizeMake(width, height);
 }
@@ -1490,12 +1491,10 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Подпись задаём ЯВНО и ровно по высоте строки: у UILabel иначе
     // «тянется» высота (autoresizing) от нулевого размера строки, и текст
     // уезжает ниже её середины — надписи выглядели сдвинутыми вниз.
-    //
-    // Отступы уменьшены (8 и 8 вместо 14 и 10): меню стало вертикальным, и
-    // карточка содержимого сузилась до 150 pt, иначе «Distance» обрезалось.
+    // Карточка снова широкая (≈258 pt), поэтому отступы обычные.
     for (UIView *sub in row.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
-            sub.frame = CGRectMake(8, 0, width - 73.0, kSwitchRowHeight);
+            sub.frame = CGRectMake(14, 0, width - 80.0, kSwitchRowHeight);
         }
     }
 
@@ -1503,7 +1502,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (toggleWidth <= 0) { toggleWidth = 51.0; }
     CGFloat toggleHeight = toggle.bounds.size.height;
     if (toggleHeight <= 0) { toggleHeight = 31.0; }
-    toggle.frame = CGRectMake(width - toggleWidth - 8,
+    toggle.frame = CGRectMake(width - toggleWidth - 10,
                               (kSwitchRowHeight - toggleHeight) / 2.0,
                               toggleWidth, toggleHeight);
     *y += kSwitchRowHeight + kSwitchRowGap;
