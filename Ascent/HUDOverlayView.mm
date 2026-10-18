@@ -176,11 +176,17 @@ static const NSTimeInterval kRawTapDebounce     = 0.12;  // гасит повт�
 // проходит (120 pt за 16 мс — это 7500 pt/с), поэтому такой шаг считается
 // мусором: элемент не двигается, жест просто перебазируется.
 static const CGFloat kRawJumpLimit = 120.0;
-// Сколько держать палец, прежде чем жест станет ПЕРЕНОСОМ квадрата или панели.
-// Тап короче (обычно 60-120 мс), поэтому нажатие на кнопку всегда остаётся
-// нажатием, а перенос — только осознанное «зажал и повёл». Именно этого не
-// хватало: без удержания дрожь руки при нажатии сдвигала элементы с места.
-static const NSTimeInterval kRawDragHold = 0.25;
+// ПЕРЕНОС квадрата и панели. Раньше он ждал 0.25 с и перебазировался на точку
+// старта — из-за этого элемент таскался «с задержкой» и отставал от пальца.
+// Теперь удержание короткое, а перенос ведётся строго за пальцем один к одному.
+// Перенос включается, если палец задержался на kRawDragHold ИЛИ сразу ушёл на
+// kRawDragArmMove: нажатие короткое и почти без движения, поэтому переносом не
+// становится.
+static const NSTimeInterval kRawDragHold   = 0.10;
+static const CGFloat kRawDragArmMove       = 18.0;
+// Если за весь жест палец прошёл меньше этого, жест считается НАЖАТИЕМ:
+// элемент возвращается ровно на место, где был в момент нажатия.
+static const CGFloat kRawTapSlop           = 14.0;
 
 // Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
 // карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
@@ -482,8 +488,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Перетаскивание/прокрутка прямо от потока касаний (тап работает и через
     // синтетические UITouch, а движение — только так).
     HUDRawDragTarget _rawTarget;
-    CGPoint _rawStart;          // точка начала в координатах _stage
+    CGPoint _rawStart;          // точка начала переноса (НЕ сдвигается: за счёт
+                                // этого элемент идёт за пальцем один к одному)
     CGPoint _rawLastPoint;      // точка предыдущего события потока (для отсева скачков)
+    CGPoint _rawPressPoint;     // точка нажатия — по ней решаем, тап это или перенос
+    CGPoint _rawPressCenter;    // положение элемента в момент нажатия (для возврата)
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
@@ -635,7 +644,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawThreshold = [self rawThresholdForTarget:_rawTarget];
     _rawStart = stagePoint;
     _rawLastPoint = stagePoint;
+    _rawPressPoint = stagePoint;
     _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+    _rawPressCenter = _rawStartCenter;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
     _rawArmed = NO;
@@ -734,46 +745,49 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             _rawStart = stagePoint;
             _rawStartOffset = _scroll.contentOffset;
             _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+            // Скачок обрывает уже начатый перенос: вести элемент по мусорным
+            // координатам нельзя. Нажатие при этом не теряется — точку нажатия
+            // мы помним отдельно (_rawPressPoint).
+            _rawMoved = NO;
+            _rawArmed = NO;
             return;
         }
 
-        // Перенос квадрата и панели включается ТОЛЬКО удержанием. Пока
-        // удержание не прошло, эти два элемента не двигаются вообще: нажатие на
-        // них не должно ничего сдвигать — это и была главная жалоба.
-        if (!_rawArmed) {
-            if (_rawHoldable && (now - _rawStartTime) >= kRawDragHold) {
-                _rawArmed = YES;
-                _rawMoved = YES;
-                // Удержание на кнопке вкладки тоже переносит панель — так меню
-                // можно утащить не только за шапку. Тапу это не мешает: он
-                // короче удержания и сюда просто не доходит.
-                if (_rawTarget == HUDRawDragControl) { _rawTarget = HUDRawDragPanel; }
-                _rawStart = stagePoint;
-                _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
-                AscentHUDLog(@"[gesture] удержание %.2f с — тяну %@",
-                             now - _rawStartTime,
-                             _rawTarget == HUDRawDragTrigger ? @"квадрат" : @"панель");
-                return;
-            }
-            if (_rawTarget == HUDRawDragTrigger || _rawTarget == HUDRawDragPanel) {
-                return;
-            }
-        }
-
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
-        if (_rawArmed) {
+
+        // ПЕРЕНОС квадрата и панели — строго ЗА ПАЛЬЦЕМ, один к одному:
+        // положение = положение на момент нажатия + весь путь пальца. Никаких
+        // порогов, перебазирований и «догоняний» — именно из-за них перенос
+        // отставал от пальца. Начало отсчёта не сдвигается ни на точку, поэтому
+        // смещение элемента всегда равно смещению пальца.
+        if (_rawHoldable) {
+            if (!_rawArmed) {
+                // Включаем перенос либо по очень короткому удержанию, либо
+                // сразу, если палец успел уйти далеко. Нажатие короткое и почти
+                // без движения, поэтому переносом не становится.
+                CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
+                if ((now - _rawStartTime) < kRawDragHold && len < kRawDragArmMove) { return; }
+                _rawArmed = YES;
+                // Удержание на кнопке вкладки тоже переносит панель — так меню
+                // можно утащить не только за шапку.
+                if (_rawTarget == HUDRawDragControl) { _rawTarget = HUDRawDragPanel; }
+                AscentHUDLog(@"[gesture] перенос %@ (%.0f мс)",
+                             _rawTarget == HUDRawDragTrigger ? @"квадрата" : @"панели",
+                             (now - _rawStartTime) * 1000.0);
+            }
+            _rawMoved = YES;
             [self applyRawDragDelta:delta];
             return;
         }
 
-        // Прокрутка содержимого вкладки: порог нужен, чтобы протяжка не сбивала
-        // нажатие на строку.
+        // Прокрутка содержимого вкладки: здесь порог нужен, чтобы протяжка не
+        // сбивала нажатие на строку.
         CGFloat limit = _rawThreshold > 0 ? _rawThreshold : 6.0;
         if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < limit * limit) { return; }
         if (!_rawMoved) {
             _rawMoved = YES;
-            // Перебазируем начало прямо на точку, где палец перешёл порог:
-            // содержимое не должно «прыгнуть» на величину порога в один кадр.
+            // Здесь перебазирование нужно: содержимое не должно «прыгнуть» на
+            // величину порога в один кадр.
             _rawStart = stagePoint;
             _rawStartOffset = _scroll.contentOffset;
             delta = CGPointZero;
@@ -784,6 +798,29 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 
     // Ended / Cancelled: фиксируем результат (позицию или смещение прокрутки).
+    if (_rawMoved && _rawHoldable) {
+        // Смотрим ВЕСЬ путь пальца от точки нажатия. Если он крошечный — это
+        // всё-таки нажатие, а не перенос: возвращаем элемент ровно туда, где он
+        // был в момент нажатия, и обрабатываем как тап. Без этого медленное
+        // нажатие с дрожью руки съедало бы нажатие, а элемент оставался
+        // сдвинутым на пару точек.
+        CGFloat pathX = stagePoint.x - _rawPressPoint.x;
+        CGFloat pathY = stagePoint.y - _rawPressPoint.y;
+        if ((pathX * pathX + pathY * pathY) < kRawTapSlop * kRawTapSlop) {
+            if (_rawTarget == HUDRawDragTrigger) {
+                _trigger.center = _rawPressCenter;
+                CGPoint base = [self triggerBaseCenter];
+                _triggerOffset = CGSizeMake(_rawPressCenter.x - base.x, _rawPressCenter.y - base.y);
+            } else if (_rawTarget == HUDRawDragPanel) {
+                _panel.center = _rawPressCenter;
+                _panelOffset = [self panelOffsetForCenter:_rawPressCenter size:_panel.bounds.size];
+            }
+            [self endRawGesture];
+            if (phase == UITouchPhaseEnded) { [self fireRawTapAtPoint:point now:now]; }
+            return;
+        }
+    }
+
     if (_rawMoved) {
         [self commitRawDrag];
     } else if (phase == UITouchPhaseEnded) {
