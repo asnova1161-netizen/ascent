@@ -1,11 +1,13 @@
 #import "HUDOverlayView.h"
 #import "HUDHelper.h"
 #import "GameMemory.h"
+#import "GameESP.h"
 
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <sys/stat.h>
 #import <math.h>
+#import <string.h>
 
 #pragma mark - Общий файл оверлея (тот же, что пишет приложение)
 
@@ -49,6 +51,20 @@ static BOOL HUDOverlayFlag(NSString *key, BOOL fallback)
     return HUDOverlayNumber(key, fallback ? 1 : 0) > 0.5;
 }
 
+/// Значение по умолчанию для строки меню. У опций ESP, включённых по умолчанию,
+/// fallback YES — иначе меню показывало бы «выключено», а холст ESP рисовал бы
+/// боксы: переключатель и картинка разошлись бы.
+static BOOL HUDSwitchDefault(NSString *key)
+{
+    if ([key isEqualToString:@"esp.box"] ||
+        [key isEqualToString:@"esp.health"] ||
+        [key isEqualToString:@"esp.name"] ||
+        [key isEqualToString:@"esp.distance"]) {
+        return YES;
+    }
+    return NO;
+}
+
 static void HUDOverlaySetFlag(NSString *key, BOOL value)
 {
     HUDOverlaySetNumber(key, value ? 1 : 0);
@@ -67,6 +83,9 @@ static UIColor *HUDAccent(void)    { return HUDColor(0.91, 0.17, 0.19); }
 static UIColor *HUDLine(void)      { return [UIColor colorWithWhite:1.0 alpha:0.12]; }
 static UIColor *HUDDim(void)       { return [UIColor colorWithWhite:1.0 alpha:0.55]; }
 static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
+
+// Зелёный для «своих» в ESP и для полоски здоровья.
+static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
 
 static UILabel *HUDLabel(NSString *text, CGFloat size, UIFontWeight weight)
 {
@@ -177,6 +196,220 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
 // что держать оверлей до конца жизни процесса можно.
 static HUDOverlayView *_hudCurrentOverlay = nil;
 
+#pragma mark - Рисование ESP
+
+// Холст для ESP: лежит в _stage ПОД квадратом и панелью, поэтому боксы игроков
+// не перекрывают меню и поворачиваются вместе с экраном. Память игры читает
+// отдельный поток (GameESP.mm) — здесь только снимок кадра и краска.
+@interface AscentESPHostView : UIView
+@end
+
+@implementation AscentESPHostView
+{
+    NSTimer *_timer;
+    int      _lastFrameId;
+    BOOL     _lastLive;
+    // Переключатели рисования. Кэшируем: файл читаем раз в полсекунды, а не
+    // на каждом кадре, иначе прокрутка/рисование заметно подрагивают.
+    BOOL     _drawBox;
+    BOOL     _drawHealth;
+    BOOL     _drawName;
+    BOOL     _drawDistance;
+    BOOL     _drawSnapline;
+    BOOL     _drawTeammates;
+    NSTimeInterval _optionsTime;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame
+{
+    if (self == nil) { return nil; }
+    self = [super initWithFrame:frame];
+    if (self == nil) { return nil; }
+
+    self.backgroundColor = [UIColor clearColor];
+    self.opaque = NO;
+    // Холст не должен ловить касания: иначе ESP-слой перехватывал бы тапы,
+    // предназначенные квадрату и панели.
+    self.userInteractionEnabled = NO;
+    self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    [self reloadOptions];
+
+    // 15 раз в секунду — столько же кадров читает GameESP; лишние setNeedsDisplay
+    // отсекаем по номеру кадра.
+    _timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 15.0
+                                              target:self
+                                            selector:@selector(tick)
+                                            userInfo:nil
+                                             repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
+    return self;
+}
+
+- (void)dealloc
+{
+    [_timer invalidate];
+}
+
+/// Переключатели ESP лежат в общем plist — те же ключи, что пишет меню.
+- (void)reloadOptions
+{
+    _drawBox      = HUDOverlayNumber(@"esp.box", 1) > 0.5;
+    _drawHealth   = HUDOverlayNumber(@"esp.health", 1) > 0.5;
+    _drawName     = HUDOverlayNumber(@"esp.name", 1) > 0.5;
+    _drawDistance  = HUDOverlayNumber(@"esp.distance", 1) > 0.5;
+    _drawSnapline = HUDOverlayNumber(@"esp.snapline", 0) > 0.5;
+    _drawTeammates = HUDOverlayNumber(@"esp.teammates", 0) > 0.5;
+}
+
+- (void)tick
+{
+    // Видимость ESP зависит от переключателя в меню: прячем холст целиком,
+    // чтобы не тратить рисование, когда чит выключен.
+    BOOL enabled = HUDOverlayNumber(@"cheat.esp", 0) > 0.5;
+    if (!enabled) {
+        if (self.hidden == NO && self.alpha > 0.0f) {
+            self.hidden = YES;
+        }
+        return;
+    }
+    if (self.hidden) {
+        self.hidden = NO;
+    }
+
+    NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
+    if (now - _optionsTime > 0.5) {
+        _optionsTime = now;
+        [self reloadOptions];
+    }
+
+    AscentESPFrame info;
+    memset(&info, 0, sizeof(info));
+    AscentESPGetFrame(NULL, 0, &info);
+
+    // Перерисовываем только когда пришёл новый кадр — иначе таймер гонял бы
+    // drawRect впустую и грел экран.
+    if (info.frameId != _lastFrameId || info.live != _lastLive) {
+        _lastFrameId = info.frameId;
+        _lastLive = info.live;
+        [self setNeedsDisplay];
+    }
+}
+
+- (void)drawRect:(CGRect)rect
+{
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    if (context == nil) { return; }
+
+    AscentESPPlayer players[kAscentESPMaxPlayers];
+    AscentESPFrame info;
+    memset(&info, 0, sizeof(info));
+    int count = AscentESPGetFrame(players, kAscentESPMaxPlayers, &info);
+    if (count <= 0 || !info.live) { return; }
+
+    CGRect bounds = self.bounds;
+    CGFloat width = bounds.size.width;
+    CGFloat height = bounds.size.height;
+    if (width <= 1.0 || height <= 1.0) { return; }
+
+    UIFont *font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+
+    for (int i = 0; i < count; i++) {
+        AscentESPPlayer player = players[i];
+        if (player.screen.x < -0.5f || player.screen.y < -0.5f) { continue; }
+        if (player.screen.x < -0.15f || player.screen.x > 1.15f ||
+            player.screen.y < -0.15f || player.screen.y > 1.15f) {
+            continue;
+        }
+
+        // Своих не подсвечиваем, если переключатель выключен.
+        BOOL teammate = (info.pid > 0) && (player.team == 0);
+        if (teammate && !_drawTeammates) { continue; }
+
+        CGFloat centerX = bounds.origin.x + player.screen.x * width;
+        CGFloat centerY = bounds.origin.y + player.screen.y * height;
+
+        CGFloat boxH = player.boxHeight * height;
+        if (boxH < 12.0) { boxH = 12.0; }
+        if (boxH > height * 0.8) { boxH = height * 0.8; }
+        CGFloat boxW = boxH * 0.45;
+
+        CGRect box = CGRectMake(centerX - boxW / 2.0, centerY - boxH / 2.0, boxW, boxH);
+
+        // Цвет: враг красный, свой зелёный. Если команды не прочитали —
+        // считаем врагом, ESP для врагов и сделан.
+        UIColor *lineColor = teammate ? HUDGreen() : HUDAccent();
+
+        if (_drawSnapline) {
+            CGContextSetStrokeColorWithColor(context, lineColor.CGColor);
+            CGContextSetLineWidth(context, 1.0);
+            CGContextMoveToPoint(context, bounds.origin.x + width / 2.0, bounds.origin.y + height);
+            CGContextAddLineToPoint(context, centerX, CGRectGetMaxY(box));
+            CGContextStrokePath(context);
+        }
+
+        if (_drawBox) {
+            CGContextSetStrokeColorWithColor(context, lineColor.CGColor);
+            CGContextSetLineWidth(context, 1.5);
+            // Тень даёт читаемость на светлой карте: обводка всегда видна.
+            CGContextSetShadowWithColor(context, CGSizeMake(0, 0), 2.0,
+                                        [UIColor colorWithWhite:0 alpha:0.85].CGColor);
+            CGContextStrokeRect(context, box);
+            CGContextSetShadowWithColor(context, CGSizeZero, 0, [UIColor clearColor].CGColor);
+        }
+
+        // Полоска здоровья слева от бокса.
+        if (_drawHealth && player.health >= 0.0f) {
+            CGFloat ratio = player.health / 100.0f;
+            if (ratio > 1.0f) { ratio = 1.0f; }
+            if (ratio < 0.0f) { ratio = 0.0f; }
+
+            CGRect track = CGRectMake(CGRectGetMinX(box) - 5.0, CGRectGetMinY(box),
+                                      3.0, boxH);
+            CGRect fill = CGRectMake(CGRectGetMinX(box) - 5.0,
+                                     CGRectGetMaxY(box) - boxH * ratio,
+                                     3.0, boxH * ratio);
+
+            CGContextSetFillColorWithColor(context, [UIColor colorWithWhite:0 alpha:0.6].CGColor);
+            CGContextFillRect(context, track);
+            CGContextSetFillColorWithColor(context, HUDGreen().CGColor);
+            CGContextFillRect(context, fill);
+        }
+
+        if (_drawName && player.name[0] != '\0') {
+            NSString *name = [NSString stringWithUTF8String:player.name];
+            if (name.length > 0) {
+                NSDictionary *attributes = @{
+                    NSFontAttributeName: font,
+                    NSForegroundColorAttributeName: [UIColor whiteColor]
+                };
+                CGSize size = [name sizeWithAttributes:attributes];
+                CGPoint origin = CGPointMake(centerX - size.width / 2.0,
+                                             CGRectGetMinY(box) - size.height - 2.0);
+                NSDictionary *shadow = @{
+                    NSFontAttributeName: font,
+                    NSForegroundColorAttributeName: [UIColor colorWithWhite:0 alpha:0.85]
+                };
+                [name drawAtPoint:CGPointMake(origin.x, origin.y + 1) withAttributes:shadow];
+                [name drawAtPoint:origin withAttributes:attributes];
+            }
+        }
+
+        if (_drawDistance && player.distance >= 0) {
+            NSString *text = [NSString stringWithFormat:@"%d m", player.distance];
+            NSDictionary *attributes = @{
+                NSFontAttributeName: font,
+                NSForegroundColorAttributeName: HUDAccent()
+            };
+            CGSize size = [text sizeWithAttributes:attributes];
+            CGPoint origin = CGPointMake(centerX - size.width / 2.0, CGRectGetMaxY(box) + 2.0);
+            [text drawAtPoint:origin withAttributes:attributes];
+        }
+    }
+}
+
+@end
+
 // Делегат прокрутки нужен только ради журнала: по нему видно, начиналась ли
 // прокрутка меню и дожила ли она до конца.
 @interface HUDOverlayView () <UIScrollViewDelegate>
@@ -187,6 +420,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Слой, который поворачивается вслед за устройством: в нём лежат квадрат и
     // панель. Само вью оверлея остаётся ровным контейнером на всё окно.
     UIView *_stage;
+    // Холст ESP: первый в _stage, поэтому боксы игроков лежат ПОД квадратом и
+    // панелью и не мешают меню.
+    AscentESPHostView *_espView;
     UIInterfaceOrientation _orientation;
     id<HUDOrientationObserving> _orientationObserver;
     BOOL _usesDeviceOrientationFallback;
@@ -213,6 +449,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     NSMutableArray<UISwitch *> *_switches;
     NSMutableArray<UISlider *> *_sliders;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
+    // Статус чтения игры на вкладке ESP и таймер, его обновляющий.
+    UILabel *_espStatusLabel;
+    NSTimer *_espStatusTimer;
     CGSize _panelOffset;
     BOOL _panelOpen;
     NSInteger _tab;
@@ -261,6 +500,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _stage = [[UIView alloc] initWithFrame:self.bounds];
     _stage.backgroundColor = [UIColor clearColor];
     [self addSubview:_stage];
+
+    // Холст ESP добавляем ПЕРВЫМ: он должен лежать под квадратом и панелью.
+    _espView = [[AscentESPHostView alloc] initWithFrame:_stage.bounds];
+    _espView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _espView.hidden = YES;
+    [_stage addSubview:_espView];
 
     _triggerOffset = CGSizeMake(HUDOverlayNumber(@"trigger.x", 0),
                                 HUDOverlayNumber(@"trigger.y", 0));
@@ -834,8 +1079,25 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)buildContent
 {
     _switches = [NSMutableArray array];
-    NSArray<NSString *> *switchKeys = @[ @"cheat.esp", @"cheat.aimbot", @"cheat.trigger" ];
-    NSArray<NSString *> *switchTitles = @[ @"Enable", @"Aimbot", @"Triggerbot" ];
+    // Первые три — главные переключатели (esp / aimbot / triggerbot). Дальше —
+    // что именно рисовать в ESP: эти ключи читает холст AscentESPHostView.
+    // Порядок важен: layoutContentForTab: обращается к элементам по индексу.
+    NSArray<NSString *> *switchKeys = @[ @"cheat.esp",
+                                         @"cheat.aimbot",
+                                         @"cheat.trigger",
+                                         @"esp.box",
+                                         @"esp.health",
+                                         @"esp.name",
+                                         @"esp.distance",
+                                         @"esp.snapline" ];
+    NSArray<NSString *> *switchTitles = @[ @"Enable",
+                                           @"Aimbot",
+                                           @"Triggerbot",
+                                           @"Boxes",
+                                           @"Health",
+                                           @"Names",
+                                           @"Distance",
+                                           @"Snapline" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
         UILabel *label = HUDLabel(switchTitles[i], 13, UIFontWeightMedium);
@@ -939,6 +1201,44 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _configCaption.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
     _configCaption.numberOfLines = 0;
     [_scroll addSubview:_configCaption];
+
+    // Статус чтения ESP. Обновляется таймером: сообщение меняется само —
+    // процесс появился, список наполнился, смещения поправили.
+    _espStatusLabel = HUDLabel(@"esp: выключен", 10.5, UIFontWeightRegular);
+    _espStatusLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+    _espStatusLabel.numberOfLines = 2;
+    [_scroll addSubview:_espStatusLabel];
+
+    _espStatusTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                       target:self
+                                                     selector:@selector(refreshESPStatus)
+                                                     userInfo:nil
+                                                      repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:_espStatusTimer forMode:NSRunLoopCommonModes];
+}
+
+/// Показываем, что именно делает ESP прямо сейчас. Это главное окно отладки:
+/// по одной строке видно, найден ли процесс и какие смещения не так.
+- (void)refreshESPStatus
+{
+    if (_espStatusLabel == nil) { return; }
+
+    BOOL enabled = HUDOverlayNumber(@"cheat.esp", 0) > 0.5;
+    if (!enabled) {
+        _espStatusLabel.text = @"esp: выключен";
+        _espStatusLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+        return;
+    }
+
+    AscentESPFrame info;
+    memset(&info, 0, sizeof(info));
+    AscentESPGetFrame(NULL, 0, &info);
+
+    NSString *text = info.status[0] != '\0'
+        ? [NSString stringWithUTF8String:info.status]
+        : @"читаю память игры…";
+    _espStatusLabel.text = text;
+    _espStatusLabel.textColor = (info.count > 0) ? HUDGreen() : HUDDim();
 }
 
 #pragma mark - Панель (раскладка)
@@ -1054,9 +1354,22 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _unloadButton.hidden = YES;
     _miscCaption.hidden = YES;
     _configCaption.hidden = YES;
+    _espStatusLabel.hidden = YES;
 
     if (tab == 0) {
+        // Вкладка ESP: главный переключатель, затем что именно рисовать.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[3] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[4] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[5] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[6] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[7] x:x y:&y width:rowWidth];
+
+        // Короткий статус чтения игры: без него непонятно, почему боксы не
+        // появились (нет процесса, не заданы смещения, пустой список).
+        _espStatusLabel.hidden = NO;
+        _espStatusLabel.frame = CGRectMake(x, y + 2.0, rowWidth, 34.0);
+        y += 34.0 + 4.0;
     } else if (tab == 1) {
         [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
@@ -1254,7 +1567,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)reloadCheatControls
 {
     for (UISwitch *toggle in _switches) {
-        toggle.on = HUDOverlayFlag(toggle.accessibilityIdentifier, NO);
+        NSString *key = toggle.accessibilityIdentifier;
+        toggle.on = HUDOverlayFlag(key, HUDSwitchDefault(key));
     }
     for (UISlider *slider in _sliders) {
         NSString *key = slider.accessibilityIdentifier;
