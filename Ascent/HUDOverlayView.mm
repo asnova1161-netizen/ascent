@@ -159,14 +159,19 @@ static const CGFloat kTriggerSide    = 54.0;
 // безопасные зоны, поэтому высокая панель уходила за верх экрана. Фактический
 // размер считает panelSizeForArea: — он же держит пропорцию горизонтальной.
 static const CGFloat kPanelWidthMax  = 340.0;   // ширина меню
-static const CGFloat kPanelHeightMax = 240.0;   // высота меню (влезает и в ландшафт)
+static const CGFloat kPanelHeightMax = 190.0;   // высота меню (влезает и в ландшафт)
+// Пропорция меню: ширина / высота. 1.25 давало почти квадрат — просили
+// прямоугольник и размер поменьше. 1.55 (≈3:2) — явно вытянуто вширь и заметно
+// ниже прежнего, при этом и в портрете, и в ландшафте панель остаётся
+// читаемой: по высоте всё равно ограничивает kPanelHeightMax и площадь.
+static const CGFloat kPanelRatio     = 1.55;
 // Запас на перенос панели ВЛЕВО-ВПРАВО: по kPanelTravelMin с каждой стороны
 // экрана всегда остаётся свободно. Без него панель «во всю ширину» физически
 // некуда двигать в портрете — ход был ~50 pt, и панель упиралась в невидимый
 // барьер по бокам. С запасом панель доезжает и до левого края, и до правого,
 // и проезжает между ними; по вертикали ограничений нет вовсе.
 static const CGFloat kPanelTravelMin = 45.0;
-static const CGFloat kHeaderHeight   = 46.0;
+static const CGFloat kHeaderHeight   = 42.0;    // шапка: заголовок @ascentios
 
 // Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
 // жёсткого контроля старое начало жеста оставалось бы висеть навсегда: следующее
@@ -176,20 +181,33 @@ static const CGFloat kHeaderHeight   = 46.0;
 static const NSTimeInterval kRawGestureStale    = 0.40;  // пауза, после которой жест протух
 static const NSTimeInterval kRawGestureLifetime = 2.50;  // предельная длина одного жеста
 static const NSTimeInterval kRawTapDebounce     = 0.12;  // гасит повторный «подъём» одного тапа
-// Предел одного шага пальца между событиями, в точках. Поток HID иногда
-// присылает событие движения с координатами ЧУЖОГО касания (остаток прошлого
-// жеста) — это скачок на сотни точек за один кадр. Настоящий палец столько не
-// проходит (120 pt за 16 мс — это 7500 pt/с), поэтому такой шаг считается
-// мусором: элемент не двигается, жест просто перебазируется.
+// Предел одного шага пальца между событиями ДО включения переноса, в точках.
+// Поток HID иногда присылает событие движения с координатами ЧУЖОГО касания
+// (остаток прошлого жеста) — это скачок на сотни точек за один кадр. Настоящий
+// палец столько не проходит (120 pt за 16 мс — это 7500 pt/с), поэтому такой
+// шаг считается мусором: элемент не двигается, жест просто перебазируется.
 static const CGFloat kRawJumpLimit = 120.0;
+// Тот же предел, но для УЖЕ НАЧАТОГО переноса — и работает он иначе. Когда
+// элемент уже идёт за пальцем 1:1, обрыв на скачке хуже самой ошибки: раньше
+// резкий шаг останавливал перенос и перебазировал отсчёт — элемент замирал, а
+// потом НАВСЕГДА отставал от пальца на величину скачка (ровно то, что видно как
+// «лагает при передвижении»). Теперь отсчёт не трогаем: шаг лишь ограничиваем
+// (см. LimitStep), и следующее нормальное событие возвращает элемент на
+// истинный путь пальца. Запас на настоящий рывок щедрый: 240 pt за событие —
+// это 7200 pt/с даже при склеивании событий до 30 Гц (поток AX их склеивает,
+// когда главный поток занят рисованием).
+static const CGFloat kRawDragStepMax       = 240.0;
 // ПЕРЕНОС квадрата и панели. Раньше он ждал 0.25 с и перебазировался на точку
 // старта — из-за этого элемент таскался «с задержкой» и отставал от пальца.
 // Теперь удержание короткое, а перенос ведётся строго за пальцем один к одному.
 // Перенос включается, если палец задержался на kRawDragHold ИЛИ сразу ушёл на
 // kRawDragArmMove: нажатие короткое и почти без движения, поэтому переносом не
-// становится.
-static const NSTimeInterval kRawDragHold   = 0.10;
-static const CGFloat kRawDragArmMove       = 18.0;
+// становится. Держим это коротким: пока держание не вышло, палец может уже
+// вести элемент, а движения не видно — это и выглядит как «лаг в начале
+// протяжки». Настоящие тапы это не ломает: при отпускании путь всё равно
+// сверяется с kRawTapSlop, и короткое нажатие остаётся нажатием.
+static const NSTimeInterval kRawDragHold   = 0.06;
+static const CGFloat kRawDragArmMove       = 14.0;
 // Если за весь жест палец прошёл меньше этого, жест считается НАЖАТИЕМ:
 // элемент возвращается ровно на место, где был в момент нажатия.
 static const CGFloat kRawTapSlop           = 14.0;
@@ -749,16 +767,24 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         _rawLastPoint = stagePoint;
         CGFloat stepLen = sqrt(stepX * stepX + stepY * stepY);
         if (stepLen > kRawJumpLimit) {
-            AscentHUDLog(@"[gesture] скачок %.0f pt — мусорное событие, элемент не двигаю", stepLen);
-            _rawStart = stagePoint;
-            _rawStartOffset = _scroll.contentOffset;
-            _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
-            // Скачок обрывает уже начатый перенос: вести элемент по мусорным
-            // координатам нельзя. Нажатие при этом не теряется — точку нажатия
-            // мы помним отдельно (_rawPressPoint).
-            _rawMoved = NO;
-            _rawArmed = NO;
-            return;
+            if (!_rawArmed || !_rawHoldable) {
+                // Перенос ещё не идёт: шаг вести нечем — считаем событие
+                // мусорным и просто перебазируемся. Нажатие при этом не
+                // теряется — точку нажатия помним отдельно (_rawPressPoint).
+                AscentHUDLog(@"[gesture] скачок %.0f pt — мусорное событие, элемент не двигаю", stepLen);
+                _rawStart = stagePoint;
+                _rawStartOffset = _scroll.contentOffset;
+                _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+                _rawMoved = NO;
+                _rawArmed = NO;
+                return;
+            }
+            // Перенос уже идёт и идёт 1:1. Отсчёт НЕ трогаем: раньше резкий
+            // шаг обрывал перенос и перебазировал его — элемент замирал, а
+            // дальше навсегда отставал от пальца на величину скачка (это и был
+            // «лаг» при передвижении). Шаг ограничит applyRawDragDelta, а
+            // следующее нормальное событие вернёт элемент на истинный путь.
+            AscentHUDLog(@"[gesture] рывок %.0f pt в переносе — шаг ограничен, перенос не рвём", stepLen);
         }
 
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
@@ -959,10 +985,27 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     AscentHUDLog(@"[gesture] %@ = %.2f (тап)", slider.accessibilityIdentifier, slider.value);
 }
 
+/// Ограничивает сдвиг за ОДНО событие: элемент идёт в направлении точки, куда
+/// вёл палец, но за событие проходит не больше limit. Нужно, чтобы мусорное
+/// событие с чужими координатами не увозило квадрат/панель на сотни точек и
+/// чтобы настоящий рывок не превращался в «залипание» (см. kRawDragStepMax).
+/// Отсчёт при этом не сбивается: цель каждый раз считается от точки нажатия,
+/// поэтому следующее нормальное событие сразу ставит элемент на место.
+static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
+{
+    CGFloat dx = to.x - from.x;
+    CGFloat dy = to.y - from.y;
+    CGFloat len = sqrt(dx * dx + dy * dy);
+    if (len <= limit || len < 0.0001) { return to; }
+    CGFloat scale = limit / len;
+    return CGPointMake(from.x + dx * scale, from.y + dy * scale);
+}
+
 - (void)applyRawDragDelta:(CGPoint)delta
 {
     if (_rawTarget == HUDRawDragTrigger) {
         CGPoint center = CGPointMake(_rawStartCenter.x + delta.x, _rawStartCenter.y + delta.y);
+        center = LimitStep(_trigger.center, center, kRawDragStepMax);
         center = [self clampTriggerCenter:center];
         _trigger.center = center;
         CGPoint base = [self triggerBaseCenter];
@@ -973,6 +1016,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (_rawTarget == HUDRawDragPanel) {
         CGSize panelSize = _panel.bounds.size;
         CGPoint center = CGPointMake(_rawStartCenter.x + delta.x, _rawStartCenter.y + delta.y);
+        center = LimitStep(_panel.center, center, kRawDragStepMax);
         center = [self clampPanelCenter:center size:panelSize];
         _panel.center = center;
         _panelOffset = [self panelOffsetForCenter:center size:panelSize];
@@ -1464,10 +1508,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGFloat width = MIN(MAX(area.size.width - kPanelTravelMin * 2.0, 0), kPanelWidthMax);
     CGFloat height = MIN(kPanelHeightMax, MAX(area.size.height, 0));
 
-    // Меню горизонтальное: ширина обязана быть заметно больше высоты. Если
-    // площадь узкая, режем высоту вместе с шириной, иначе пропорция
-    // «перевернётся» обратно в вертикаль.
-    CGFloat limit = floor(width / 1.25);
+    // Меню горизонтальное: ширина обязана быть заметно больше высоты, иначе
+    // панель выглядит почти квадратной. Пропорция задана константой kPanelRatio
+    // (1.55 ≈ 3:2) — именно она делает меню явным прямоугольником; если площадь
+    // узкая, режем высоту вместе с шириной, иначе пропорция «перевернётся».
+    CGFloat limit = floor(width / kPanelRatio);
     if (height > limit) {
         height = MAX(limit, 150.0);
     }
@@ -1547,18 +1592,32 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGFloat cardX = tabX + tabW + 6.0;
     CGFloat cardW = w - cardX - kCardInset;
 
+    // Колонка вкладок обязана ВЛЕЗТЬ в тело панели: меню стало ниже
+    // (прямоугольное), а вкладок всегда четыре. Поэтому высоту строки считаем
+    // от свободного места: kTabRowHeight — это максимум (как на макете), при
+    // нехватке строки ужимаются равномерно, иначе последняя вкладка
+    // «уезжала» бы за нижний край панели и обрезалась бы маской.
+    NSInteger tabCount = (NSInteger)_tabButtons.count;
+    CGFloat tabRowH = kTabRowHeight;
+    if (tabCount > 0) {
+        CGFloat tabAvail = MAX(bodyH - 10.0, (CGFloat)tabCount * 18.0);
+        tabRowH = MIN(kTabRowHeight, floor(tabAvail / (CGFloat)tabCount));
+    }
     CGFloat rowY = bodyY + 4.0;
-    for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
+    for (NSInteger i = 0; i < tabCount; i++) {
         UIButton *button = _tabButtons[i];
-        button.frame = CGRectMake(tabX, rowY, tabW - 8.0, kTabRowHeight);
+        button.frame = CGRectMake(tabX, rowY, tabW - 8.0, tabRowH);
         BOOL selected = (i == _tab);
         button.backgroundColor = [UIColor clearColor];
         [button setTitleColor:(selected ? HUDAccent() : HUDDim()) forState:UIControlStateNormal];
         if (selected) {
             _tabIndicator.hidden = NO;
-            _tabIndicator.frame = CGRectMake(tabX + tabW - 4.0, rowY + 7.0, 3.0, kTabRowHeight - 14.0);
+            CGFloat indicatorH = MAX(tabRowH - 14.0, 6.0);
+            _tabIndicator.frame = CGRectMake(tabX + tabW - 4.0,
+                                             rowY + (tabRowH - indicatorH) / 2.0,
+                                             3.0, indicatorH);
         }
-        rowY += kTabRowHeight;
+        rowY += tabRowH;
     }
 
     _contentCard.frame = CGRectMake(cardX, bodyY, cardW, bodyH);
