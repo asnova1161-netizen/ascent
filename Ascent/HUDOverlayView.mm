@@ -62,6 +62,8 @@ static UIColor *HUDColor(double r, double g, double b)
 }
 
 static UIColor *HUDFill(void)      { return HUDColor(0.145, 0.145, 0.160); }
+static UIColor *HUDCard(void)      { return HUDColor(0.075, 0.075, 0.085); }
+static UIColor *HUDAccent(void)    { return HUDColor(0.91, 0.17, 0.19); }
 static UIColor *HUDLine(void)      { return [UIColor colorWithWhite:1.0 alpha:0.12]; }
 static UIColor *HUDDim(void)       { return [UIColor colorWithWhite:1.0 alpha:0.55]; }
 static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
@@ -134,9 +136,16 @@ static CGRect HUDOrientationBounds(UIInterfaceOrientation orientation, CGRect bo
 
 static const CGFloat kTriggerSide    = 54.0;
 static const CGFloat kPanelWidthMax  = 300.0;
-static const CGFloat kPanelHeight    = 260.0;
-static const CGFloat kHeaderHeight   = 44.0;
-static const CGFloat kTabBarHeight   = 40.0;
+static const CGFloat kPanelHeight    = 300.0;
+static const CGFloat kHeaderHeight   = 46.0;
+
+// Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
+// карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
+// раскладки, поэтому они — константы.
+static const CGFloat kSidebarWidth   = 104.0;   // ширина колонки вкладок
+static const CGFloat kTabRowHeight   = 40.0;    // высота строки вкладки
+static const CGFloat kCardInset      = 10.0;    // отступ карточки от края панели
+static const CGFloat kSectionTop     = 36.0;    // высота полосы заголовка раздела
 static const CGFloat kMargin         = 10.0;
 static const CGFloat kTriggerInset   = 14.0;
 
@@ -147,7 +156,6 @@ static const CGFloat kSwitchRowHeight  = 40.0;
 static const CGFloat kSwitchRowGap     = 8.0;
 static const CGFloat kSliderGroupHeight = 40.0;
 static const CGFloat kSliderGroupGap   = 6.0;
-static const CGFloat kGameContentHeight = 410.0;
 
 // Что тянет палец в потоке касаний (см. handleRawTouchPhase:...).
 typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
@@ -155,6 +163,11 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
     HUDRawDragTrigger,
     HUDRawDragPanel,
     HUDRawDragScroll,
+    // Управляемый элемент (кнопка, строка переключателя, слайдер, вкладка):
+    // пока палец почти не сдвинулся — это ТАП, и только при явной протяжке
+    // жест превращается в прокрутку. Без этого порога дрожь руки при нажатии
+    // уводила бы содержимое, и кнопки «не нажимались».
+    HUDRawDragControl,
 };
 
 // Единственный живой оверлей процесса (см. +currentOverlay). Ссылку держим
@@ -189,11 +202,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_panelTitle;
     UIButton *_panelClose;
     NSMutableArray<UIButton *> *_tabButtons;
+    UIView *_tabIndicator;        // красная полоска у выбранной вкладки
+    UIView *_contentCard;         // тёмная карточка справа
+    UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
-    UIView *_miscView;
-    UIView *_gameView;
     UIButton *_unloadButton;
     UILabel *_gameProcLabel;
+    UILabel *_miscCaption;
+    UILabel *_configCaption;
     NSMutableArray<UISwitch *> *_switches;
     NSMutableArray<UISlider *> *_sliders;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
@@ -211,6 +227,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
     BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
     BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
+    CGFloat _rawThreshold;      // порог «это уже протяжка, а не тап»
     NSTimeInterval _rawLastTime; // время последнего события потока
 }
 
@@ -277,6 +294,24 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 #pragma mark - Касания из потока HID (перетаскивание и прокрутка)
 
+/// Управляемый элемент: кнопка, крестик, вкладка, строка переключателя или
+/// группа слайдера. Отдельная категория нужна, чтобы НАЖАТИЕ на кнопку не
+/// превращалось в прокрутку: управляющим элементам даём большой порог
+/// «протяжки», и дрожь руки при нажатии остаётся тапом.
+- (BOOL)isInteractiveView:(UIView *)view
+{
+    if (view == nil) { return NO; }
+    UIView *cursor = view;
+    while (cursor != nil && cursor != _stage && cursor != _panel) {
+        if ([cursor isKindOfClass:[UIControl class]]) { return YES; }
+        if (cursor == _gameProcLabel) { return YES; }
+        if ([self switchInRow:cursor] != nil) { return YES; }
+        if ([self sliderInGroup:cursor] != nil) { return YES; }
+        cursor = cursor.superview;
+    }
+    return NO;
+}
+
 /// Кто под пальцем. Считаем по своей иерархии (а не по окну): окно
 /// accessibility-оверлея от системы касаний не получает, но hitTest по нашим
 /// же вью работает всегда.
@@ -286,9 +321,23 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (hit == nil) { return HUDRawDragNone; }
 
     if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragTrigger; }
+    // Управляющие элементы проверяем ДО шапки: крестик и вкладки лежат в панели,
+    // и без этого порядка их нажатие превращалось бы в перетаскивание панели.
+    if ([self isInteractiveView:hit]) { return HUDRawDragControl; }
     if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragPanel; }
     if (hit == _scroll || [hit isDescendantOfView:_scroll]) { return HUDRawDragScroll; }
     return HUDRawDragNone;
+}
+
+/// Порог «палец реально тянет», в точках. У квадрата он меньше (им и правда
+/// таскают), у кнопок — большой: нажатие не должно сбиваться в прокрутку.
+- (CGFloat)rawThresholdForTarget:(HUDRawDragTarget)target
+{
+    switch (target) {
+        case HUDRawDragTrigger:  return 12.0;
+        case HUDRawDragControl:  return 40.0;
+        default:                 return 6.0;
+    }
 }
 
 /// Начинает (или заново подхватывает после паузы) жест от указанной точки.
@@ -297,6 +346,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)beginRawDragAtPoint:(CGPoint)point stagePoint:(CGPoint)stagePoint
 {
     _rawTarget = [self rawDragTargetAtPoint:point];
+    _rawThreshold = [self rawThresholdForTarget:_rawTarget];
     _rawStart = stagePoint;
     _rawTapStart = point;
     _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
@@ -322,8 +372,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Долгая тишина между событиями — палец замер или событие «подъёма»
     // потерялось. Жест тогда завершён: иначе старое начало осталось бы висеть, и
     // первый же сдвиг утащил бы квадрат к прежнему месту («телепорт»).
+    //
+    // ВРЕМЯ ОБНОВЛЯЕМ НА КАЖДОМ СОБЫТИИ, иначе порог срабатывал бы каждые 0.35 с
+    // во время ДЛИТЕЛЬНОГО касания: жест «заново подхватывался», _rawMoved
+    // сбрасывался, и отпускание после протяжки считалось тапом — панель
+    // «teleпортировалась» и нажатия превращались в случайные действия.
     NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
     BOOL stale = (_rawTarget != HUDRawDragNone) && (now - _rawLastTime > 0.35);
+    _rawLastTime = now;
 
     if (phase == UITouchPhaseBegan) {
         [self beginRawDragAtPoint:point stagePoint:stagePoint];
@@ -343,11 +399,19 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         }
 
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
-        // Пока палец не сдвинулся на несколько точек, это ещё тап: иначе дрожь
-        // руки при нажатии уводила бы квадрат с места (и он бы «уползал»).
-        if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < 36.0) { return; }
+        // Пока палец не сдвинулся на порог, это ещё тап: иначе дрожь руки при
+        // нажатии уводила бы квадрат с места (и он бы «уползал»).
+        CGFloat limit = _rawThreshold > 0 ? _rawThreshold : 6.0;
+        if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < limit * limit) { return; }
         if (!_rawMoved) {
             _rawMoved = YES;
+            if (_rawTarget == HUDRawDragControl) {
+                // Прокрутка от управляющего элемента: перебазируем начало, чтобы
+                // содержимое не «прыгнуло» на величину порога в один кадр.
+                _rawStart = stagePoint;
+                _rawStartOffset = _scroll.contentOffset;
+                delta = CGPointZero;
+            }
             AscentHUDLog(@"[gesture] поток: тянем %@",
                          _rawTarget == HUDRawDragTrigger ? @"квадрат" :
                          (_rawTarget == HUDRawDragPanel ? @"панель" : @"содержимое вкладки"));
@@ -453,7 +517,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    if (_rawTarget == HUDRawDragScroll) {
+    if (_rawTarget == HUDRawDragScroll || _rawTarget == HUDRawDragControl) {
         CGFloat minY = -_scroll.contentInset.top;
         CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
                            _scroll.contentInset.bottom, minY);
@@ -486,7 +550,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    if (_rawTarget == HUDRawDragScroll) {
+    if (_rawTarget == HUDRawDragScroll || _rawTarget == HUDRawDragControl) {
         AscentHUDLog(@"[gesture] прокрутка вкладки: y=%.0f", _scroll.contentOffset.y);
     }
 }
@@ -689,12 +753,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _panel.layer.borderColor = HUDLine().CGColor;
     _panel.hidden = YES;
 
-    // Шапка: за неё таскаем, в ней же крестик.
+    // Шапка: за неё таскаем, слева красная подпись @ascentios, справа крестик.
     _panelHeader = [[UIView alloc] initWithFrame:CGRectZero];
     _panelHeader.backgroundColor = [UIColor clearColor];
     [_panel addSubview:_panelHeader];
 
-    _panelTitle = HUDLabel(@"ascent", 15, UIFontWeightHeavy);
+    _panelTitle = HUDLabel(@"@ascentios", 15, UIFontWeightHeavy);
+    _panelTitle.textColor = HUDAccent();
     [_panelHeader addSubview:_panelTitle];
 
     _panelClose = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -712,12 +777,15 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     headerLine.tag = 0;
     [_panel addSubview:headerLine];
 
-    // Вкладки
+    // Колонка вкладок слева. Выбранная — красным текстом плюс красная
+    // полоска у правого края колонки (как в эталонном меню).
     _tabButtons = [NSMutableArray array];
-    NSArray<NSString *> *titles = @[ @"misc", @"combot" ];
+    NSArray<NSString *> *titles = @[ @"Esp", @"Aim", @"Misc", @"Config" ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
         UIButton *button = [self makeFlatButton:titles[i]];
-        button.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+        button.titleEdgeInsets = UIEdgeInsetsMake(0, 14, 0, 0);
         button.tag = 100 + i;
         button.layer.cornerRadius = 0.0;
         [button addTarget:self action:@selector(tabTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -726,12 +794,25 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         [_tabButtons addObject:button];
     }
 
-    UILabel *tabLine = [[UILabel alloc] initWithFrame:CGRectZero];
-    tabLine.backgroundColor = HUDLine();
-    tabLine.tag = 1;
-    [_panel addSubview:tabLine];
+    _tabIndicator = [[UIView alloc] initWithFrame:CGRectZero];
+    _tabIndicator.backgroundColor = HUDAccent();
+    _tabIndicator.layer.cornerRadius = 1.5;
+    [_panel addSubview:_tabIndicator];
 
-    // Прокручиваемая область содержимого — вкладка «combot» длиннее остальных
+    // Тёмная карточка содержимого справа: заголовок раздела и прокрутка.
+    _contentCard = [[UIView alloc] initWithFrame:CGRectZero];
+    _contentCard.backgroundColor = HUDCard();
+    _contentCard.layer.cornerRadius = 14.0;
+    _contentCard.layer.borderWidth = 1.0;
+    _contentCard.layer.borderColor = HUDLine().CGColor;
+    _contentCard.clipsToBounds = YES;
+    [_panel addSubview:_contentCard];
+
+    _sectionTitle = HUDLabel(@"", 13, UIFontWeightSemibold);
+    _sectionTitle.textColor = [UIColor whiteColor];
+    [_contentCard addSubview:_sectionTitle];
+
+    // Прокручиваемая область содержимого — вкладки разной длины.
     _scroll = [[UIScrollView alloc] initWithFrame:CGRectZero];
     _scroll.showsVerticalScrollIndicator = NO;
     _scroll.alwaysBounceVertical = NO;
@@ -743,50 +824,25 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // на синтетических UITouch UIScrollView панораму не распознаёт, и если
     // оставить её включённой, содержимое поедет дважды.
     _scroll.panGestureRecognizer.enabled = NO;
-    [_panel addSubview:_scroll];
+    [_contentCard addSubview:_scroll];
 
-    [self buildMiscTab];
-    [self buildGameTab];
+    [self buildContent];
 
     [_stage addSubview:_panel];
 }
 
-- (void)buildMiscTab
+/// Собираем всё содержимое вкладок сразу, а какие элементы видны — решает
+/// раскладка по активной вкладке (см. layoutContentForTab:). Элементы лежат в
+/// _scroll одним стеком и просто переставляются при смене вкладки.
+- (void)buildContent
 {
-    _miscView = [[UIView alloc] initWithFrame:CGRectZero];
-    [_scroll addSubview:_miscView];
-
-    _unloadButton = [self makeFlatButton:@"unload"];
-    _unloadButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];
-    _unloadButton.backgroundColor = HUDGray();
-    _unloadButton.layer.cornerRadius = 12.0;
-    [_unloadButton addTarget:self action:@selector(unloadTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
-    [_miscView addSubview:_unloadButton];
-
-    UILabel *caption = HUDLabel(@"стоп лоадера, меню остаётся", 11.5, UIFontWeightRegular);
-    caption.textColor = [UIColor colorWithWhite:1.0 alpha:0.5];
-    caption.tag = 1;
-    [_miscView addSubview:caption];
-}
-
-- (void)buildGameTab
-{
-    _gameView = [[UIView alloc] initWithFrame:CGRectZero];
-    [_scroll addSubview:_gameView];
-
-    UILabel *title = HUDLabel(@"standoff 2", 13, UIFontWeightRegular);
-    title.textColor = HUDDim();
-    title.tag = 1;
-    [_gameView addSubview:title];
-
     _switches = [NSMutableArray array];
     NSArray<NSString *> *switchKeys = @[ @"cheat.esp", @"cheat.aimbot", @"cheat.trigger" ];
-    NSArray<NSString *> *switchTitles = @[ @"esp", @"aimbot", @"triggerbot" ];
+    NSArray<NSString *> *switchTitles = @[ @"Enable", @"Aimbot", @"Triggerbot" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
         UILabel *label = HUDLabel(switchTitles[i], 13, UIFontWeightMedium);
-        // Кадр подписи задаёт layoutGameTab (ровно по высоте строки). Здесь
+        // Кадр подписи задаёт раскладка строки (см. layoutSwitchRow:). Здесь
         // только запрещаем autoresizing: строка рождается нулевой, и «тянущаяся»
         // высота раздувала подпись вдвое — текст уезжал ниже середины строки.
         label.autoresizingMask = UIViewAutoresizingNone;
@@ -803,7 +859,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         [row addSubview:toggle];
 
         [self addTapGesture:row action:@selector(switchRowTapped:)];
-        [_gameView addSubview:row];
+        [_scroll addSubview:row];
         [_switches addObject:toggle];
     }
 
@@ -827,7 +883,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
         UISlider *slider = [[UISlider alloc] initWithFrame:CGRectZero];
         slider.accessibilityIdentifier = sliderKeys[i];
-        slider.minimumTrackTintColor = [UIColor whiteColor];
+        slider.minimumTrackTintColor = HUDAccent();
         slider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.18];
         // Явно задаём иконку ползунка: системный thumb меняет размер при
         // разных кадрах (иногда кажется «толстым» в момент первого показа),
@@ -854,7 +910,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
         [self addTapGesture:group action:@selector(sliderRowTouched:)];
 
-        [_gameView addSubview:group];
+        [_scroll addSubview:group];
         [_sliders addObject:slider];
     }
 
@@ -867,25 +923,28 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _gameProcLabel.layer.borderColor = HUDLine().CGColor;
     _gameProcLabel.userInteractionEnabled = YES;
     _gameProcLabel.tag = 3;
-    [_gameProcLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
-                                                                                action:@selector(refreshGameProcess)]];
-    [_gameView addSubview:_gameProcLabel];
+    [_scroll addSubview:_gameProcLabel];
 
-    UILabel *caption = HUDLabel(@"память игры читает HUD-процесс: переключатели выше только включают доступ к ней",
-                                10.5, UIFontWeightRegular);
-    caption.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
-    caption.numberOfLines = 0;
-    caption.tag = 4;
-    [_gameView addSubview:caption];
+    _unloadButton = [self makeFlatButton:@"unload"];
+    _unloadButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];
+    _unloadButton.backgroundColor = HUDGray();
+    _unloadButton.layer.cornerRadius = 12.0;
+    [_unloadButton addTarget:self action:@selector(unloadTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
+    [_scroll addSubview:_unloadButton];
+
+    _miscCaption = HUDLabel(@"стоп лоадера, меню остаётся", 11.5, UIFontWeightRegular);
+    _miscCaption.textColor = [UIColor colorWithWhite:1.0 alpha:0.5];
+    [_scroll addSubview:_miscCaption];
+
+    _configCaption = HUDLabel(@"память игры читает HUD-процесс: переключатели выше только включают доступ к ней",
+                              10.5, UIFontWeightRegular);
+    _configCaption.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+    _configCaption.numberOfLines = 0;
+    [_scroll addSubview:_configCaption];
 }
 
 #pragma mark - Панель (раскладка)
-
-- (CGFloat)contentHeightForTab:(NSInteger)tab
-{
-    if (tab == 1) { return kGameContentHeight; }
-    return 88.0;
-}
 
 /// Держим панель внутри безопасной зоны. Считается всегда — и во время
 /// перетаскивания тоже: уехать за край экрана панель не может в принципе, а
@@ -944,110 +1003,131 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGFloat h = panelSize.height;
 
     _panelHeader.frame = CGRectMake(0, 0, w, kHeaderHeight);
-    _panelTitle.frame = CGRectMake(14, 0, w - 60, kHeaderHeight);
+    _panelTitle.frame = CGRectMake(16, 0, w - 60, kHeaderHeight);
     _panelClose.frame = CGRectMake(w - 14 - 28, (kHeaderHeight - 28) / 2.0, 28, 28);
     _panelClose.layer.cornerRadius = 14.0;
 
     for (UIView *sub in _panel.subviews) {
         if ([sub isKindOfClass:[UILabel class]] && sub.tag == 0) {
             sub.frame = CGRectMake(0, kHeaderHeight - 1, w, 1);
-        } else if ([sub isKindOfClass:[UILabel class]] && sub.tag == 1) {
-            sub.frame = CGRectMake(0, kHeaderHeight + kTabBarHeight - 1, w, 1);
         }
     }
 
-    // Вкладок может быть меньше, чем три (сейчас misc и combot) — делим полосу
-    // ровно на их число, иначе справа оставалась пустая треть.
-    CGFloat tabWidth = w / (CGFloat)MAX((NSInteger)_tabButtons.count, 1);
+    // Тело панели: слева колонка вкладок, справа карточка содержимого.
+    CGFloat bodyY = kHeaderHeight + 6.0;
+    CGFloat bodyH = h - bodyY - kCardInset;
+    CGFloat tabX = kCardInset;
+    CGFloat tabW = kSidebarWidth;
+    CGFloat cardX = tabX + tabW + 6.0;
+    CGFloat cardW = w - cardX - kCardInset;
+
+    CGFloat rowY = bodyY + 4.0;
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
         UIButton *button = _tabButtons[i];
-        button.frame = CGRectMake(tabWidth * i, kHeaderHeight, tabWidth, kTabBarHeight);
+        button.frame = CGRectMake(tabX, rowY, tabW - 8.0, kTabRowHeight);
         BOOL selected = (i == _tab);
-        button.backgroundColor = selected ? [UIColor colorWithWhite:1.0 alpha:0.08] : [UIColor clearColor];
-        [button setTitleColor:(selected ? [UIColor whiteColor] : HUDDim()) forState:UIControlStateNormal];
+        button.backgroundColor = [UIColor clearColor];
+        [button setTitleColor:(selected ? HUDAccent() : HUDDim()) forState:UIControlStateNormal];
+        if (selected) {
+            _tabIndicator.hidden = NO;
+            _tabIndicator.frame = CGRectMake(tabX + tabW - 4.0, rowY + 7.0, 3.0, kTabRowHeight - 14.0);
+        }
+        rowY += kTabRowHeight;
     }
 
-    _scroll.frame = CGRectMake(0, kHeaderHeight + kTabBarHeight, w, h - kHeaderHeight - kTabBarHeight);
+    _contentCard.frame = CGRectMake(cardX, bodyY, cardW, bodyH);
 
-    CGFloat contentWidth = w;
-    CGFloat contentHeight = [self contentHeightForTab:_tab];
-    CGSize containerSize = CGSizeMake(contentWidth, contentHeight);
+    static NSString *const kSectionTitles[4] = { @"ESP", @"AIM", @"MISC", @"CONFIG" };
+    _sectionTitle.text = (_tab >= 0 && _tab < 4) ? kSectionTitles[_tab] : kSectionTitles[0];
+    _sectionTitle.frame = CGRectMake(14, 12, cardW - 28, 20);
 
-    _miscView.frame = CGRectMake(0, 0, containerSize.width, 88.0);
-    _gameView.frame = CGRectMake(0, 0, containerSize.width, kGameContentHeight);
-    _scroll.contentSize = containerSize;
-
-    [self layoutMiscTab:(_tab == 0)];
-    [self layoutGameTab:(_tab == 1)];
+    _scroll.frame = CGRectMake(0, kSectionTop, cardW, MAX(bodyH - kSectionTop, 0));
+    [self layoutContentForTab:_tab width:cardW];
 }
 
-
-
-- (void)layoutMiscTab:(BOOL)visible
+/// Раскладка содержимого активной вкладки: прячем всё лишнее и ставим нужные
+/// элементы одним стеком сверху вниз. Заодно фиксируем contentSize прокрутки.
+- (void)layoutContentForTab:(NSInteger)tab width:(CGFloat)w
 {
-    _miscView.hidden = !visible;
-    CGFloat w = _miscView.bounds.size.width;
-    _unloadButton.frame = CGRectMake(16, 16, w - 32, 46);
-    for (UIView *sub in _miscView.subviews) {
-        if (sub.tag == 1) { sub.frame = CGRectMake(16, 70, w - 32, 18); }
+    CGFloat x = 10.0;
+    CGFloat rowWidth = w - 20.0;
+    CGFloat y = 6.0;
+
+    for (UISwitch *toggle in _switches) { toggle.superview.hidden = YES; }
+    for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
+    _gameProcLabel.hidden = YES;
+    _unloadButton.hidden = YES;
+    _miscCaption.hidden = YES;
+    _configCaption.hidden = YES;
+
+    if (tab == 0) {
+        [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
+    } else if (tab == 1) {
+        [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
+    } else if (tab == 2) {
+        _gameProcLabel.hidden = NO;
+        _gameProcLabel.frame = CGRectMake(x, y, rowWidth, 32);
+        y += 32 + 10;
+
+        _unloadButton.hidden = NO;
+        _unloadButton.frame = CGRectMake(x, y, rowWidth, 46);
+        y += 46 + 10;
+
+        _miscCaption.hidden = NO;
+        _miscCaption.frame = CGRectMake(x, y, rowWidth, 18);
+        y += 18 + 4;
+    } else {
+        [self layoutSliderGroup:_sliders[0] x:x y:&y width:rowWidth];
+        [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];
+        [self layoutSliderGroup:_sliders[2] x:x y:&y width:rowWidth];
+        y += 4;
+
+        _configCaption.hidden = NO;
+        CGSize need = [_configCaption sizeThatFits:CGSizeMake(rowWidth, CGFLOAT_MAX)];
+        _configCaption.frame = CGRectMake(x, y, rowWidth, need.height);
+        y += need.height + 6;
     }
+
+    _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
 }
 
-- (void)layoutGameTab:(BOOL)visible
+- (void)layoutSwitchRow:(UISwitch *)toggle x:(CGFloat)x y:(CGFloat *)y width:(CGFloat)width
 {
-    _gameView.hidden = !visible;
-    CGFloat w = _gameView.bounds.size.width;
-    CGFloat y = 14.0;
+    UIView *row = toggle.superview;
+    row.hidden = NO;
+    row.frame = CGRectMake(x, *y, width, kSwitchRowHeight);
 
-    for (UIView *sub in _gameView.subviews) {
-        if (sub.tag == 1) { sub.frame = CGRectMake(16, y, w - 32, 18); }
-    }
-    y += 24.0;
-
-    CGFloat rowWidth = w - 32.0;
-    for (UISwitch *toggle in _switches) {
-        UIView *row = toggle.superview;
-        row.frame = CGRectMake(16, y, rowWidth, kSwitchRowHeight);
-
-        // Подпись задаём ЯВНО и ровно по высоте строки: у UILabel иначе
-        // «тянется» высота (autoresizing) от нулевого размера строки, и текст
-        // уезжает ниже её середины — надписи esp/aimbot/triggerbot выглядели
-        // сдвинутыми вниз.
-        for (UIView *sub in row.subviews) {
-            if ([sub isKindOfClass:[UILabel class]]) {
-                sub.frame = CGRectMake(14, 0, rowWidth - 80.0, kSwitchRowHeight);
-            }
+    // Подпись задаём ЯВНО и ровно по высоте строки: у UILabel иначе
+    // «тянется» высота (autoresizing) от нулевого размера строки, и текст
+    // уезжает ниже её середины — надписи выглядели сдвинутыми вниз.
+    for (UIView *sub in row.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            sub.frame = CGRectMake(14, 0, width - 80.0, kSwitchRowHeight);
         }
-
-        CGFloat toggleWidth = toggle.bounds.size.width;
-        if (toggleWidth <= 0) { toggleWidth = 51.0; }
-        CGFloat toggleHeight = toggle.bounds.size.height;
-        if (toggleHeight <= 0) { toggleHeight = 31.0; }
-        toggle.frame = CGRectMake(rowWidth - toggleWidth - 10,
-                                  (kSwitchRowHeight - toggleHeight) / 2.0,
-                                  toggleWidth, toggleHeight);
-        y += kSwitchRowHeight + kSwitchRowGap;
     }
 
-    y += 2.0;
-    for (UISlider *slider in _sliders) {
-        UIView *group = slider.superview;
-        group.frame = CGRectMake(16, y, rowWidth, kSliderGroupHeight);
-        for (UIView *sub in group.subviews) {
-            if (sub.tag == 1) { sub.frame = CGRectMake(0, 0, rowWidth / 2.0, 14); }
-            if (sub.tag == 2) { sub.frame = CGRectMake(rowWidth / 2.0, 0, rowWidth / 2.0, 14); }
-        }
-        slider.frame = CGRectMake(0, 16, rowWidth, 24);
-        y += kSliderGroupHeight + kSliderGroupGap;
-    }
+    CGFloat toggleWidth = toggle.bounds.size.width;
+    if (toggleWidth <= 0) { toggleWidth = 51.0; }
+    CGFloat toggleHeight = toggle.bounds.size.height;
+    if (toggleHeight <= 0) { toggleHeight = 31.0; }
+    toggle.frame = CGRectMake(width - toggleWidth - 10,
+                              (kSwitchRowHeight - toggleHeight) / 2.0,
+                              toggleWidth, toggleHeight);
+    *y += kSwitchRowHeight + kSwitchRowGap;
+}
 
-    y += 4.0;
-    _gameProcLabel.frame = CGRectMake(16, y, rowWidth, 32);
-    y += 32 + 10;
-
-    for (UIView *sub in _gameView.subviews) {
-        if (sub.tag == 4) { sub.frame = CGRectMake(16, y, rowWidth, 30); }
+- (void)layoutSliderGroup:(UISlider *)slider x:(CGFloat)x y:(CGFloat *)y width:(CGFloat)width
+{
+    UIView *group = slider.superview;
+    group.hidden = NO;
+    group.frame = CGRectMake(x, *y, width, kSliderGroupHeight);
+    for (UIView *sub in group.subviews) {
+        if (sub.tag == 1) { sub.frame = CGRectMake(0, 0, width / 2.0, 14); }
+        if (sub.tag == 2) { sub.frame = CGRectMake(width / 2.0, 0, width / 2.0, 14); }
     }
+    slider.frame = CGRectMake(0, 16, width, 24);
+    *y += kSliderGroupHeight + kSliderGroupGap;
 }
 
 #pragma mark - Действия панели
