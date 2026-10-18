@@ -107,28 +107,16 @@ private struct LoaderContent: View {
                 .padding(.vertical, 19)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        // Start — красный акцент (как в меню), Exit — прежний
-                        // серый: по цвету сразу видно, в каком состоянии кнопка.
-                        .fill(LinearGradient(colors: state.showing
-                                             ? [Theme.grayTop, Theme.grayBottom]
-                                             : [Color(red: 1.00, green: 0.30, blue: 0.32),
-                                                Color(red: 0.80, green: 0.05, blue: 0.08)],
+                        .fill(LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
                                              startPoint: .top, endPoint: .bottom))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(state.showing ? Theme.grayLine
-                                               : Color(red: 1.0, green: 0.1, blue: 0.1).opacity(0.9),
-                                lineWidth: 1)
+                        .stroke(Theme.grayLine, lineWidth: 1)
                 )
         }
         .buttonStyle(StartButtonStyle())
-        // У Start — красное свечение, у Exit — прежняя чёрная тень.
-        .shadow(color: state.showing
-                ? Color.black.opacity(0.35)
-                : Color(red: 1.0, green: 0.1, blue: 0.1).opacity(0.45),
-                radius: state.showing ? 18 : 16,
-                x: 0, y: state.showing ? 10 : 8)
+        .shadow(color: Color.black.opacity(0.35), radius: 18, x: 0, y: 10)
         .offset(y: 40)          // кнопка Start/Exit чуть ниже центра
     }
 
