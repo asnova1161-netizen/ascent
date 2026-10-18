@@ -197,6 +197,10 @@ static const CGFloat kCardInset      = 8.0;     // отступ карточки
 static const CGFloat kSectionTop     = 32.0;    // высота полосы заголовка раздела
 static const CGFloat kMargin         = 10.0;
 static const CGFloat kTriggerInset   = 14.0;
+// Край экрана для перетаскивания: квадрат и панель ездят по ВЕСЬМУ экрану и
+// зажимаются только так, чтобы не выйти за границу. 6 pt — чтобы скруглённые
+// углы не срезались об рамку и элементы визуально не «слипались» с краем.
+static const CGFloat kEdgeMargin     = 6.0;
 
 // Высота вкладок: строка переключателя, строка слайдера и содержимое вкладки
 // «combot». Держим константами, потому что одни и те же числа нужны и сборке
@@ -557,7 +561,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // этом сохраняются.
     HUDOverlaySetFlag(@"cheat.esp", NO);
     HUDOverlaySetFlag(@"cheat.aimbot", NO);
-    HUDOverlaySetFlag(@"cheat.trigger", NO);
 
     [self buildTrigger];
     [self buildPanel];
@@ -1076,6 +1079,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     return center;
 }
 
+/// Зона ПЕРЕНОСА — весь экран целиком. Раньше здесь была «безопасная» полоса
+/// (safe area сверху + отступы по бокам), и в портрете у панели оставалось
+/// всего несколько десятков точек хода: казалось, что элемент упирается в
+/// невидимый барьер и двигать его почти нельзя. Теперь барьера нет: квадрат и
+/// панель едут от самого верха до самого низа и от края до края — ограничение
+/// одно, самое разумное: не выйти за экран.
+- (CGRect)dragArea
+{
+    CGRect stage = [self stageBounds];
+    return CGRectInset(stage, kEdgeMargin, kEdgeMargin);
+}
+
+/// Площадь РАЗМЕРА панели (не переноса!). От неё считается ширина меню, и она
+/// не должна меняться при каждом движении пальца. Держим прежнюю площадь с
+/// безопасными отступами — панель остаётся прежнего размера.
 - (CGRect)triggerArea
 {
     CGRect stage = [self stageBounds];
@@ -1087,7 +1105,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 - (CGPoint)clampTriggerCenter:(CGPoint)center
 {
-    CGRect area = [self triggerArea];
+    CGRect area = [self dragArea];
     CGFloat half = kTriggerSide / 2.0;
     CGFloat minX = area.origin.x + half;
     CGFloat maxX = MAX(area.origin.x + area.size.width - half, minX);
@@ -1280,12 +1298,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)buildContent
 {
     _switches = [NSMutableArray array];
-    // Первые три — главные переключатели (esp / aimbot / triggerbot). Дальше —
+    // Первые два — главные переключатели (esp / aimbot). Дальше —
     // что именно рисовать в ESP: эти ключи читает холст AscentESPHostView.
     // Порядок важен: layoutContentForTab: обращается к элементам по индексу.
+    // Triggerbot из вкладки Aim убран: функция удалена целиком.
     NSArray<NSString *> *switchKeys = @[ @"cheat.esp",
                                          @"cheat.aimbot",
-                                         @"cheat.trigger",
                                          @"esp.box",
                                          @"esp.health",
                                          @"esp.name",
@@ -1293,7 +1311,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                                          @"esp.snapline" ];
     NSArray<NSString *> *switchTitles = @[ @"Enable",
                                            @"Aimbot",
-                                           @"Triggerbot",
                                            @"Boxes",
                                            @"Health",
                                            @"Names",
@@ -1465,13 +1482,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     return CGSizeMake(width, height);
 }
 
-/// Держим панель внутри безопасной зоны. Считается всегда — и во время
-/// перетаскивания тоже: уехать за край экрана панель не может в принципе, а
-/// любой повторный расчёт раскладки даёт ровно ту же точку (перетаскивание
-/// двигало панель «рывками» именно потому, что раскладка откатывала её назад).
+/// Держим панель ВНУТРИ ЭКРАНА — а не в старой «безопасной» полосе. Считается
+/// всегда — и во время перетаскивания тоже: уехать за край экрана панель не
+/// может в принципе, а любой повторный расчёт раскладки даёт ровно ту же точку
+/// (перетаскивание двигало панель «рывками» именно потому, что раскладка
+/// откатывала её назад).
 - (CGPoint)clampPanelCenter:(CGPoint)center size:(CGSize)panelSize
 {
-    CGRect area = [self triggerArea];
+    CGRect area = [self dragArea];
     CGFloat halfW = panelSize.width / 2.0;
     CGFloat halfH = panelSize.height / 2.0;
     CGFloat minX = area.origin.x + halfW;
@@ -1580,11 +1598,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (tab == 0) {
         // Вкладка ESP: главный переключатель, затем что именно рисовать.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
         [self layoutSwitchRow:_switches[3] x:x y:&y width:rowWidth];
         [self layoutSwitchRow:_switches[4] x:x y:&y width:rowWidth];
         [self layoutSwitchRow:_switches[5] x:x y:&y width:rowWidth];
         [self layoutSwitchRow:_switches[6] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[7] x:x y:&y width:rowWidth];
 
         // Короткий статус чтения игры: без него непонятно, почему боксы не
         // появились (нет процесса, не заданы смещения, пустой список).
@@ -1592,8 +1610,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         _espStatusLabel.frame = CGRectMake(x, y + 2.0, rowWidth, 34.0);
         y += 34.0 + 4.0;
     } else if (tab == 1) {
+        // Вкладка Aim: только основной переключатель. Triggerbot убран.
         [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
     } else if (tab == 2) {
         _gameProcLabel.hidden = NO;
         _gameProcLabel.frame = CGRectMake(x, y, rowWidth, 32);
