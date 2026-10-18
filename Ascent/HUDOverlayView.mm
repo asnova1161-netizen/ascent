@@ -223,6 +223,12 @@ static const CGFloat kRawDragStepMax       = 240.0;
 // сверяется с kRawTapSlop, и короткое нажатие остаётся нажатием.
 static const NSTimeInterval kRawDragHold   = 0.06;
 static const CGFloat kRawDragArmMove       = 14.0;
+// Захват панели с ЧЁРНОЙ карточки (прокрутка и строки внутри неё): меню должно
+// таскаться и за чёрные области, а не только за серые поля. Карточка отдаёт
+// перенос по ДОЛГОМУ удержанию; движение ДО срока — обычная прокрутка, поэтому
+// листать вкладки по-прежнему можно. С короткими задержками захват не спутать:
+// настоящий свайп начинается раньше 0.25 с, а удержание без движения — нет.
+static const NSTimeInterval kRawGrabHold   = 0.25;
 // Если за весь жест палец прошёл меньше этого, жест считается НАЖАТИЕМ:
 // элемент возвращается ровно на место, где был в момент нажатия.
 static const CGFloat kRawTapSlop           = 14.0;
@@ -547,6 +553,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
     BOOL _rawArmed;             // удержание прошло — жест стал переносом
     BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
+    BOOL _rawHoldFromScroll;    // захват с карточки — долгим удержанием
+    BOOL _rawScrollTouched;     // карточку успели прокрутить — это не тап
     BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
     BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
     CGFloat _rawThreshold;      // порог «это уже протяжка, а не тап»
@@ -711,15 +719,20 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
     _rawArmed = NO;
-    // Где удержание вообще разрешено. Квадрат и панель — всегда. Управляющие
-    // элементы — только ВНЕ области прокрутки (кнопки вкладок): внутри неё
-    // удержание оставляем прокрутке, иначе медленная протяжка по строке
-    // превращалась бы в перенос меню вместо прокрутки списка ESP.
+    // Где удержание вообще разрешено. Квадрат, панель, кнопки вкладок — как
+    // раньше, почти сразу. С ЧЁРНОЙ карточки (прокрутка и строки внутри) панель
+    // берётся ДОЛГИМ удержанием (kRawGrabHold), а движение до срока уходит в
+    // прокрутку — иначе перенос по строке съедал бы листание вкладок.
     UIView *hit = [self hitTest:point withEvent:nil];
     BOOL insideScroll = (hit != nil && [hit isDescendantOfView:_scroll]);
     _rawHoldable = (_rawTarget == HUDRawDragTrigger ||
                     _rawTarget == HUDRawDragPanel ||
-                    (_rawTarget == HUDRawDragControl && !insideScroll));
+                    _rawTarget == HUDRawDragControl ||
+                    _rawTarget == HUDRawDragScroll);
+    _rawHoldFromScroll = insideScroll &&
+                         (_rawTarget == HUDRawDragScroll ||
+                          _rawTarget == HUDRawDragControl);
+    _rawScrollTouched = NO;
     _rawTapFired = NO;
     _dragging = YES;
     _rawStartTime = [[NSProcessInfo processInfo] systemUptime];
@@ -831,15 +844,43 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         // смещение элемента всегда равно смещению пальца.
         if (_rawHoldable) {
             if (!_rawArmed) {
-                // Включаем перенос либо по очень короткому удержанию, либо
-                // сразу, если палец успел уйти далеко. Нажатие короткое и почти
-                // без движения, поэтому переносом не становится.
-                CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
-                if ((now - _rawStartTime) < kRawDragHold && len < kRawDragArmMove) { return; }
+                // С ЧЁРНОЙ карточки (и с её строк) панель берётся только по
+                // ДОЛГОМУ удержанию: всё, что палец сделал до срока, — это
+                // прокрутка, и её не надо ломать. От шапки, колонки и квадрата
+                // перенос включается как раньше — почти сразу.
+                if (_rawHoldFromScroll) {
+                    if ((now - _rawStartTime) < kRawGrabHold) {
+                        // Ещё не удержали: палец ведёт прокрутку содержимого —
+                        // 1:1, от точки нажатия, как штатный скролл.
+                        if (delta.x * delta.x + delta.y * delta.y > 100.0 && !_rawScrollTouched) {
+                            _rawScrollTouched = YES;
+                            _rawMoved = YES;
+                            AscentHUDLog(@"[gesture] поток: тяну содержимое вкладки");
+                        }
+                        [self applyRawDragDelta:delta];
+                        return;
+                    }
+                } else {
+                    // Включаем перенос либо по очень короткому удержанию, либо
+                    // сразу, если палец успел уйти далеко. Нажатие короткое и почти
+                    // без движения, поэтому переносом не становится.
+                    CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
+                    if ((now - _rawStartTime) < kRawDragHold && len < kRawDragArmMove) { return; }
+                }
                 _rawArmed = YES;
-                // Удержание на кнопке вкладки тоже переносит панель — так меню
-                // можно утащить не только за шапку.
-                if (_rawTarget == HUDRawDragControl) { _rawTarget = HUDRawDragPanel; }
+                // Удержание на кнопке вкладки и долгое удержание на карточке
+                // тоже переносят панель — так меню можно утащить не только за
+                // шапку, но и за чёрные области.
+                if (_rawTarget == HUDRawDragControl || _rawTarget == HUDRawDragScroll) {
+                    _rawTarget = HUDRawDragPanel;
+                }
+                if (_rawHoldFromScroll) {
+                    // Отсчёт заново от текущей точки и ТЕКУЩЕГО центра панели:
+                    // путь предшествовавшей прокрутки не должен прыгать панель
+                    // в момент захвата.
+                    _rawStart = stagePoint;
+                    _rawStartCenter = _panel.center;
+                }
                 AscentHUDLog(@"[gesture] перенос %@ (%.0f мс)",
                              _rawTarget == HUDRawDragTrigger ? @"квадрата" : @"панели",
                              (now - _rawStartTime) * 1000.0);
@@ -849,30 +890,20 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             return;
         }
 
-        // Прокрутка содержимого вкладки: здесь порог нужен, чтобы протяжка не
-        // сбивала нажатие на строку.
-        CGFloat limit = _rawThreshold > 0 ? _rawThreshold : 6.0;
-        if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < limit * limit) { return; }
-        if (!_rawMoved) {
-            _rawMoved = YES;
-            // Здесь перебазирование нужно: содержимое не должно «прыгнуть» на
-            // величину порога в один кадр.
-            _rawStart = stagePoint;
-            _rawStartOffset = _scroll.contentOffset;
-            delta = CGPointZero;
-            AscentHUDLog(@"[gesture] поток: тяну содержимое вкладки");
-        }
-        [self applyRawDragDelta:delta];
+        // Все цели жеста «удерживаемые» (см. beginRawDragAtPoint) — сюда не
+        // доходим. На всякий случай возвращаемся, НЕ завершая жест.
         return;
     }
 
     // Ended / Cancelled: фиксируем результат (позицию или смещение прокрутки).
-    if (_rawMoved && _rawHoldable) {
+    if (_rawMoved && _rawHoldable && !_rawScrollTouched) {
         // Смотрим ВЕСЬ путь пальца от точки нажатия. Если он крошечный — это
         // всё-таки нажатие, а не перенос: возвращаем элемент ровно туда, где он
         // был в момент нажатия, и обрабатываем как тап. Без этого медленное
         // нажатие с дрожью руки съедало бы нажатие, а элемент оставался
-        // сдвинутым на пару точек.
+        // сдвинутым на пару точек. Если палец успел прокрутить содержимое
+        // карточки — это протяжка, а не тап: квадрат с панелью просто
+        // фиксируем, нажатие не засчитывая.
         CGFloat pathX = stagePoint.x - _rawPressPoint.x;
         CGFloat pathY = stagePoint.y - _rawPressPoint.y;
         if ((pathX * pathX + pathY * pathY) < kRawTapSlop * kRawTapSlop) {
