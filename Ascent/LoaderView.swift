@@ -4,8 +4,6 @@ import UIKit
 struct LoaderView: View {
     @StateObject private var state = LoaderState()
 
-    private let panelHeight: CGFloat = 216
-
     var body: some View {
         // Один-единственный GeometryReader на весь экран. Всё остальное
         // расставляется СТАТИЧНЫМИ offset'ами: когда таскаешь меню или
@@ -16,7 +14,6 @@ struct LoaderView: View {
             let size = geo.size
             let top = max(geo.safeAreaInsets.top, 44)
             let bottom = max(geo.safeAreaInsets.bottom, 16)
-            let panelWidth = min(size.width - 44, 300)
 
             ZStack(alignment: .topLeading) {
                 // фон и дождь — статичные типы, их SwiftUI не перерисовывает
@@ -24,28 +21,20 @@ struct LoaderView: View {
 
                 // дождь — тоже статичный UIViewRepresentable: SwiftUI его не
                 // перерисовывает, капли крутит Core Animation. Внутри вью
-                // неинтерактивно, поэтому касания уходят к квадрату и меню.
+                // неинтерактивно, поэтому касания уходят в интерфейс лоадера.
                 RainView()
 
                 LoaderContent(state: state, topInset: top, bottomInset: bottom)
 
-                // Квадратик и меню живут всё время, пока оверлей включён (от
-                // Start до Exit): unload останавливает лоадер, но НЕ прячет их.
+                // Квадратик и меню здесь БОЛЬШЕ НЕ РИСУЕМ — ни запасной, ни
+                // свой. Раньше приложение показывало запасной квадрат, пока HUD
+                // не подтвердит свой: получалось два квадрата, а тап по
+                // запасному открывал СТАРОЕ меню приложения вместо нового меню
+                // HUD. Потом HUD поднимался, старое меню пропадало и появлялось
+                // новое — именно эту путаницу и убираем.
                 //
-                // Когда HUD-процесс поднялся И отрисовал свой UIKit-квадрат
-                // (метка hud.overlay в общем файле), квадрат рисует ОН — поверх
-                // всех приложений. Внутри app тогда не дублируем. Пока HUD не
-                // подтвердил свой квадрат, показываем запасной внутри app, чтобы
-                // он не пропадал.
-                if state.engaged && !(state.showing && state.hudOverlayReady) {
-                    trigger(size: size, top: top, bottom: bottom)
-                        .zIndex(3)
-
-                    if state.menuOpen {
-                        panel(size: size, top: top, bottom: bottom, width: panelWidth)
-                            .zIndex(2)
-                    }
-                }
+                // Квадрат и панель рисует ТОЛЬКО HUD-процесс. Приложение лишь
+                // включает его и следит, что он жив (кнопка Start/Exit).
 
                 // Версия iOS — поверх всего, но не мешает нажатиям.
                 Text("iOS \(UIDevice.current.systemVersion)")
@@ -68,56 +57,6 @@ struct LoaderView: View {
             .frame(width: size.width, height: size.height)
         }
         .ignoresSafeArea()
-    }
-
-    // MARK: - Квадратик мод-меню
-
-    private func trigger(size: CGSize, top: CGFloat, bottom: CGFloat) -> some View {
-        let side = MenuTrigger.side
-        let baseX = size.width - side - 14
-        let baseY = top + 14
-        let area = CGRect(x: 10,
-                          y: top + 10,
-                          width: max(size.width - 20, 0),
-                          height: max(size.height - top - bottom - 20, 0))
-
-        return MenuTrigger(minX: area.minX - baseX,
-                           maxX: max(area.maxX - side - baseX, area.minX - baseX),
-                           minY: area.minY - baseY,
-                           maxY: max(area.maxY - side - baseY, area.minY - baseY),
-                           isOpen: state.menuOpen,
-                           action: state.toggleMenu,
-                           initialOrigin: OverlayStore.origin(for: "trigger"),
-                           onOriginChange: { OverlayStore.setOrigin($0, for: "trigger") })
-            .offset(x: baseX, y: baseY)
-    }
-
-    // MARK: - Меню
-
-    private func panel(size: CGSize, top: CGFloat, bottom: CGFloat, width: CGFloat) -> some View {
-        let baseX = (size.width - width) / 2
-        // не по центру, а в свободной полосе под кнопкой Start,
-        // чтобы сразу не закрывать Exit
-        let baseY = size.height * 0.74 - panelHeight / 2
-        let area = CGRect(x: 10,
-                          y: top + 10,
-                          width: max(size.width - 20, 0),
-                          height: max(size.height - top - bottom - 20, 0))
-
-        return MenuPanel(tab: $state.tab,
-                         isRunning: state.running,
-                         width: width,
-                         height: panelHeight,
-                         minX: area.minX - baseX,
-                         maxX: max(area.maxX - width - baseX, area.minX - baseX),
-                         minY: area.minY - baseY,
-                         maxY: max(area.maxY - panelHeight - baseY, area.minY - baseY),
-                         onClose: state.closeMenu,
-                         onUnload: state.unload,
-                         telegramURL: URL(string: "https://t.me/ascentios")!,
-                         initialOrigin: OverlayStore.origin(for: "panel"),
-                         onOriginChange: { OverlayStore.setOrigin($0, for: "panel") })
-            .offset(x: baseX, y: baseY)
     }
 }
 
