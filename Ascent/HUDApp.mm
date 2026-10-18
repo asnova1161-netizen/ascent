@@ -42,6 +42,14 @@
 // Имя уведомления, которым можно попросить оверлей погаснуть (как в TrollSpeed).
 #define ASCENT_NOTIFY_DISMISSAL "com.ascentios.ascent.hud.dismissal"
 
+// Тапы разбираем прямо в оверлее (handleRawTouchPhase:...), а синтетические
+// UITouch не рассылаем: на них распознаватели жестов работали ненадёжно и
+// стреляли вместе с прямым разбором — кнопки «не нажимались»/дублировались.
+// Поставьте 0, чтобы вернуть старый путь через TSEventFetcher.
+#ifndef ASCENT_DIRECT_TAPS
+#define ASCENT_DIRECT_TAPS 1
+#endif
+
 // Сервисы GraphicsServices/BackBoardServices не слинкованы в наш бинарь
 // (они приватные), поэтому символы достаём из уже загруженных образов.
 typedef void (*AscentVoidFn)(void);
@@ -352,13 +360,18 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
         AscentLogRawFlags(isTouchDown, isTouchMove, isTouchLift, isTouchCancel,
                           isInRange, isInRangeLift, hidMask, hidTouch, location);
 
-        // Перетаскивание и прокрутку ведёт сам оверлей прямо от этих точек: на
-        // синтетических UITouch распознаватели движения срабатывают ненадёжно.
+        // Перетаскивание, прокрутка и ТАПЫ ведёт сам оверлей прямо от этих
+        // точек (см. handleRawTouchPhase:...). Синтетические UITouch больше
+        // не рассылаем: на них распознаватели жестов срабатывали ненадёжно
+        // (за них конкурировал pan-скролл и Began/Ended местами терялся),
+        // из-за чего кнопки и переключатели «не нажимались», а ещё они
+        // стреляли ВМЕСТЕ с прямым разбором тапа — двойным переключением.
         HUDOverlayView *overlay = [HUDOverlayView currentOverlay];
         if (overlay != nil) {
             [overlay handleRawTouchPhase:phase atLocation:location inWindow:keyWindow];
         }
 
+#if !ASCENT_DIRECT_TAPS
         if (pointerId > 0) {
             [TSEventFetcher receiveAXEventID:MIN(MAX(pointerId, 1), 98)
                           atGlobalCoordinate:location
@@ -366,6 +379,7 @@ static void AscentHIDEventCallback(void *target, void *refcon, void *service, vo
                                     inWindow:keyWindow
                                       onView:keyView];
         }
+#endif
     });
 }
 
