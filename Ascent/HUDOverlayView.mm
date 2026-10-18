@@ -587,22 +587,28 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if ([self isInteractiveView:hit]) { return HUDRawDragControl; }
     if (hit == _panelHeader || [hit isDescendantOfView:_panelHeader]) { return HUDRawDragPanel; }
     if (hit == _scroll || [hit isDescendantOfView:_scroll]) { return HUDRawDragScroll; }
-    // Пустая область карточки (заголовок раздела, поля вокруг стека) и сама
-    // панель тоже таскают панель — иначе панель можно было сдвинуть только за
-    // узкую шапку.
-    if (hit == _contentCard || [hit isDescendantOfView:_contentCard]) { return HUDRawDragPanel; }
+    // Пустая область карточки (заголовок раздела, поля вокруг стека) больше НЕ
+    // таскает панель. Раньше таскала — и любое нажатие на тело меню сдвигало
+    // панель с места, а смещение сохранялось, поэтому панель «уползала».
+    // Теперь её двигают ТОЛЬКО за шапку, а тело ведёт себя как содержимое.
+    if (hit == _contentCard || [hit isDescendantOfView:_contentCard]) { return HUDRawDragScroll; }
     if (hit == _panel) { return HUDRawDragPanel; }
     return HUDRawDragNone;
 }
 
-/// Порог «палец реально тянет», в точках. У квадрата он меньше (им и правда
-/// таскают), у кнопок — большой: нажатие не должно сбиваться в прокрутку.
+/// Порог «палец реально тянет», в точках. Раньше у панели он был 6 pt, у
+/// квадрата 12 — и обычное нажатие (дрожь руки при касании легко даёт 10-15 pt)
+/// превращалось в перетаскивание: квадрат и панель сдвигались с места, а
+/// смещение тут же сохранялось в файл, поэтому они «уползали» навсегда. Теперь
+/// порог большой: нажатие НИКОГДА не двигает элементы, а таскает только явное,
+/// осознанное протягивание.
 - (CGFloat)rawThresholdForTarget:(HUDRawDragTarget)target
 {
     switch (target) {
-        case HUDRawDragTrigger:  return 12.0;
-        case HUDRawDragControl:  return 40.0;
-        default:                 return 6.0;
+        case HUDRawDragTrigger: return 22.0;
+        case HUDRawDragPanel:   return 30.0;
+        case HUDRawDragControl: return 48.0;
+        default:                return 30.0;
     }
 }
 
@@ -692,13 +698,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         if (!_rawMoved && (delta.x * delta.x + delta.y * delta.y) < limit * limit) { return; }
         if (!_rawMoved) {
             _rawMoved = YES;
-            if (_rawTarget == HUDRawDragControl) {
-                // Прокрутка от управляющего элемента: перебазируем начало, чтобы
-                // содержимое не «прыгнуло» на величину порога в один кадр.
-                _rawStart = stagePoint;
-                _rawStartOffset = _scroll.contentOffset;
-                delta = CGPointZero;
-            }
+            // Перебазируем начало прямо на точку, где палец перешёл порог.
+            // Иначе элемент «прыгал» бы на величину порога в первый же кадр
+            // (для панели это 24 pt — заметный рывок). Теперь и квадрат, и
+            // панель, и прокрутка просто идут за пальцем от текущего места.
+            _rawStart = stagePoint;
+            _rawStartOffset = _scroll.contentOffset;
+            delta = CGPointZero;
             AscentHUDLog(@"[gesture] поток: тянем %@",
                          _rawTarget == HUDRawDragTrigger ? @"квадрат" :
                          (_rawTarget == HUDRawDragPanel ? @"панель" : @"содержимое вкладки"));
