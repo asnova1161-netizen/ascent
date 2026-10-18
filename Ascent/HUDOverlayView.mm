@@ -154,12 +154,12 @@ static CGRect HUDOrientationBounds(UIInterfaceOrientation orientation, CGRect bo
 #pragma mark - Оверлей
 
 static const CGFloat kTriggerSide    = 54.0;
-// Меню вертикальное: 244x448, выше ширины примерно вдвое (≈1:1.84). Раньше
-// карточка была 272x330 — шире, чем выше, из-за чего меню читалось как
-// горизонтальное. Колонку вкладок слева сохраняем, но сужаем до 64: карточка
-// содержимого при этом остаётся 158 pt, и подписи строк не обрезаются.
-static const CGFloat kPanelWidthMax  = 244.0;
-static const CGFloat kPanelHeight    = 448.0;
+// Меню вертикальное: выше, чем шире. Габарит задаём ДИАПАЗОНОМ, а не жёстко:
+// в ландшафте высота сцены всего ≈375 pt минус безопасные зоны, поэтому панель
+// высотой 448 физически не помещалась и рисовалась обрезанной. Фактический
+// размер считает panelSizeForArea: — он же держит пропорцию вертикальной.
+static const CGFloat kPanelWidthMax  = 232.0;   // ширина меню
+static const CGFloat kPanelHeightMax = 300.0;   // высота меню (влезает и в ландшафт)
 static const CGFloat kHeaderHeight   = 46.0;
 
 // Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
@@ -173,9 +173,8 @@ static const NSTimeInterval kRawTapDebounce     = 0.12;  // гасит повт�
 
 // Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
 // карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
-// раскладки, поэтому они — константы. Вкладки держим плотными, как на макете:
-// строка в 31 pt на 448 pt карточки даёт те же пропорции, что и на фото.
-static const CGFloat kSidebarWidth   = 64.0;    // ширина колонки вкладок
+// раскладки, поэтому они — константы. Вкладки держим плотными, как на макете.
+static const CGFloat kSidebarWidth   = 60.0;    // ширина колонки вкладок
 static const CGFloat kTabRowHeight   = 31.0;    // высота строки вкладки
 static const CGFloat kCardInset      = 8.0;     // отступ карточки от края панели
 static const CGFloat kSectionTop     = 32.0;    // высота полосы заголовка раздела
@@ -821,11 +820,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 
     if (_rawTarget == HUDRawDragPanel) {
-        CGFloat panelWidth = _panel.bounds.size.width;
+        CGSize panelSize = _panel.bounds.size;
         CGPoint center = CGPointMake(_rawStartCenter.x + delta.x, _rawStartCenter.y + delta.y);
-        center = [self clampPanelCenter:center width:panelWidth];
+        center = [self clampPanelCenter:center size:panelSize];
         _panel.center = center;
-        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
+        _panelOffset = [self panelOffsetForCenter:center size:panelSize];
         return;
     }
 
@@ -852,9 +851,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 
     if (_rawTarget == HUDRawDragPanel) {
-        CGFloat panelWidth = _panel.bounds.size.width;
-        CGPoint center = [self clampPanelCenter:_panel.center width:panelWidth];
-        _panelOffset = [self panelOffsetForCenter:center width:panelWidth];
+        CGSize panelSize = _panel.bounds.size;
+        CGPoint center = [self clampPanelCenter:_panel.center size:panelSize];
+        _panelOffset = [self panelOffsetForCenter:center size:panelSize];
         HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
         HUDOverlaySetNumber(@"hud.panel.y", _panelOffset.height);
         AscentHUDLog(@"[gesture] панель: перетаскивание закончилось, смещение=(%.0f, %.0f)",
@@ -1058,7 +1057,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 - (void)buildPanel
 {
-    _panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kPanelWidthMax, kPanelHeight)];
+    _panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kPanelWidthMax, kPanelHeightMax)];
     _panel.backgroundColor = HUDFill();
     _panel.layer.cornerRadius = 20.0;
     _panel.layer.borderWidth = 1.0;
@@ -1308,15 +1307,33 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 #pragma mark - Панель (раскладка)
 
+/// Размер панели под фактическую площадь сцены. Высота ограничена площадью
+/// (в ландшафте сцена всего ≈375 pt, и панель в 448 не помещалась), ширина —
+/// константой. Пропорцию держим ВЕРТИКАЛЬНОЙ: панель обязана быть выше, чем
+/// шире, иначе меню читается как горизонтальное — это и было главной жалобой.
+- (CGSize)panelSizeForArea:(CGRect)area
+{
+    CGFloat width = MIN(MAX(area.size.width - 44.0, 0), kPanelWidthMax);
+    CGFloat height = MIN(kPanelHeightMax, MAX(area.size.height, 0));
+
+    // Если площадь низкая, высоту подрезаем — тогда подрезаем и ширину, иначе
+    // пропорция «перевернётся» в горизонталь.
+    CGFloat limit = floor(height / 1.2);
+    if (width > limit) {
+        width = MAX(limit, 180.0);
+    }
+    return CGSizeMake(width, height);
+}
+
 /// Держим панель внутри безопасной зоны. Считается всегда — и во время
 /// перетаскивания тоже: уехать за край экрана панель не может в принципе, а
 /// любой повторный расчёт раскладки даёт ровно ту же точку (перетаскивание
 /// двигало панель «рывками» именно потому, что раскладка откатывала её назад).
-- (CGPoint)clampPanelCenter:(CGPoint)center width:(CGFloat)panelWidth
+- (CGPoint)clampPanelCenter:(CGPoint)center size:(CGSize)panelSize
 {
     CGRect area = [self triggerArea];
-    CGFloat halfW = panelWidth / 2.0;
-    CGFloat halfH = kPanelHeight / 2.0;
+    CGFloat halfW = panelSize.width / 2.0;
+    CGFloat halfH = panelSize.height / 2.0;
     CGFloat minX = area.origin.x + halfW;
     CGFloat maxX = MAX(area.origin.x + area.size.width - halfW, minX);
     CGFloat minY = area.origin.y + halfH;
@@ -1327,13 +1344,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 }
 
 /// Смещение панели от базовой позиции — то, что сохраняется в общий файл.
-- (CGSize)panelOffsetForCenter:(CGPoint)center width:(CGFloat)panelWidth
+- (CGSize)panelOffsetForCenter:(CGPoint)center size:(CGSize)panelSize
 {
     CGRect stage = [self stageBounds];
-    CGFloat baseX = (stage.size.width - panelWidth) / 2.0;
-    CGFloat baseY = stage.size.height * 0.74 - kPanelHeight / 2.0;
-    return CGSizeMake(center.x - (baseX + panelWidth / 2.0),
-                      center.y - (baseY + kPanelHeight / 2.0));
+    CGFloat baseX = (stage.size.width - panelSize.width) / 2.0;
+    CGFloat baseY = stage.size.height * 0.74 - panelSize.height / 2.0;
+    return CGSizeMake(center.x - (baseX + panelSize.width / 2.0),
+                      center.y - (baseY + panelSize.height / 2.0));
 }
 
 - (void)layoutPanel
@@ -1347,14 +1364,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (_dragging && _rawMoved) { return; }
 
     CGRect stage = [self stageBounds];
-    CGFloat panelWidth = MIN(MAX(stage.size.width - 44.0, 0), kPanelWidthMax);
-    CGSize panelSize = CGSizeMake(panelWidth, kPanelHeight);
-    CGFloat baseX = (stage.size.width - panelWidth) / 2.0;
-    CGFloat baseY = stage.size.height * 0.74 - kPanelHeight / 2.0;
+    CGSize panelSize = [self panelSizeForArea:[self triggerArea]];
+    CGFloat baseX = (stage.size.width - panelSize.width) / 2.0;
+    CGFloat baseY = stage.size.height * 0.74 - panelSize.height / 2.0;
 
-    CGPoint center = CGPointMake(baseX + panelWidth / 2.0 + _panelOffset.width,
-                                 baseY + kPanelHeight / 2.0 + _panelOffset.height);
-    center = [self clampPanelCenter:center width:panelWidth];
+    CGPoint center = CGPointMake(baseX + panelSize.width / 2.0 + _panelOffset.width,
+                                 baseY + panelSize.height / 2.0 + _panelOffset.height);
+    center = [self clampPanelCenter:center size:panelSize];
 
     _panel.bounds = CGRectMake(0, 0, panelSize.width, panelSize.height);
     _panel.center = center;
@@ -1474,9 +1490,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Подпись задаём ЯВНО и ровно по высоте строки: у UILabel иначе
     // «тянется» высота (autoresizing) от нулевого размера строки, и текст
     // уезжает ниже её середины — надписи выглядели сдвинутыми вниз.
+    //
+    // Отступы уменьшены (8 и 8 вместо 14 и 10): меню стало вертикальным, и
+    // карточка содержимого сузилась до 150 pt, иначе «Distance» обрезалось.
     for (UIView *sub in row.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
-            sub.frame = CGRectMake(14, 0, width - 80.0, kSwitchRowHeight);
+            sub.frame = CGRectMake(8, 0, width - 73.0, kSwitchRowHeight);
         }
     }
 
@@ -1484,7 +1503,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (toggleWidth <= 0) { toggleWidth = 51.0; }
     CGFloat toggleHeight = toggle.bounds.size.height;
     if (toggleHeight <= 0) { toggleHeight = 31.0; }
-    toggle.frame = CGRectMake(width - toggleWidth - 10,
+    toggle.frame = CGRectMake(width - toggleWidth - 8,
                               (kSwitchRowHeight - toggleHeight) / 2.0,
                               toggleWidth, toggleHeight);
     *y += kSwitchRowHeight + kSwitchRowGap;
