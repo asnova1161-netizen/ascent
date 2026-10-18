@@ -97,17 +97,58 @@ static UIColor *HUDColor(double r, double g, double b)
 }
 
 // Палитра — как в меню-эталоне (MY IMGUI): окно #242424, панельки #1a1a1a,
-// красный акцент #ff1a1a, заголовок приглушённый серо-голубой #647477.
+// красный акцент #ff1a1a (заголовок и активная вкладка берут цвет из
+// палитры акцентов — см. HUDMenuAccent()).
 static UIColor *HUDFill(void)      { return HUDColor(0.141176, 0.141176, 0.141176); }
 static UIColor *HUDCard(void)      { return HUDColor(0.1, 0.1, 0.1); }
 static UIColor *HUDAccent(void)    { return HUDColor(1.0, 0.1, 0.1); }
-static UIColor *HUDTitleMuted(void){ return HUDColor(0.392, 0.453, 0.464); }
 static UIColor *HUDLine(void)      { return [UIColor colorWithWhite:1.0 alpha:0.12]; }
 static UIColor *HUDDim(void)       { return [UIColor colorWithWhite:1.0 alpha:0.55]; }
 static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
+
+// Палитра акцентных цветов меню (вкладка Misc, строка accent color). Индекс
+// хранится в plist (hud.accent), а сам выбранный цвет кэшируется в static:
+// HUDOverlayNumber читает файл СИНХРОННО, а HUDMenuAccent() спрашивают на
+// каждом кадре раскладки (цвет активной вкладки, полоска-индикатор, заголовок)
+// — без кэша это было бы чтение файла десятки раз в секунду.
+static const CGFloat kMenuAccentPalette[][3] = {
+    { 1.000, 0.100, 0.100 },  // 0 — красный (по умолчанию, как HUDAccent)
+    { 1.000, 0.584, 0.000 },  // 1 — оранжевый
+    { 0.188, 0.827, 0.345 },  // 2 — зелёный
+    { 0.039, 0.518, 1.000 },  // 3 — синий
+    { 0.686, 0.322, 0.871 },  // 4 — фиолетовый
+};
+static const NSInteger kMenuAccentCount = sizeof(kMenuAccentPalette) / sizeof(kMenuAccentPalette[0]);
+static NSInteger sMenuAccentIndex = 0;
+
+/// Читаем сохранённый индекс ровно ОДИН раз — при создании оверлея
+/// (см. initWithFrame:). Дальше работает только кэш.
+static void HUDMenuAccentLoad(void)
+{
+    static BOOL loaded = NO;
+    if (loaded) { return; }
+    loaded = YES;
+    NSInteger index = (NSInteger)HUDOverlayNumber(@"hud.accent", 0);
+    if (index < 0 || index >= kMenuAccentCount) { index = 0; }
+    sMenuAccentIndex = index;
+}
+
+static UIColor *HUDMenuAccent(void)
+{
+    return HUDColor(kMenuAccentPalette[sMenuAccentIndex][0],
+                    kMenuAccentPalette[sMenuAccentIndex][1],
+                    kMenuAccentPalette[sMenuAccentIndex][2]);
+}
+
+static void HUDMenuAccentSet(NSInteger index)
+{
+    if (index < 0 || index >= kMenuAccentCount) { return; }
+    sMenuAccentIndex = index;
+    HUDOverlaySetNumber(@"hud.accent", index);
+}
 
 static UILabel *HUDLabel(NSString *text, CGFloat size, UIFontWeight weight)
 {
@@ -519,7 +560,15 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    UILabel *_configCaption;
+    // Вкладка Misc: строка accent color — свотч слева от надписи, палитра
+    // чипов справа (тап по чипу меняет акцент, см. applyMenuAccentIndex:).
+    UIView *_accentRow;
+    UIView *_accentSwatch;
+    UILabel *_accentLabel;
+    NSMutableArray<UIView *> *_accentChips;
+    // Запись экрана/AirPlay: панель и квадрат скрыты, пока UIScreen.isCaptured
+    // (вкладка Misc, переключатель overlay).
+    BOOL _captureHidden;
     NSMutableArray<UISwitch *> *_switches;
     NSMutableArray<UISlider *> *_sliders;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
@@ -628,6 +677,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _configRowsDirty = YES;
     _keyboardFrame = CGRectZero;
 
+    // Акцентный цвет меню: читаем сохранённый индекс ДО сборки панели —
+    // buildPanel/buildContent красят заголовок и полоску этим цветом.
+    // Дальше работает только кэш (чтение файла на каждый кадр недопустимо).
+    HUDMenuAccentLoad();
+
     [self buildTrigger];
     [self buildPanel];
     [self startOrientationObserver];
@@ -637,8 +691,20 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // нет (то есть HUD-оверлей не поднялся).
     HUDOverlaySetFlag(@"hud.overlay", YES);
 
-    _trigger.hidden = NO;
-    _trigger.layer.opacity = 1.0f;
+    // Запись экрана/AirPlay прячет панель и квадрат при включённом overlay
+    // (вкладка Misc). Уведомление дёшевое и приходит только при смене захвата.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(screenCaptureChanged:)
+                                                 name:UIScreenCapturedDidChangeNotification
+                                               object:nil];
+    [self applyCaptureVisibility];
+
+    // Если HUD поднялся во время записи экрана, applyCaptureVisibility уже
+    // спрятал квадрат — не возвращаем его насильно.
+    if (!_captureHidden) {
+        _trigger.hidden = NO;
+        _trigger.layer.opacity = 1.0f;
+    }
 
     AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 5), bounds=%@", NSStringFromCGRect(frame));
     return self;
@@ -656,6 +722,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *cursor = view;
     while (cursor != nil && cursor != _stage && cursor != _panel) {
         if ([cursor isKindOfClass:[UIControl class]]) { return YES; }
+        if (cursor == _accentRow) { return YES; }
         if ([_configRows indexOfObjectIdenticalTo:cursor] != NSNotFound) { return YES; }
         if ([self switchInRow:cursor] != nil) { return YES; }
         if ([self sliderInGroup:cursor] != nil) { return YES; }
@@ -827,12 +894,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                 _rawArmed = NO;
                 return;
             }
-            // Перенос уже идёт и идёт 1:1. Отсчёт НЕ трогаем: раньше резкий
-            // шаг обрывал перенос и перебазировал его — элемент замирал, а
-            // дальше навсегда отставал от пальца на величину скачка (это и был
-            // «лаг» при передвижении). Шаг ограничит applyRawDragDelta, а
-            // следующее нормальное событие вернёт элемент на истинный путь.
-            AscentHUDLog(@"[gesture] рывок %.0f pt в переносе — шаг ограничен, перенос не рвём", stepLen);
+            // Перенос уже идёт 1:1, а шаг больше предела настоящего пальца —
+            // это мусорное событие с координатами ЧУЖОГО касания, а не рывок.
+            // Раньше LimitStep преследовал такую точку: элемент прыгал до
+            // kRawDragStepMax к чужой точке и возвращался обратно на
+            // следующем событии («телепорт куда-то и сразу обратно» —
+            // жалоба на квадрат при перетаскивании). Пропускаем событие
+            // ЦЕЛИКОМ: элемент не двигается и отсчёт не трогаем. _rawLastPoint
+            // уже обновлён выше, поэтому фризов нет; движение абсолютное (от
+            // _rawStart), так что после мусорного события следующее НОРМАЛЬНОЕ
+            // событие ставит элемент ровно на истинный путь пальца.
+            AscentHUDLog(@"[gesture] рывок %.0f pt в переносе — мусорное событие, пропускаю", stepLen);
+            return;
         }
 
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
@@ -880,6 +953,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     // в момент захвата.
                     _rawStart = stagePoint;
                     _rawStartCenter = _panel.center;
+                    // ЛОКАЛЬНАЯ delta посчитана ВЫШЕ от СТАРОГО _rawStart —
+                    // применить её сейчас после перебазации значит увести панель
+                    // на весь путь прокрутки и вернуть обратно следующим
+                    // событием («телепортируется куда-то и сразу обратно» —
+                    // жалоба на захват за чёрный фон). Считаем движение от
+                    // НОВОЙ стартовой точки: оно равно нулю.
+                    delta = CGPointZero;
                 }
                 AscentHUDLog(@"[gesture] перенос %@ (%.0f мс)",
                              _rawTarget == HUDRawDragTrigger ? @"квадрата" : @"панели",
@@ -1036,6 +1116,19 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
         [self switchChanged:toggle];
         return;
+    }
+
+    // Строка accent color (вкладка Misc): тап по чипу палитры меняет акцент
+    // меню (цвет активной вкладки, полоски-индикатора и @ascentios).
+    if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
+        CGPoint local = [_accentRow convertPoint:point fromView:self];
+        for (NSInteger i = 0; i < (NSInteger)_accentChips.count; i++) {
+            if (CGRectContainsPoint(_accentChips[i].frame, local)) {
+                [self applyMenuAccentIndex:i];
+                return;
+            }
+        }
+        return;   // тап по строке, но не по чипу — ничего не делаем
     }
 
     for (UISlider *slider in _sliders) {
@@ -1318,7 +1411,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (_panelOpen) {
         [self reloadCheatControls];
         [self selectTab:_tab];
-        _panel.hidden = NO;
+        // _captureHidden: при записи экрана панель остаётся скрытой, даже если
+        // квадрат «открылся» — иначе меню засветилось бы в записи.
+        _panel.hidden = _captureHidden;
     } else {
         // При закрытии гасим клавиатуру: она могла остаться от поля имени
         // конфига, и без этого висела бы поверх игры.
@@ -1367,7 +1462,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel addSubview:_panelHeader];
 
     _panelTitle = HUDLabel(@"@ascentios", 14, UIFontWeightHeavy);
-    _panelTitle.textColor = HUDTitleMuted();
+    // Цвет заголовка управляется выбранным акцентом (вкладка Misc).
+    _panelTitle.textColor = HUDMenuAccent();
     // Колонка узкая (как у эталона), поэтому при нехватке ширины заголовок
     // ужимается, а не обрезается многоточием.
     _panelTitle.adjustsFontSizeToFitWidth = YES;
@@ -1402,7 +1498,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     _tabIndicator = [[UIView alloc] initWithFrame:CGRectZero];
-    _tabIndicator.backgroundColor = HUDAccent();
+    _tabIndicator.backgroundColor = HUDMenuAccent();
     _tabIndicator.layer.cornerRadius = 1.5;
     [_panel addSubview:_tabIndicator];
 
@@ -1444,14 +1540,16 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)buildContent
 {
     _switches = [NSMutableArray array];
-    // Только два переключателя: esp и aimbot. Под-опции ESP (боксы, здоровье,
-    // имена, дистанция, линии) из меню убраны — вкладка Esp осталась с одним
-    // Enable, а холст ESP рисует по умолчанию. Порядок важен:
+    // Три переключателя: esp, aimbot и overlay (вкладка Misc — прячет панель
+    // и квадрат от записи экрана). Под-опции ESP (боксы, здоровье, имена,
+    // дистанция, линии) из меню убраны. Порядок важен:
     // layoutContentForTab: обращается к элементам по индексу.
     NSArray<NSString *> *switchKeys = @[ @"cheat.esp",
-                                         @"cheat.aimbot" ];
+                                         @"cheat.aimbot",
+                                         @"misc.overlay" ];
     NSArray<NSString *> *switchTitles = @[ @"Enable",
-                                           @"Aimbot" ];
+                                           @"Aimbot",
+                                           @"Overlay" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
         // Шрифт 12 (а не 13): карточка содержимого сузилась до 158 pt, чтобы
@@ -1478,6 +1576,39 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [_switches addObject:toggle];
     }
 
+    // Строка accent color (вкладка Misc): свотч текущего цвета слева от
+    // надписи, палитра чипов справа — как в меню-эталоне MY IMGUI. Тап по
+    // чипу меняет акцент (см. performTapAtPoint:), выбранный чип обведён.
+    _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
+    _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+    _accentRow.layer.cornerRadius = 12.0;
+    _accentRow.autoresizingMask = UIViewAutoresizingNone;
+    _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
+    _accentSwatch.backgroundColor = HUDMenuAccent();
+    _accentSwatch.layer.cornerRadius = 5.0;
+    [_accentRow addSubview:_accentSwatch];
+    _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
+    _accentLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    _accentLabel.autoresizingMask = UIViewAutoresizingNone;
+    // Длинную подпись ужимаем, а не обрезаем: палитра чипов должна стоять
+    // справа даже на узкой карточке.
+    _accentLabel.adjustsFontSizeToFitWidth = YES;
+    _accentLabel.minimumScaleFactor = 0.8;
+    [_accentRow addSubview:_accentLabel];
+    _accentChips = [NSMutableArray array];
+    for (NSInteger i = 0; i < kMenuAccentCount; i++) {
+        UIView *chip = [[UIView alloc] initWithFrame:CGRectZero];
+        chip.backgroundColor = HUDColor(kMenuAccentPalette[i][0],
+                                        kMenuAccentPalette[i][1],
+                                        kMenuAccentPalette[i][2]);
+        chip.layer.cornerRadius = 4.0;
+        [_accentRow addSubview:chip];
+        [_accentChips addObject:chip];
+    }
+    [_scroll addSubview:_accentRow];
+    // Обводка выбранного чипа — сразу при сборке (индекс уже загружен в init).
+    [self refreshAccentChips];
+
     // Слайдеры fov/smooth/delay из меню убраны по заказу: вкладка Config
     // осталась с полем имени, кнопкой создания и списком конфигов. Массивы
     // слайдеров оставляем пустыми — обходы по ним (снапшот конфига,
@@ -1486,18 +1617,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _sliderValueLabels = [NSMutableDictionary dictionary];
 
     _unloadButton = [self makeFlatButton:@"unload"];
-    _unloadButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];
+    // Шрифт как у подписей вкладок (12 Semibold), а не 14 Heavy — по заказу.
+    _unloadButton.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
     _unloadButton.backgroundColor = HUDGray();
     _unloadButton.layer.cornerRadius = 12.0;
     [_unloadButton addTarget:self action:@selector(unloadTapped) forControlEvents:UIControlEventTouchUpInside];
     [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
     [_scroll addSubview:_unloadButton];
-
-    _configCaption = HUDLabel(@"память игры читает HUD-процесс: переключатели выше только включают доступ к ней",
-                              10.5, UIFontWeightRegular);
-    _configCaption.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
-    _configCaption.numberOfLines = 0;
-    [_scroll addSubview:_configCaption];
 
     // Имя нового конфига. Тап по полю (см. performTapAtPoint:) вызывает
     // СИСТЕМНУЮ клавиатуру iPhone — как обычное поле ввода в iOS.
@@ -1679,8 +1805,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         button.frame = CGRectMake(tabX, rowY, tabW, tabRowH);
         BOOL selected = (i == _tab);
         button.backgroundColor = [UIColor clearColor];
-        // Неактивные вкладки белые, активная — красная (как в эталоне).
-        [button setTitleColor:(selected ? HUDAccent() : [UIColor whiteColor]) forState:UIControlStateNormal];
+        // Неактивные вкладки белые, активная — цветом выбранного акцента
+        // (как в эталоне, только цвет выбирается на вкладке Misc).
+        [button setTitleColor:(selected ? HUDMenuAccent() : [UIColor whiteColor]) forState:UIControlStateNormal];
         if (selected) {
             _tabIndicator.hidden = NO;
             CGFloat indicatorH = MAX(tabRowH * 0.68, 8.0);
@@ -1712,7 +1839,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (UISwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
-    _configCaption.hidden = YES;
+    _accentRow.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
@@ -1725,10 +1852,30 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Вкладка Aim: только основной переключатель. Triggerbot убран.
         [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
     } else if (tab == 2) {
-        // Misc: только кнопка unload — подписи под ней больше нет.
+        // Misc: переключатель overlay, строка accent color и кнопка unload.
+        // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
+        [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
+
+        // Строка accent color: свотч слева от надписи, палитра чипов справа.
+        _accentRow.hidden = NO;
+        _accentRow.frame = CGRectMake(x, y, rowWidth, 34.0);
+        _accentSwatch.frame = CGRectMake(10.0, (34.0 - 16.0) / 2.0, 16.0, 16.0);
+        // Надпись между свотчем и палитрой; при нехватке ширины ужимается.
+        CGFloat paletteW = (CGFloat)_accentChips.count * 16.0
+                         + MAX((CGFloat)_accentChips.count - 1, 0.0) * 4.0;
+        _accentLabel.frame = CGRectMake(32.0, 0.0,
+                                        MAX(rowWidth - 32.0 - paletteW - 12.0, 40.0), 34.0);
+        CGFloat chipX = rowWidth - 10.0 - paletteW;
+        for (UIView *chip in _accentChips) {
+            chip.frame = CGRectMake(chipX, (34.0 - 16.0) / 2.0, 16.0, 16.0);
+            chipX += 20.0;   // 16 чип + 4 зазор
+        }
+        y += 34.0 + 10.0;
+
+        // unload: высота 32 вместо 46 — по заказу кнопка меньше.
         _unloadButton.hidden = NO;
-        _unloadButton.frame = CGRectMake(x, y, rowWidth, 46);
-        y += 46 + 10;
+        _unloadButton.frame = CGRectMake(x, y, rowWidth, 32);
+        y += 32 + 10;
     } else {
         // Слайдеры fov/smooth/delay из вкладки убраны — сразу список конфигов.
 
@@ -1758,11 +1905,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
             y += 34.0 + 6.0;
         }
         if (_configRows.count > 0) { y += 2.0; }
-
-        _configCaption.hidden = NO;
-        CGSize need = [_configCaption sizeThatFits:CGSizeMake(rowWidth, CGFLOAT_MAX)];
-        _configCaption.frame = CGRectMake(x, y, rowWidth, need.height);
-        y += need.height + 6;
     }
 
     _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
@@ -1982,6 +2124,98 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)switchChanged:(UISwitch *)sender
 {
     HUDOverlaySetFlag(sender.accessibilityIdentifier, sender.isOn);
+    if ([sender.accessibilityIdentifier isEqualToString:@"misc.overlay"]) {
+        // Сразу применяем видимость: если запись уже идёт, панель и квадрат
+        // исчезнут в тот же кадр.
+        [self applyCaptureVisibility];
+    }
+}
+
+#pragma mark - Скрытие при записи экрана (вкладка Misc)
+
+/// misc.overlay — панель и триггер не должны попадать в запись экрана или
+/// зеркалирование. iOS отдаёт приложению надёжный признак захвата только для
+/// ЗАПИСИ/AirPlay (UIScreen.isCaptured + уведомление о смене захвата), поэтому
+/// запись скрывается всегда. Дополнительно пробуем приватный флаг secure у
+/// окна — secure-окна не попадают в скриншоты; если селектора на этой версии
+/// UIKit нет, вызов просто пропускается.
+- (void)applyCaptureVisibility
+{
+    BOOL enabled = HUDOverlayFlag(@"misc.overlay", NO);
+    BOOL wantHide = enabled && UIScreen.mainScreen.isCaptured;
+    [self setWindowSecure:enabled];
+    if (wantHide == _captureHidden) { return; }
+    _captureHidden = wantHide;
+    if (wantHide) {
+        // Скрытая панель не должна продолжать чужой жест.
+        [self endRawGesture];
+        _panel.hidden = YES;
+        _trigger.hidden = YES;
+        AscentHUDLog(@"HUD: запись экрана — панель и квадрат скрыты");
+    } else {
+        _panel.hidden = !_panelOpen;
+        _trigger.hidden = NO;
+        AscentHUDLog(@"HUD: запись экрана закончилась — панель и квадрат показаны");
+    }
+}
+
+- (void)screenCaptureChanged:(NSNotification *)note
+{
+    (void)note;
+    [self applyCaptureVisibility];
+}
+
+/// Приватный флаг secure окна (если есть на этой версии UIKit): secure-окна
+/// исключаются из скриншотов. Селектор проверяем — без него это тихий no-op.
+- (void)setWindowSecure:(BOOL)secure
+{
+    UIWindow *window = self.window;
+    SEL selector = NSSelectorFromString(@"setSecure:");
+    if (window == nil || ![window respondsToSelector:selector]) { return; }
+    NSMethodSignature *signature = [window methodSignatureForSelector:selector];
+    if (signature == nil) { return; }
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.target = window;
+    invocation.selector = selector;
+    BOOL value = secure;
+    [invocation setArgument:&value atIndex:2];
+    [invocation invoke];
+    AscentHUDLog(@"HUD: окно secure=%d (приватный флаг)", (int)secure);
+}
+
+/// Окно появляется позже создания оверлея — повторяем флаг secure, если
+/// overlay уже включён.
+- (void)didMoveToWindow
+{
+    [super didMoveToWindow];
+    if (self.window != nil) {
+        [self setWindowSecure:HUDOverlayFlag(@"misc.overlay", NO)];
+    }
+}
+
+#pragma mark - Accent color (вкладка Misc)
+
+/// Тап по чипу палитры: сохраняем индекс, перекрашиваем акцентные элементы.
+- (void)applyMenuAccentIndex:(NSInteger)index
+{
+    HUDMenuAccentSet(index);
+    _accentSwatch.backgroundColor = HUDMenuAccent();
+    _panelTitle.textColor = HUDMenuAccent();
+    _tabIndicator.backgroundColor = HUDMenuAccent();
+    [self refreshAccentChips];
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    AscentHUDLog(@"[accent] выбран цвет №%ld", (long)index);
+}
+
+/// Обводка выбранного чипа палитры (белая рамка — выделение).
+- (void)refreshAccentChips
+{
+    for (NSInteger i = 0; i < (NSInteger)_accentChips.count; i++) {
+        UIView *chip = _accentChips[i];
+        chip.layer.borderWidth = (i == sMenuAccentIndex) ? 2.0 : 0.0;
+        chip.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
+    }
 }
 
 - (void)sliderChanged:(UISlider *)sender
