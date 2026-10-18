@@ -51,23 +51,42 @@ static BOOL HUDOverlayFlag(NSString *key, BOOL fallback)
     return HUDOverlayNumber(key, fallback ? 1 : 0) > 0.5;
 }
 
-/// Значение по умолчанию для строки меню. У опций ESP, включённых по умолчанию,
-/// fallback YES — иначе меню показывало бы «выключено», а холст ESP рисовал бы
-/// боксы: переключатель и картинка разошлись бы.
+/// Значение по умолчанию для строки меню. Под-опций ESP в меню больше нет
+/// (остался только Enable): их старые значения в файле нормализуются при
+/// подъёме оверлея (см. initWithFrame:), здесь по умолчанию всё выключено.
 static BOOL HUDSwitchDefault(NSString *key)
 {
-    if ([key isEqualToString:@"esp.box"] ||
-        [key isEqualToString:@"esp.health"] ||
-        [key isEqualToString:@"esp.name"] ||
-        [key isEqualToString:@"esp.distance"]) {
-        return YES;
-    }
+    (void)key;
     return NO;
 }
 
 static void HUDOverlaySetFlag(NSString *key, BOOL value)
 {
     HUDOverlaySetNumber(key, value ? 1 : 0);
+}
+
+#pragma mark - Конфиги (имя → набор настроек)
+
+/// Отдельный файл конфигов: словарь «имя → {ключ → число}». Свой файл, а не
+/// общий overlay.plist — там лежат позиции и служебные флаги, их не трогаем.
+static NSString *AscentConfigsPath(void)
+{
+    NSString *dir = AscentStateDirectory();
+    if (dir.length == 0) { dir = NSTemporaryDirectory(); }
+    return [dir stringByAppendingPathComponent:@"ascent.configs.plist"];
+}
+
+static NSDictionary *AscentConfigsRead(void)
+{
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:AscentConfigsPath()];
+    return [dict isKindOfClass:[NSDictionary class]] ? dict : @{};
+}
+
+static void AscentConfigsWrite(NSDictionary *dict)
+{
+    NSString *path = AscentConfigsPath();
+    [dict writeToFile:path atomically:YES];
+    chmod([path fileSystemRepresentation], 0666);
 }
 
 #pragma mark - Оформление
@@ -77,9 +96,12 @@ static UIColor *HUDColor(double r, double g, double b)
     return [UIColor colorWithRed:r green:g blue:b alpha:1.0];
 }
 
-static UIColor *HUDFill(void)      { return HUDColor(0.145, 0.145, 0.160); }
-static UIColor *HUDCard(void)      { return HUDColor(0.075, 0.075, 0.085); }
-static UIColor *HUDAccent(void)    { return HUDColor(0.91, 0.17, 0.19); }
+// Палитра — как в меню-эталоне (MY IMGUI): окно #242424, панельки #1a1a1a,
+// красный акцент #ff1a1a, заголовок приглушённый серо-голубой #647477.
+static UIColor *HUDFill(void)      { return HUDColor(0.141176, 0.141176, 0.141176); }
+static UIColor *HUDCard(void)      { return HUDColor(0.1, 0.1, 0.1); }
+static UIColor *HUDAccent(void)    { return HUDColor(1.0, 0.1, 0.1); }
+static UIColor *HUDTitleMuted(void){ return HUDColor(0.392, 0.453, 0.464); }
 static UIColor *HUDLine(void)      { return [UIColor colorWithWhite:1.0 alpha:0.12]; }
 static UIColor *HUDDim(void)       { return [UIColor colorWithWhite:1.0 alpha:0.55]; }
 static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
@@ -171,7 +193,6 @@ static const CGFloat kPanelRatio     = 1.55;
 // барьер по бокам. С запасом панель доезжает и до левого края, и до правого,
 // и проезжает между ними; по вертикали ограничений нет вовсе.
 static const CGFloat kPanelTravelMin = 45.0;
-static const CGFloat kHeaderHeight   = 42.0;    // шапка: заголовок @ascentios
 
 // Тайминги жеста. AX/HID-поток на iOS 15 часто теряет событие «подъём», и без
 // жёсткого контроля старое начало жеста оставалось бы висеть навсегда: следующее
@@ -212,11 +233,10 @@ static const CGFloat kRawDragArmMove       = 14.0;
 // элемент возвращается ровно на место, где был в момент нажатия.
 static const CGFloat kRawTapSlop           = 14.0;
 
-// Раскладка панели в стиле «карточки»: слева колонка вкладок, справа тёмная
-// карточка содержимого с заголовком раздела. Числа одни и те же для сборки и
-// раскладки, поэтому они — константы. Вкладки держим плотными, как на макете.
-static const CGFloat kSidebarWidth   = 60.0;    // ширина колонки вкладок
-static const CGFloat kTabRowHeight   = 31.0;    // высота строки вкладки
+// Раскладка панели (по образцу меню-эталона MY IMGUI): заголовок слева сверху,
+// под ним колонка вкладок, справа — тёмная карточка контента во всю высоту.
+// Размеры колонки и строк считаются от пропорций эталона прямо в layoutPanel;
+// здесь — только общие отступы, одни и те же для сборки и раскладки.
 static const CGFloat kCardInset      = 8.0;     // отступ карточки от края панели
 static const CGFloat kSectionTop     = 32.0;    // высота полосы заголовка раздела
 static const CGFloat kTriggerInset   = 14.0;
@@ -499,15 +519,24 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    UILabel *_gameProcLabel;
     UILabel *_miscCaption;
     UILabel *_configCaption;
     NSMutableArray<UISwitch *> *_switches;
     NSMutableArray<UISlider *> *_sliders;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
-    // Статус чтения игры на вкладке ESP и таймер, его обновляющий.
-    UILabel *_espStatusLabel;
-    NSTimer *_espStatusTimer;
+    // Тёмная колонка вкладок слева (лежит ВНУТРИ _panelHeader — см. buildPanel).
+    UIView *_sidebarBg;
+    // Вкладка Config: поле имени, кнопка создания и список конфигов.
+    // _configRowsDirty — «список надо пересобрать»: файл читаем только когда
+    // что-то создали/удалили, а не на каждой раскладке.
+    UITextField *_configNameField;
+    UIButton *_configCreateButton;
+    NSMutableArray<UIView *> *_configRows;
+    NSMutableArray<NSString *> *_configNames;
+    BOOL _configRowsDirty;
+    // Область системной клавиатуры в координатах оверлея: касания внутри неё
+    // отбрасываем, иначе буквы «нажимали» бы панель под клавиатурой.
+    CGRect _keyboardFrame;
     CGSize _panelOffset;
     BOOL _panelOpen;
     NSInteger _tab;
@@ -584,6 +613,19 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // этом сохраняются.
     HUDOverlaySetFlag(@"cheat.esp", NO);
     HUDOverlaySetFlag(@"cheat.aimbot", NO);
+    // Под-опций ESP в меню больше нет (остался только Enable), а старые
+    // значения лежат в общем файле. Приводим их к тому, что читает холст ESP,
+    // — иначе, например, snapline остался бы включённым навсегда, без кнопки.
+    HUDOverlaySetFlag(@"esp.box", YES);
+    HUDOverlaySetFlag(@"esp.health", YES);
+    HUDOverlaySetFlag(@"esp.name", YES);
+    HUDOverlaySetFlag(@"esp.distance", YES);
+    HUDOverlaySetFlag(@"esp.snapline", NO);
+
+    _configRows = [NSMutableArray array];
+    _configNames = [NSMutableArray array];
+    _configRowsDirty = YES;
+    _keyboardFrame = CGRectZero;
 
     [self buildTrigger];
     [self buildPanel];
@@ -603,8 +645,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 #pragma mark - Касания из потока HID (перетаскивание и прокрутка)
 
-/// Управляемый элемент: кнопка, крестик, вкладка, строка переключателя или
-/// группа слайдера. Отдельная категория нужна, чтобы НАЖАТИЕ на кнопку не
+/// Управляемый элемент: кнопка, вкладка, строка переключателя, группа слайдера
+/// или строка конфига. Отдельная категория нужна, чтобы НАЖАТИЕ на кнопку не
 /// превращалось в прокрутку: управляющим элементам даём большой порог
 /// «протяжки», и дрожь руки при нажатии остаётся тапом.
 - (BOOL)isInteractiveView:(UIView *)view
@@ -613,7 +655,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *cursor = view;
     while (cursor != nil && cursor != _stage && cursor != _panel) {
         if ([cursor isKindOfClass:[UIControl class]]) { return YES; }
-        if (cursor == _gameProcLabel) { return YES; }
+        if ([_configRows indexOfObjectIdenticalTo:cursor] != NSNotFound) { return YES; }
         if ([self switchInRow:cursor] != nil) { return YES; }
         if ([self sliderInGroup:cursor] != nil) { return YES; }
         cursor = cursor.superview;
@@ -924,20 +966,29 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 /// действие (те же обработчики, что вешаны на target'ы UIControls).
 - (void)performTapAtPoint:(CGPoint)point
 {
+    // Нажатия самой клавиатуры (она лежит поверх экрана) отбрасываем сразу:
+    // панель часто оказывается ПОД клавиатурой, и каждая буква «нажимала» бы
+    // строку под собой, а мы ещё и гасили бы клавиатуру при наборе.
+    if (!CGRectIsEmpty(_keyboardFrame) && CGRectContainsPoint(_keyboardFrame, point)) { return; }
+
     UIView *hit = [self hitTest:point withEvent:nil];
+
+    // Клавиатура открыта — тап МИМО поля гасит её (привычное iOS-«вне поля»,
+    // как по пустому месту формы). Нажатия самой клавиатуры отсечены выше,
+    // а тап по кнопке при этом тоже выполняется: сначала гасим — потом действие.
+    if (_configNameField != nil && _configNameField.isFirstResponder &&
+        (hit == nil || (hit != _configNameField && ![hit isDescendantOfView:_configNameField]))) {
+        [_configNameField resignFirstResponder];
+    }
 
     // Квадратик-триггер: нажатие только открывает/закрывает меню и никогда не
     // двигает квадрат.
     if (hit != nil && (hit == _trigger || [hit isDescendantOfView:_trigger])) { [self togglePanel]; return; }
 
-    // Шапка панели ничего не делает — панель не таскается.
+    // Заголовок и фон колонки вкладок (внутри _panelHeader) сами по себе ничего
+    // не делают — это зона переноса панели; кнопки вкладок лежат прямо в панели
+    // и проверяются ниже.
     if (hit != nil && (hit == _panelHeader || [hit isDescendantOfView:_panelHeader])) { return; }
-
-    // Подпись «процесс игры».
-    if (hit != nil && (hit == _gameProcLabel || [hit isDescendantOfView:_gameProcLabel])) {
-        [self refreshGameProcess];
-        return;
-    }
 
     // Кнопки вкладок лежат прямо в панели (tag = 100 + индекс).
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
@@ -968,6 +1019,31 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         if (![self pointIsOnScrollRow:point row:group]) { continue; }
         CGPoint local = [slider convertPoint:point fromView:self];
         [self applyTapToSlider:slider atPoint:local];
+        return;
+    }
+
+    // Вкладка Config: поле имени — вызываем системную клавиатуру.
+    if (_configNameField != nil && [self pointIsOnScrollRow:point row:_configNameField]) {
+        [_configNameField becomeFirstResponder];
+        return;
+    }
+
+    // «создать конфиг»: снимок текущих переключателей и слайдеров.
+    if (_configCreateButton != nil && [self pointIsOnScrollRow:point row:_configCreateButton]) {
+        [self createConfigTapped];
+        return;
+    }
+
+    // Строки конфигов: тап по строке (и по «▶») — запустить, тап по «✕» — удалить.
+    for (NSInteger i = 0; i < (NSInteger)_configRows.count; i++) {
+        UIView *row = _configRows[i];
+        if (![self pointIsOnScrollRow:point row:row]) { continue; }
+        CGPoint local = [row convertPoint:point fromView:self];
+        if (local.x > row.bounds.size.width - 32.0) {
+            [self deleteConfigAtIndex:i];
+        } else {
+            [self applyConfigAtIndex:i];
+        }
         return;
     }
 
@@ -1220,6 +1296,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [self selectTab:_tab];
         _panel.hidden = NO;
     } else {
+        // При закрытии гасим клавиатуру: она могла остаться от поля имени
+        // конфига, и без этого висела бы поверх игры.
+        [_configNameField resignFirstResponder];
         _panel.hidden = YES;
     }
     [self updateTriggerIcon];
@@ -1248,25 +1327,36 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 {
     _panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kPanelWidthMax, kPanelHeightMax)];
     _panel.backgroundColor = HUDFill();
-    _panel.layer.cornerRadius = 20.0;
+    _panel.layer.cornerRadius = 16.0;   // WindowRounding = 16 у эталонного окна
     _panel.layer.borderWidth = 1.0;
     _panel.layer.borderColor = HUDLine().CGColor;
     _panel.hidden = YES;
 
-    // Шапка: за неё таскаем панель. Кнопки-крестика больше нет — панель
-    // закрывается тапом по квадрату (как и было задумано).
+    // Раскладка как в меню-эталоне (MY IMGUI): заголовок слева сверху над
+    // колонкой вкладок, справа — карточка контента во всю высоту. ПОЛНОШИРИННОЙ
+    // шапки-полосы больше нет. _panelHeader — прозрачная зона переноса на ВСЮ
+    // панель: в неё входят заголовок и фон колонки вкладок, а кнопки вкладок
+    // и карточка лежат выше по z и перехватывают свои нажатия сами.
+    // Кнопки-крестика нет — панель закрывается тапом по квадрату.
     _panelHeader = [[UIView alloc] initWithFrame:CGRectZero];
     _panelHeader.backgroundColor = [UIColor clearColor];
     [_panel addSubview:_panelHeader];
 
-    _panelTitle = HUDLabel(@"@ascentios", 15, UIFontWeightHeavy);
-    _panelTitle.textColor = HUDAccent();
+    _panelTitle = HUDLabel(@"@ascentios", 14, UIFontWeightHeavy);
+    _panelTitle.textColor = HUDTitleMuted();
+    // Колонка узкая (как у эталона), поэтому при нехватке ширины заголовок
+    // ужимается, а не обрезается многоточием.
+    _panelTitle.adjustsFontSizeToFitWidth = YES;
+    _panelTitle.minimumScaleFactor = 0.85;
     [_panelHeader addSubview:_panelTitle];
 
-    UILabel *headerLine = [[UILabel alloc] initWithFrame:CGRectZero];
-    headerLine.backgroundColor = HUDLine();
-    headerLine.tag = 0;
-    [_panel addSubview:headerLine];
+    // Фон колонки вкладок: тёмный #1a1a1a со скруглением 10 (левая панель
+    // эталона). Лежит внутри _panelHeader → удержание на пустом месте колонки
+    // тащит панель, как перетаскивание окна за фон.
+    _sidebarBg = [[UIView alloc] initWithFrame:CGRectZero];
+    _sidebarBg.backgroundColor = HUDCard();
+    _sidebarBg.layer.cornerRadius = 10.0;
+    [_panelHeader addSubview:_sidebarBg];
 
     // Колонка вкладок слева. Выбранная — красным текстом плюс красная
     // полоска у правого края колонки (как в эталонном меню).
@@ -1274,8 +1364,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     NSArray<NSString *> *titles = @[ @"Esp", @"Aim", @"Misc", @"Config" ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
         UIButton *button = [self makeFlatButton:titles[i]];
-        // Колонка вкладок сужена до 64 pt (меню вертикальное), поэтому отступ
-        // подписи уменьшаем: иначе «Config» не влезало в 44 pt текста.
+        // Как в эталоне: подпись мелкая, по левому краю строки (у эталона
+        // ButtonTextAlign = (0,0)), отступ слева 8 pt.
         button.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
         button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
         button.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
@@ -1292,12 +1382,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _tabIndicator.layer.cornerRadius = 1.5;
     [_panel addSubview:_tabIndicator];
 
-    // Тёмная карточка содержимого справа: заголовок раздела и прокрутка.
+    // Тёмная карточка содержимого справа — во всю высоту панели (как в
+    // эталоне): сплошной #1a1a1a, скругление 10, без рамки.
     _contentCard = [[UIView alloc] initWithFrame:CGRectZero];
     _contentCard.backgroundColor = HUDCard();
-    _contentCard.layer.cornerRadius = 14.0;
-    _contentCard.layer.borderWidth = 1.0;
-    _contentCard.layer.borderColor = HUDLine().CGColor;
+    _contentCard.layer.cornerRadius = 10.0;
     _contentCard.clipsToBounds = YES;
     [_panel addSubview:_contentCard];
 
@@ -1320,6 +1409,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_contentCard addSubview:_scroll];
 
     [self buildContent];
+    [self startKeyboardObserver];
 
     [_stage addSubview:_panel];
 }
@@ -1330,24 +1420,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)buildContent
 {
     _switches = [NSMutableArray array];
-    // Первые два — главные переключатели (esp / aimbot). Дальше —
-    // что именно рисовать в ESP: эти ключи читает холст AscentESPHostView.
-    // Порядок важен: layoutContentForTab: обращается к элементам по индексу.
-    // Triggerbot из вкладки Aim убран: функция удалена целиком.
+    // Только два переключателя: esp и aimbot. Под-опции ESP (боксы, здоровье,
+    // имена, дистанция, линии) из меню убраны — вкладка Esp осталась с одним
+    // Enable, а холст ESP рисует по умолчанию. Порядок важен:
+    // layoutContentForTab: обращается к элементам по индексу.
     NSArray<NSString *> *switchKeys = @[ @"cheat.esp",
-                                         @"cheat.aimbot",
-                                         @"esp.box",
-                                         @"esp.health",
-                                         @"esp.name",
-                                         @"esp.distance",
-                                         @"esp.snapline" ];
+                                         @"cheat.aimbot" ];
     NSArray<NSString *> *switchTitles = @[ @"Enable",
-                                           @"Aimbot",
-                                           @"Boxes",
-                                           @"Health",
-                                           @"Names",
-                                           @"Distance",
-                                           @"Snapline" ];
+                                           @"Aimbot" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
         // Шрифт 12 (а не 13): карточка содержимого сузилась до 158 pt, чтобы
@@ -1425,17 +1505,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [_sliders addObject:slider];
     }
 
-    _gameProcLabel = HUDLabel(@"проверить процесс игры", 11.5, UIFontWeightMedium);
-    _gameProcLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
-    _gameProcLabel.textAlignment = NSTextAlignmentCenter;
-    _gameProcLabel.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
-    _gameProcLabel.layer.cornerRadius = 10.0;
-    _gameProcLabel.layer.borderWidth = 1.0;
-    _gameProcLabel.layer.borderColor = HUDLine().CGColor;
-    _gameProcLabel.userInteractionEnabled = YES;
-    _gameProcLabel.tag = 3;
-    [_scroll addSubview:_gameProcLabel];
-
     _unloadButton = [self makeFlatButton:@"unload"];
     _unloadButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];
     _unloadButton.backgroundColor = HUDGray();
@@ -1454,43 +1523,59 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _configCaption.numberOfLines = 0;
     [_scroll addSubview:_configCaption];
 
-    // Статус чтения ESP. Обновляется таймером: сообщение меняется само —
-    // процесс появился, список наполнился, смещения поправили.
-    _espStatusLabel = HUDLabel(@"esp: выключен", 10.5, UIFontWeightRegular);
-    _espStatusLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
-    _espStatusLabel.numberOfLines = 2;
-    [_scroll addSubview:_espStatusLabel];
+    // Имя нового конфига. Тап по полю (см. performTapAtPoint:) вызывает
+    // СИСТЕМНУЮ клавиатуру iPhone — как обычное поле ввода в iOS.
+    _configNameField = [[UITextField alloc] initWithFrame:CGRectZero];
+    _configNameField.placeholder = @"имя конфига";
+    _configNameField.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+    _configNameField.layer.cornerRadius = 12.0;
+    _configNameField.layer.borderWidth = 1.0;
+    _configNameField.layer.borderColor = HUDLine().CGColor;
+    _configNameField.textColor = [UIColor whiteColor];
+    _configNameField.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    _configNameField.tintColor = HUDAccent();
+    _configNameField.returnKeyType = UIReturnKeyDone;
+    _configNameField.autocapitalizationType = UITextAutocapitalizationTypeWords;
+    _configNameField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _configNameField.enablesReturnKeyAutomatically = YES;
+    UIView *fieldPad = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
+    _configNameField.leftView = fieldPad;
+    _configNameField.leftViewMode = UITextFieldViewModeAlways;
+    [_configNameField addTarget:self
+                         action:@selector(configNameReturnTapped)
+               forControlEvents:UIControlEventEditingDidEndOnExit];
+    [_scroll addSubview:_configNameField];
 
-    _espStatusTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
-                                                       target:self
-                                                     selector:@selector(refreshESPStatus)
-                                                     userInfo:nil
-                                                      repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:_espStatusTimer forMode:NSRunLoopCommonModes];
+    // «создать конфиг»: сохраняет текущие переключатели и слайдеры под именем
+    // из поля (без имени — автоимя «Config N», см. createConfigTapped).
+    _configCreateButton = [self makeFlatButton:@"создать конфиг"];
+    _configCreateButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
+    _configCreateButton.backgroundColor = HUDAccent();
+    _configCreateButton.layer.cornerRadius = 12.0;
+    [_configCreateButton addTarget:self
+                            action:@selector(createConfigTapped)
+                  forControlEvents:UIControlEventTouchUpInside];
+    [_scroll addSubview:_configCreateButton];
 }
 
-/// Показываем, что именно делает ESP прямо сейчас. Это главное окно отладки:
-/// по одной строке видно, найден ли процесс и какие смещения не так.
-- (void)refreshESPStatus
+/// Системная клавиатура: запоминаем её область, чтобы тапы ПО КЛАВИАТУРЕ не
+/// летели в меню. Кадр приходит в координатах экрана; для полноэкранного
+/// окна они совпадают с нашими, но на всякий случай приводим через convertRect:.
+- (void)startKeyboardObserver
 {
-    if (_espStatusLabel == nil) { return; }
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(keyboardFrameChanged:)
+                                                 name:UIKeyboardWillChangeFrameNotification
+                                               object:nil];
+}
 
-    BOOL enabled = HUDOverlayNumber(@"cheat.esp", 0) > 0.5;
-    if (!enabled) {
-        _espStatusLabel.text = @"esp: выключен";
-        _espStatusLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
-        return;
-    }
-
-    AscentESPFrame info;
-    memset(&info, 0, sizeof(info));
-    AscentESPGetFrame(NULL, 0, &info);
-
-    NSString *text = info.status[0] != '\0'
-        ? [NSString stringWithUTF8String:info.status]
-        : @"читаю память игры…";
-    _espStatusLabel.text = text;
-    _espStatusLabel.textColor = (info.count > 0) ? HUDGreen() : HUDDim();
+- (void)keyboardFrameChanged:(NSNotification *)note
+{
+    NSValue *value = note.userInfo[UIKeyboardFrameEndUserInfoKey];
+    CGRect frame = (value != nil) ? value.CGRectValue : CGRectZero;
+    frame = CGRectIntersection([self convertRect:frame fromView:nil], self.bounds);
+    _keyboardFrame = (CGRectIsNull(frame) || CGRectIsEmpty(frame)) ? CGRectZero : frame;
+    AscentHUDLog(@"[keyboard] рамка=%@", NSStringFromCGRect(_keyboardFrame));
 }
 
 #pragma mark - Панель (раскладка)
@@ -1569,64 +1654,71 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
     _panel.bounds = CGRectMake(0, 0, panelSize.width, panelSize.height);
     _panel.center = center;
-    _panel.layer.cornerRadius = 20.0;
+    _panel.layer.cornerRadius = 16.0;
     _panel.layer.masksToBounds = YES;
 
     CGFloat w = panelSize.width;
     CGFloat h = panelSize.height;
 
-    _panelHeader.frame = CGRectMake(0, 0, w, kHeaderHeight);
-    _panelTitle.frame = CGRectMake(16, 0, w - 32, kHeaderHeight);
+    // Раскладка как в меню-эталоне (MY IMGUI, окно 460×300): заголовок слева
+    // сверху над колонкой вкладок, под ним тёмная колонка вкладок, справа —
+    // карточка контента во всю высоту. Колонка ≈ 130/460 ширины панели,
+    // отступы — общие (kCardInset).
+    CGFloat inset = kCardInset;
+    CGFloat titleTop = inset + 2.0;
+    CGFloat titleH = 20.0;
+    CGFloat sidebarX = inset;
+    CGFloat sidebarW = floor(w * 0.285);
+    CGFloat sidebarTop = titleTop + titleH + 10.0;
+    CGFloat sidebarH = h - sidebarTop - inset;
+    CGFloat cardX = sidebarX + sidebarW + inset;
+    CGFloat cardY = inset;
+    CGFloat cardW = w - cardX - inset;
+    CGFloat cardH = h - 2.0 * inset;
 
-    for (UIView *sub in _panel.subviews) {
-        if ([sub isKindOfClass:[UILabel class]] && sub.tag == 0) {
-            sub.frame = CGRectMake(0, kHeaderHeight - 1, w, 1);
-        }
-    }
+    _panelHeader.frame = CGRectMake(0, 0, w, h);   // зона переноса — вся панель
+    _panelTitle.frame = CGRectMake(sidebarX + 3.0, titleTop,
+                                   MAX(cardX - (sidebarX + 3.0) - 3.0, 40.0), titleH);
+    _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
 
-    // Тело панели: слева колонка вкладок, справа карточка содержимого.
-    CGFloat bodyY = kHeaderHeight + 6.0;
-    CGFloat bodyH = h - bodyY - kCardInset;
-    CGFloat tabX = kCardInset;
-    CGFloat tabW = kSidebarWidth;
-    CGFloat cardX = tabX + tabW + 6.0;
-    CGFloat cardW = w - cardX - kCardInset;
-
-    // Колонка вкладок обязана ВЛЕЗТЬ в тело панели: меню стало ниже
-    // (прямоугольное), а вкладок всегда четыре. Поэтому высоту строки считаем
-    // от свободного места: kTabRowHeight — это максимум (как на макете), при
-    // нехватке строки ужимаются равномерно, иначе последняя вкладка
-    // «уезжала» бы за нижний край панели и обрезалась бы маской.
+    // Колонка вкладок: строки кучно сверху, снизу остаётся пустой край —
+    // как в эталоне. Высоту ограничиваем и запасом снизу: иначе последняя
+    // вкладка «уезжала» бы за край колонки и обрезалась маской панели.
     NSInteger tabCount = (NSInteger)_tabButtons.count;
-    CGFloat tabRowH = kTabRowHeight;
+    CGFloat tabPadTop = 5.0;
+    CGFloat tabGap = 5.0;
+    CGFloat tabRowH = 24.0;
     if (tabCount > 0) {
-        CGFloat tabAvail = MAX(bodyH - 10.0, (CGFloat)tabCount * 18.0);
-        tabRowH = MIN(kTabRowHeight, floor(tabAvail / (CGFloat)tabCount));
+        tabRowH = floor((sidebarH - tabPadTop - (tabCount - 1) * tabGap - 4.0) / (CGFloat)tabCount);
+        tabRowH = MIN(24.0, MAX(tabRowH, 18.0));
     }
-    CGFloat rowY = bodyY + 4.0;
+    CGFloat tabX = sidebarX + 6.0;
+    CGFloat tabW = sidebarW - 20.0;   // справа остаётся зона полоски-индикатора
+    CGFloat rowY = sidebarTop + tabPadTop;
     for (NSInteger i = 0; i < tabCount; i++) {
         UIButton *button = _tabButtons[i];
-        button.frame = CGRectMake(tabX, rowY, tabW - 8.0, tabRowH);
+        button.frame = CGRectMake(tabX, rowY, tabW, tabRowH);
         BOOL selected = (i == _tab);
         button.backgroundColor = [UIColor clearColor];
-        [button setTitleColor:(selected ? HUDAccent() : HUDDim()) forState:UIControlStateNormal];
+        // Неактивные вкладки белые, активная — красная (как в эталоне).
+        [button setTitleColor:(selected ? HUDAccent() : [UIColor whiteColor]) forState:UIControlStateNormal];
         if (selected) {
             _tabIndicator.hidden = NO;
-            CGFloat indicatorH = MAX(tabRowH - 14.0, 6.0);
-            _tabIndicator.frame = CGRectMake(tabX + tabW - 4.0,
+            CGFloat indicatorH = MAX(tabRowH * 0.68, 8.0);
+            _tabIndicator.frame = CGRectMake(sidebarX + sidebarW - 11.0,
                                              rowY + (tabRowH - indicatorH) / 2.0,
-                                             3.0, indicatorH);
+                                             2.5, indicatorH);
         }
-        rowY += tabRowH;
+        rowY += tabRowH + tabGap;
     }
 
-    _contentCard.frame = CGRectMake(cardX, bodyY, cardW, bodyH);
+    _contentCard.frame = CGRectMake(cardX, cardY, cardW, cardH);
 
     static NSString *const kSectionTitles[4] = { @"ESP", @"AIM", @"MISC", @"CONFIG" };
     _sectionTitle.text = (_tab >= 0 && _tab < 4) ? kSectionTitles[_tab] : kSectionTitles[0];
     _sectionTitle.frame = CGRectMake(14, 12, cardW - 28, 20);
 
-    _scroll.frame = CGRectMake(0, kSectionTop, cardW, MAX(bodyH - kSectionTop, 0));
+    _scroll.frame = CGRectMake(0, kSectionTop, cardW, MAX(cardH - kSectionTop, 0));
     [self layoutContentForTab:_tab width:cardW];
 }
 
@@ -1640,34 +1732,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
     for (UISwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
-    _gameProcLabel.hidden = YES;
     _unloadButton.hidden = YES;
     _miscCaption.hidden = YES;
     _configCaption.hidden = YES;
-    _espStatusLabel.hidden = YES;
+    _configNameField.hidden = YES;
+    _configCreateButton.hidden = YES;
+    for (UIView *row in _configRows) { row.hidden = YES; }
 
     if (tab == 0) {
-        // Вкладка ESP: главный переключатель, затем что именно рисовать.
+        // Вкладка ESP: только главный переключатель — под-опции (боксы,
+        // здоровье, имена, дистанция, линии) из меню убраны.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[3] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[4] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[5] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[6] x:x y:&y width:rowWidth];
-
-        // Короткий статус чтения игры: без него непонятно, почему боксы не
-        // появились (нет процесса, не заданы смещения, пустой список).
-        _espStatusLabel.hidden = NO;
-        _espStatusLabel.frame = CGRectMake(x, y + 2.0, rowWidth, 34.0);
-        y += 34.0 + 4.0;
     } else if (tab == 1) {
         // Вкладка Aim: только основной переключатель. Triggerbot убран.
         [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
     } else if (tab == 2) {
-        _gameProcLabel.hidden = NO;
-        _gameProcLabel.frame = CGRectMake(x, y, rowWidth, 32);
-        y += 32 + 10;
-
         _unloadButton.hidden = NO;
         _unloadButton.frame = CGRectMake(x, y, rowWidth, 46);
         y += 46 + 10;
@@ -1680,6 +1759,33 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];
         [self layoutSliderGroup:_sliders[2] x:x y:&y width:rowWidth];
         y += 4;
+
+        // Список конфигов перечитываем только когда он поменялся
+        // (создали/удалили) — см. _configRowsDirty.
+        if (_configRowsDirty) { [self rebuildConfigRows]; }
+
+        // Имя нового конфига и кнопка создания. Тап по полю (см.
+        // performTapAtPoint:) открывает СИСТЕМНУЮ клавиатуру iPhone.
+        _configNameField.hidden = NO;
+        _configNameField.frame = CGRectMake(x, y, rowWidth, 34.0);
+        y += 34.0 + 6.0;
+
+        _configCreateButton.hidden = NO;
+        _configCreateButton.frame = CGRectMake(x, y, rowWidth, 38.0);
+        y += 38.0 + 8.0;
+
+        for (UIView *row in _configRows) {
+            row.hidden = NO;
+            row.frame = CGRectMake(x, y, rowWidth, 34.0);
+            for (UIView *sub in row.subviews) {
+                // 1 — имя, 2 — «▶» запустить, 3 — «✕» удалить.
+                if (sub.tag == 1) { sub.frame = CGRectMake(12, 0, rowWidth - 76.0, 34.0); }
+                if (sub.tag == 2) { sub.frame = CGRectMake(rowWidth - 58.0, 0, 20.0, 34.0); }
+                if (sub.tag == 3) { sub.frame = CGRectMake(rowWidth - 30.0, 0, 22.0, 34.0); }
+            }
+            y += 34.0 + 6.0;
+        }
+        if (_configRows.count > 0) { y += 2.0; }
 
         _configCaption.hidden = NO;
         CGSize need = [_configCaption sizeThatFits:CGSizeMake(rowWidth, CGFLOAT_MAX)];
@@ -1870,7 +1976,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         slider.value = (float)HUDOverlayNumber(key, slider.value);
         [self updateSliderLabel:key];
     }
-    [self refreshGameProcess];
 }
 
 - (void)configureSlider:(UISlider *)slider forKey:(NSString *)key
@@ -1913,11 +2018,140 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [self updateSliderLabel:sender.accessibilityIdentifier];
 }
 
-- (void)refreshGameProcess
+#pragma mark - Конфиги (вкладка Config)
+
+/// Список строк конфигов: имя → [[▶] запустить] [[✕] удалить]. Пересобираем
+/// только по _configRowsDirty (файл читаем один раз, а не на каждой раскладке).
+- (void)rebuildConfigRows
 {
-    int pid = AscentGameFindProcess(@"standoff");
-    _gameProcLabel.text = pid > 0 ? [NSString stringWithFormat:@"процесс: pid %d", pid]
-                                  : @"процесс не найден";
+    _configRowsDirty = NO;
+    for (UIView *row in _configRows) { [row removeFromSuperview]; }
+    [_configRows removeAllObjects];
+    [_configNames removeAllObjects];
+
+    NSDictionary *configs = AscentConfigsRead();
+    NSArray *sorted = [configs.allKeys sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    for (NSString *name in sorted) {
+        UIView *row = [[UIView alloc] initWithFrame:CGRectZero];
+        row.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+        row.layer.cornerRadius = 10.0;
+        row.layer.borderWidth = 1.0;
+        row.layer.borderColor = HUDLine().CGColor;
+
+        UILabel *nameLabel = HUDLabel(name, 12.5, UIFontWeightSemibold);
+        nameLabel.tag = 1;
+        nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [row addSubview:nameLabel];
+
+        UILabel *runLabel = HUDLabel(@"▶", 11, UIFontWeightBold);
+        runLabel.tag = 2;
+        runLabel.textAlignment = NSTextAlignmentCenter;
+        runLabel.textColor = HUDGreen();
+        [row addSubview:runLabel];
+
+        UILabel *delLabel = HUDLabel(@"✕", 13, UIFontWeightBold);
+        delLabel.tag = 3;
+        delLabel.textAlignment = NSTextAlignmentCenter;
+        delLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+        [row addSubview:delLabel];
+
+        [_scroll addSubview:row];
+        [_configRows addObject:row];
+        [_configNames addObject:name];
+    }
+    AscentHUDLog(@"[config] строк в списке: %lu", (unsigned long)_configRows.count);
+}
+
+/// «создать конфиг»: снимок всех переключателей и слайдеров под именем из
+/// поля. Без имени — автоимя «Config N» с первым свободным номером:
+/// удалили Config 1 → следующий безымянный снова станет Config 1.
+- (void)createConfigTapped
+{
+    [_configNameField resignFirstResponder];
+
+    NSString *name = [_configNameField.text stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (name.length == 0) {
+        NSDictionary *existing = AscentConfigsRead();
+        NSInteger n = 1;
+        while (existing[[NSString stringWithFormat:@"Config %ld", (long)n]] != nil) { n++; }
+        name = [NSString stringWithFormat:@"Config %ld", (long)n];
+    }
+
+    NSMutableDictionary *configs = [AscentConfigsRead() mutableCopy];
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    for (UISwitch *toggle in _switches) {
+        values[toggle.accessibilityIdentifier] = @(toggle.isOn ? 1 : 0);
+    }
+    for (UISlider *slider in _sliders) {
+        values[slider.accessibilityIdentifier] = @(slider.value);
+    }
+    configs[name] = values;
+    AscentConfigsWrite(configs);
+
+    _configNameField.text = @"";
+    _configRowsDirty = YES;
+    [self setNeedsLayout];
+    AscentHUDLog(@"[config] создан «%@»", name);
+}
+
+/// «Запуск» конфига: пишем сохранённые значения в общий plist (те же ключи,
+/// что читают холст ESP и память игры) и сразу показываем их на элементах.
+- (void)applyConfigAtIndex:(NSInteger)index
+{
+    if (index < 0 || index >= (NSInteger)_configNames.count) { return; }
+    NSString *name = _configNames[index];
+    NSDictionary *values = AscentConfigsRead()[name];
+    if (![values isKindOfClass:[NSDictionary class]]) {
+        _configRowsDirty = YES;   // строка вела себя в файл — пересоберём
+        [self setNeedsLayout];
+        return;
+    }
+
+    for (UISwitch *toggle in _switches) {
+        NSNumber *value = values[toggle.accessibilityIdentifier];
+        if (value == nil) { continue; }
+        BOOL on = value.doubleValue > 0.5;
+        toggle.on = on;
+        HUDOverlaySetFlag(toggle.accessibilityIdentifier, on);
+    }
+    for (UISlider *slider in _sliders) {
+        NSNumber *value = values[slider.accessibilityIdentifier];
+        if (value == nil) { continue; }
+        float v = (float)value.doubleValue;
+        v = MAX(slider.minimumValue, MIN(slider.maximumValue, v));
+        slider.value = v;
+        HUDOverlaySetNumber(slider.accessibilityIdentifier, v);
+        [self updateSliderLabel:slider.accessibilityIdentifier];
+    }
+    AscentHUDLog(@"[config] запущен «%@»", name);
+}
+
+/// Удаление: имя — в руки, строка — из списка, номер освобождается для
+/// автоимени (см. createConfigTapped).
+- (void)deleteConfigAtIndex:(NSInteger)index
+{
+    if (index < 0 || index >= (NSInteger)_configNames.count) { return; }
+    NSString *name = _configNames[index];
+    NSMutableDictionary *configs = [AscentConfigsRead() mutableCopy];
+    [configs removeObjectForKey:name];
+    AscentConfigsWrite(configs);
+    _configRowsDirty = YES;
+    [self setNeedsLayout];
+    AscentHUDLog(@"[config] удалён «%@»", name);
+}
+
+/// Return на клавиатуре (Done): с именем — сразу создаём конфиг, без имени —
+/// просто гасим клавиатуру (пустой конфиг по случайности не создать).
+- (void)configNameReturnTapped
+{
+    NSString *name = [_configNameField.text stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (name.length > 0) {
+        [self createConfigTapped];
+    } else {
+        [_configNameField resignFirstResponder];
+    }
 }
 
 #pragma mark - Ориентация (реализация)
@@ -1986,8 +2220,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)dealloc
 {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (_usesDeviceOrientationFallback) {
-        [[NSNotificationCenter defaultCenter] removeObserver:self];
         [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     } else {
         [_orientationObserver invalidate];
