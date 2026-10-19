@@ -280,9 +280,11 @@ static UIImage *HUDTriggerImage(BOOL open)
 // = половина высоты), бегунок внутри — КРУГ диаметром 14 pt цвета #d4d6d9.
 static const CGFloat kFlatSwitchW = 44.0;
 static const CGFloat kFlatSwitchH = 20.0;
+// Длительность анимации переключения (по заказу — быстрее прежних 0.35 с).
+static const NSTimeInterval kSwitchAnimDuration = 0.24;
 
 /// Тумблер вместо системного UISwitch. Закруглённая пилюля с круглым бегунком;
-/// включение/выключение ПЛАВНОЕ (~0.35 с): подложка перекрашивается и бегунок
+/// включение/выключение ПЛАВНОЕ (~0.24 с): подложка перекрашивается и бегунок
 /// едет на место (см. setOn:). Касания класс НЕ обрабатывает (как и раньше):
 /// строку переключает жест панели (см. switchRowTapped: и performTapAtPoint:),
 /// переключатель — индикатор состояния.
@@ -337,15 +339,16 @@ static const CGFloat kFlatSwitchH = 20.0;
         self.backgroundColor = target;
         [self positionKnob];
     };
-    // Плавное включение/выключение ~0.35 с (по заказу): подложка перекрашивается
-    // и бегунок ЕДЕТ на место одновременно. Раньше здесь менялся только цвет —
-    // кадр бегунка пересчитывался лишь при layout, поэтому он «стоял на месте».
-    // До первого layout кадр пуст — анимировать нечего, ставим состояние сразу.
+    // Плавное включение/выключение ~0.24 с (по заказу, чуть быстрее прежних
+    // 0.35 с): подложка перекрашивается и бегунок ЕДЕТ на место одновременно.
+    // Раньше здесь менялся только цвет — кадр бегунка пересчитывался лишь при
+    // layout, поэтому он «стоял на месте». До первого layout кадр пуст —
+    // анимировать нечего, ставим состояние сразу.
     if (CGRectIsEmpty(self.bounds)) {
         apply();
         return;
     }
-    [UIView animateWithDuration:0.35
+    [UIView animateWithDuration:kSwitchAnimDuration
                           delay:0
                         options:UIViewAnimationOptionBeginFromCurrentState |
                                 UIViewAnimationOptionAllowUserInteraction
