@@ -410,8 +410,10 @@ static const CGFloat kTriggerSide    = 54.0;
 // задаём ДИАПАЗОНОМ, а не жёстко: в ландшафте высота сцены всего ≈375 pt минус
 // безопасные зоны, поэтому высокая панель уходила за верх экрана. Фактический
 // размер считает panelSizeForArea: — он же держит пропорцию горизонтальной.
-static const CGFloat kPanelWidthMax  = 340.0;   // ширина меню
-static const CGFloat kPanelHeightMax = 190.0;   // высота меню (влезает и в ландшафт)
+// По заказу панель чуть растянута (было 340×190): в портрете на iPhone 7
+// (ширина 375 pt) по бокам остаётся по 9.5 pt — перенос за чёрные области цел.
+static const CGFloat kPanelWidthMax  = 356.0;   // ширина меню
+static const CGFloat kPanelHeightMax = 200.0;   // высота меню (влезает и в ландшафт)
 // Пропорция меню: ширина / высота. 1.25 давало почти квадрат — просили
 // прямоугольник и размер поменьше. 1.55 (≈3:2) — явно вытянуто вширь и заметно
 // ниже прежнего, при этом и в портрете, и в ландшафте панель остаётся
@@ -1854,8 +1856,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kPanelWidthMax, kPanelHeightMax)];
     _panel.backgroundColor = HUDFill();
     _panel.layer.cornerRadius = 16.0;   // WindowRounding = 16 у эталонного окна
-    _panel.layer.borderWidth = 1.0;
-    _panel.layer.borderColor = HUDLine().CGColor;
+    // По заказу БЕЛОЙ ОБВОДКИ у панели больше нет (была рамка 1 pt из HUDLine()).
+    _panel.layer.borderWidth = 0.0;
     _panel.hidden = YES;
 
     // Раскладка как в меню-эталоне (MY IMGUI): заголовок слева сверху над
@@ -2018,7 +2020,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
     // Строка menu theme (вкладка Misc): выбор ТЕМЫ — НЕ переключатель (по
     // заказу), а две пилюли dark | light справа от надписи; активную
-    // подсвечивает updateThemeSegmentUI (цветом акцента, как вкладку).
+    // подсвечивает updateThemeSegmentUI (нейтральной заливкой, без акцента).
     // Значение лежит в plist (hud.theme) и применяется мгновенно: светлая
     // тема красит фон панели в белый (см. setMenuLight).
     _themeRow = [[UIView alloc] initWithFrame:CGRectZero];
@@ -2026,6 +2028,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _themeRow.autoresizingMask = UIViewAutoresizingNone;
     _themeLabel = HUDLabel(@"menu theme", 11, UIFontWeightMedium);
     _themeLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
+    // По заказу надпись обязана УМЕЩАТЬСЯ целиком: раньше при нехватке ширины
+    // она обрезалась до «menu the…». Ужимаем шрифт, а не режем текст.
+    _themeLabel.adjustsFontSizeToFitWidth = YES;
+    _themeLabel.minimumScaleFactor = 0.65;
+    _themeLabel.lineBreakMode = NSLineBreakByClipping;
     _themeLabel.autoresizingMask = UIViewAutoresizingNone;
     [_themeRow addSubview:_themeLabel];
     _themeDarkLabel = HUDLabel(@"dark", 10, UIFontWeightSemibold);
@@ -2230,10 +2237,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // как в эталоне. Высоту ограничиваем и запасом снизу: иначе последняя
     // вкладка «уезжала» бы за край колонки и обрезалась маской панели.
     NSInteger tabCount = (NSInteger)_tabButtons.count;
-    // По заказу вкладки ПОБЛИЖЕ друг к другу: отступ сверху 3 и зазор 2
-    // вместо прежних 5/5.
-    CGFloat tabPadTop = 3.0;
-    CGFloat tabGap = 2.0;
+    // По заказу вкладки ЕЩЁ БЛИЖЕ друг к другу: отступ сверху 2 и зазор 0 —
+    // строки идут вплотную (было 3/2, а до того 5/5).
+    CGFloat tabPadTop = 2.0;
+    CGFloat tabGap = 0.0;
     CGFloat tabRowH = 24.0;
     if (tabCount > 0) {
         tabRowH = floor((sidebarH - tabPadTop - (tabCount - 1) * tabGap - 4.0) / (CGFloat)tabCount);
@@ -2276,7 +2283,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 {
     CGFloat x = 10.0;
     CGFloat rowWidth = w - 20.0;
-    CGFloat y = 6.0;
+    CGFloat y = 4.0;   // контент чуть выше (по заказу)
 
     for (HUDFlatSwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
@@ -2326,12 +2333,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         CGFloat themeSegH = 22.0;
         // Целые координаты — как у свотча, чтобы рамки/заливки не «пикселили».
         CGFloat themeSegY = round((themeRowH - themeSegH) / 2.0);
-        CGFloat themeLightX = round(rowWidth - 10.0 - themeSegW);
-        CGFloat themeDarkX = round(themeLightX - 6.0 - themeSegW);
+        // Зазоры поуже (4 и 8 вместо 6 и 10) — надписи «menu theme» нужно
+        // больше места, чтобы умещаться целиком (плюс ужимание шрифта).
+        CGFloat themeLightX = round(rowWidth - 8.0 - themeSegW);
+        CGFloat themeDarkX = round(themeLightX - 4.0 - themeSegW);
         _themeLightLabel.frame = CGRectMake(themeLightX, themeSegY, themeSegW, themeSegH);
         _themeDarkLabel.frame = CGRectMake(themeDarkX, themeSegY, themeSegW, themeSegH);
         _themeLabel.frame = CGRectMake(12.0, 0.0,
-                                       MAX(0.0, themeDarkX - 12.0 - 8.0),
+                                       MAX(0.0, themeDarkX - 12.0 - 6.0),
                                        themeRowH);
         y += themeRowH + 10.0;
 
@@ -2382,17 +2391,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Тумблер закруглённый
     // (см. HUDFlatSwitch), никаких transform — кадр задаём напрямую, центрируя
     // по высоте строки.
-    // По заказу вся группа (тумблер + подпись) чуть ЛЕВЕЕ (отступ 8 вместо
-    // 12) и чуть ВЫШЕ середины строки (на 2 pt).
-    const CGFloat leftInset = 8.0;
-    const CGFloat liftUp = 2.0;
+    // По заказу вся группа (тумблер + подпись) ещё ЛЕВЕЕ (отступ 3 вместо 8)
+    // и ВЫШЕ середины строки (на 6 pt вместо 2).
+    const CGFloat leftInset = 3.0;
+    const CGFloat liftUp = 6.0;
     toggle.frame = CGRectMake(leftInset,
                               round((kSwitchRowHeight - kFlatSwitchH) / 2.0) - liftUp,
                               kFlatSwitchW, kFlatSwitchH);
 
     // Подпись — строго справа от тумблера, на всю высоту строки (высота
     // UILabel «тянется» от нулевого кадра, если её задать неполной — раньше
-    // текст уезжал ниже середины), с тем же подъёмом на 2 pt вверх.
+    // текст уезжал ниже середины), с тем же подъёмом на 6 pt вверх.
     CGFloat labelX = leftInset + kFlatSwitchW + 12.0;
     for (UIView *sub in row.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
@@ -2732,7 +2741,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)applyMenuTheme
 {
     _panel.backgroundColor = HUDFill();
-    _panel.layer.borderColor = HUDLine().CGColor;
+    // Обводки у панели нет (по заказу) — borderColor не выставляем.
     _sidebarBg.backgroundColor = HUDCard();
     _contentCard.backgroundColor = HUDCard();
     _sectionTitle.textColor = HUDText();
@@ -2792,19 +2801,22 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 }
 
-/// Пилюли dark | light в строке menu theme: активная — под фоном акцента
-/// (как активная вкладка), неактивная — полупрозрачная подложка текущей
+/// Пилюли dark | light в строке menu theme: активная — НЕЙТРАЛЬНОЙ серой
+/// заливкой (как включённый тумблер), БЕЗ цвета акцента (по заказу: раньше она
+/// красилась выбранным акцентом), неактивная — полупрозрачная подложка текущей
 /// темы. Вызывается и после смены темы, и после смены акцента.
 - (void)updateThemeSegmentUI
 {
     if (_themeDarkLabel == nil || _themeLightLabel == nil) { return; }
-    UIColor *accent = HUDMenuAccent();
     UIColor *plainFill = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
                                            alpha:(sMenuLight ? 0.06 : 0.10)];
     UIColor *plainText = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.55];
-    _themeDarkLabel.backgroundColor = sMenuLight ? plainFill : accent;
+    // Активная пилюля: плотная серая заливка (та же, что у включённого
+    // тумблера) — акцент больше не участвует.
+    UIColor *activeFill = HUDSwitchOn();
+    _themeDarkLabel.backgroundColor = sMenuLight ? plainFill : activeFill;
     _themeDarkLabel.textColor = sMenuLight ? plainText : [UIColor whiteColor];
-    _themeLightLabel.backgroundColor = sMenuLight ? accent : plainFill;
+    _themeLightLabel.backgroundColor = sMenuLight ? activeFill : plainFill;
     _themeLightLabel.textColor = sMenuLight ? [UIColor whiteColor] : plainText;
 }
 
@@ -2825,9 +2837,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                      forState:UIControlStateNormal];
     }
 
-    // Пилюли dark/light в строке menu theme: активная под фоном того же
-    // акцента (как активная вкладка) — без этого смена акцента не
-    // перекрашивала бы их.
+    // Пилюли dark/light в строке menu theme: акцент в них БОЛЬШЕ НЕ участвует
+    // (по заказу), но метод всё равно зовём — он держит их цвета в актуальной
+    // теме.
     [self updateThemeSegmentUI];
 
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
