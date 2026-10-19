@@ -99,7 +99,7 @@ private struct LoaderContent: View {
 
     private var startButton: some View {
         Button(action: state.tapStart) {
-            Text(state.showing ? "Exit" : "Start")
+            Text((state.showing || state.engaged) ? "Exit" : "Start")
                 .font(.system(size: 15, weight: .heavy))
                 .kerning(3)
                 .foregroundColor(.white)
