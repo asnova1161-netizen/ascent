@@ -126,9 +126,12 @@ static UIColor *HUDSoftFill(void)  { return [UIColor colorWithWhite:(sMenuLight 
 // треком iOS (он на светлом фоне ≈ 0.91), и включённый тумблер выглядел без
 // заливки; на белой панели 0.35 читался плотно — берём этот цвет везде.
 static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:0.35 alpha:1.0]; }
-// Фон ВЫКЛЮЧЕННОГО тумблера: полупрозрачный серый текущей темы.
+// Фон ВЫКЛЮЧЕННОГО тумблера: полупрозрачный серый текущей темы (по заказу —
+// ЗАМЕТНО темнее прежнего: на тёмной панели белый 0.22 читался светлой
+// плашкой, теперь 0.10; на белой карточке чёрный 0.20 почти не отличался от
+// фона, теперь 0.30).
 static UIColor *HUDSwitchOff(void) { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
-                                                              alpha:(sMenuLight ? 0.20 : 0.22)]; }
+                                                              alpha:(sMenuLight ? 0.30 : 0.10)]; }
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
