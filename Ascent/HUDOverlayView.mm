@@ -618,13 +618,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIScrollView *_scroll;
     UIButton *_unloadButton;
     // Вкладка Misc: строка accent color — свотч текущего цвета слева от
-    // надписи и кнопка-квадратик справа. По кнопке открывается HSV-пикер в
-    // ОТДЕЛЬНОМ окне (не в меню) — см. togglePicker.
+    // надписи. Тап по СВОТЧУ открывает HSV-пикер в ОТДЕЛЬНОМ окне (не в
+    // меню) — см. togglePicker.
     UIView *_accentRow;
-    UIView *_accentSwatch;
+    UIView *_accentSwatch;      // свотч текущего цвета — он же кнопка пикера
     UILabel *_accentLabel;
-    UIView *_accentButton;      // кнопка-квадратик: открывает пикер
-    UIImageView *_accentIcon;   // иконка палитры внутри кнопки
     // Окно пикера (выше панели HUD): тёмная карточка с полем «насыщенность ×
     // яркость» и вертикальной радужной полосой оттенка. Касания идут не в
     // это окно, а в HUD по потоку HID — окно только рисует (см.
@@ -1237,14 +1235,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Строка accent color (вкладка Misc): кнопка-квадратик справа от
-    // надписи открывает пикер цвета в отдельном окне.
+    // Строка accent color (вкладка Misc): тап по свотчу (и по всей строке —
+    // чтобы легко попадать) открывает пикер цвета в отдельном окне.
     if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
-        CGPoint local = [_accentRow convertPoint:point fromView:self];
-        if (CGRectContainsPoint(_accentButton.frame, local)) {
-            [self togglePicker];
-        }
-        return;   // тап по строке, но не по кнопке — ничего не делаем
+        [self togglePicker];
+        return;
     }
 
     for (UISlider *slider in _sliders) {
@@ -1704,8 +1699,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     // Строка accent color (вкладка Misc): свотч текущего цвета слева от
-    // надписи и кнопка-квадратик справа — тап по ней открывает HSV-пикер в
-    // ОТДЕЛЬНОМ окне (см. togglePicker). Сам пикер в меню не показывается.
+    // надписи — по ТАПУ НА СВОТЧ открывается HSV-пикер в ОТДЕЛЬНОМ окне
+    // (см. togglePicker). Сам пикер в меню не показывается.
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
     _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     _accentRow.layer.cornerRadius = 12.0;
@@ -1713,32 +1708,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
     _accentSwatch.layer.cornerRadius = 6.0;
-    _accentSwatch.layer.borderWidth = 1.0;
-    _accentSwatch.layer.borderColor = HUDLine().CGColor;
+    _accentSwatch.layer.borderWidth = 1.5;
+    _accentSwatch.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    _accentSwatch.userInteractionEnabled = NO;
     [_accentRow addSubview:_accentSwatch];
     _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
     _accentLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
     _accentLabel.autoresizingMask = UIViewAutoresizingNone;
     [_accentRow addSubview:_accentLabel];
-
-    // Кнопка-квадратик: иконка палитры. UIKit-кнопкой её не делаем — жесты
-    // меню идут через свой разбор потока, а не через hitTest (см.
-    // performTapAtPoint:).
-    _accentButton = [[UIView alloc] initWithFrame:CGRectZero];
-    _accentButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
-    _accentButton.layer.cornerRadius = 6.0;
-    _accentButton.layer.borderWidth = 1.0;
-    _accentButton.layer.borderColor = HUDLine().CGColor;
-    _accentButton.userInteractionEnabled = NO;
-    _accentIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
-    UIImage *pickerGlyph = [UIImage systemImageNamed:@"paintpalette.fill"];
-    _accentIcon.image = [pickerGlyph imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    _accentIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:0.8];
-    _accentIcon.contentMode = UIViewContentModeScaleAspectFit;
-    _accentIcon.autoresizingMask = UIViewAutoresizingNone;
-    _accentIcon.userInteractionEnabled = NO;
-    [_accentButton addSubview:_accentIcon];
-    [_accentRow addSubview:_accentButton];
 
     [_scroll addSubview:_accentRow];
     // Поле, полоса и маркеры пикера живут в ЕГО собственном окне и собираются
@@ -1993,19 +1970,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: свотч текущего цвета слева от надписи (чуть
-        // крупнее), кнопка-квадратик справа — тап по ней открывает пикер в
-        // отдельном окне (см. togglePicker). Сам пикер в меню не рисуем.
+        // Строка accent color: свотч текущего цвета слева от надписи — он же
+        // кнопка: тап по свотчу открывает пикер в отдельном окне (см.
+        // togglePicker). Сам пикер в меню не рисуем.
         _accentRow.hidden = NO;
-        CGFloat accentRowH = 26.0;
+        CGFloat accentRowH = 28.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
-        _accentSwatch.frame = CGRectMake(10.0, (accentRowH - 20.0) / 2.0, 20.0, 20.0);
-        _accentLabel.frame = CGRectMake(38.0, 0.0, rowWidth - 38.0 - 34.0, accentRowH);
-        CGFloat accentButtonSize = 22.0;
-        _accentButton.frame = CGRectMake(rowWidth - 10.0 - accentButtonSize,
-                                         (accentRowH - accentButtonSize) / 2.0,
-                                         accentButtonSize, accentButtonSize);
-        _accentIcon.frame = CGRectInset(_accentButton.bounds, 4.0, 4.0);
+        _accentSwatch.frame = CGRectMake(10.0, (accentRowH - 22.0) / 2.0, 22.0, 22.0);
+        _accentLabel.frame = CGRectMake(40.0, 0.0, rowWidth - 50.0, accentRowH);
         y += accentRowH + 10.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
@@ -2432,7 +2404,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (_pickerWindow != nil) { return; }
     _pickerWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     _pickerWindow.backgroundColor = [UIColor clearColor];
-    _pickerWindow.windowLevel = UIWindowLevelStatusBar;
+    // Выше всех окон процесса — пикер обязан рисоваться поверх панели HUD.
+    _pickerWindow.windowLevel = UIWindowLevelAlert + 100.0;
     _pickerWindow.userInteractionEnabled = NO;
     UIViewController *host = [[UIViewController alloc] init];
     host.view.backgroundColor = [UIColor clearColor];
