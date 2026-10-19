@@ -735,6 +735,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
     BOOL _rawHoldFromScroll;    // захват с карточки — долгим удержанием
     BOOL _rawScrollTouched;     // карточку успели прокрутить — это не тап
+    NSTimeInterval _rawGrabDeadline; // крайний срок удержания для захвата с
+                                     // карточки (отодвигается, пока идёт скролл)
     BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
     BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
     CGFloat _rawThreshold;      // порог «это уже протяжка, а не тап»
@@ -918,6 +920,22 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 }
 
+/// Двигает ли палец содержимое вкладки прямо СЕЙЧАС: пока кламп contentOffset
+/// реально меняется, это листание. Листание не должно никогда превращаться в
+/// перенос панели, поэтому по этому признаку в handleRawTouchPhase отодвигается
+/// срок удержания (kRawGrabHold). Если содержимое УПЕРЛОСЬ (кламп вернул бы ту
+/// же точку), «мёртвый ход» идёт уже ни за чем — удержание в этой точке
+/// считается обычным, и панель после него захватывается.
+- (BOOL)rawScrollConsumesDelta:(CGPoint)delta
+{
+    CGFloat minY = -_scroll.contentInset.top;
+    CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
+                       _scroll.contentInset.bottom, minY);
+    CGFloat y = _rawStartOffset.y - delta.y;
+    CGFloat clamped = MIN(MAX(y, minY), maxY);
+    return fabs(clamped - _scroll.contentOffset.y) > 0.5;
+}
+
 /// Начинает (или заново подхватывает после паузы) жест от указанной точки.
 /// Координаты — точка в своей иерархии (для hitTest) и точка в слое _stage (для
 /// смещения с учётом поворота экрана).
@@ -968,6 +986,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _dragging = YES;
     _rawStartTime = [[NSProcessInfo processInfo] systemUptime];
     _rawLastTime = _rawStartTime;
+    // Срок захвата с чёрной карточки. Он отодвигается, пока палец реально
+    // ЛИСТАЕТ содержимое (см. rawScrollConsumesDelta в handleRawTouchPhase):
+    // листание никогда не превращается в перенос панели, захват возможен
+    // только после паузы, когда содержимое уже стоит.
+    _rawGrabDeadline = _rawStartTime + kRawGrabHold;
 }
 
 - (void)handleRawTouchPhase:(UITouchPhase)phase
@@ -1116,12 +1139,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                 // прокрутка, и её не надо ломать. От шапки, колонки и квадрата
                 // перенос включается как раньше — почти сразу.
                 if (_rawHoldFromScroll) {
-                    if ((now - _rawStartTime) < kRawGrabHold) {
+                    if (now < _rawGrabDeadline) {
                         // Ещё не удержали: палец ведёт прокрутку содержимого —
-                        // 1:1, от точки нажатия, как штатный скролл. Никаких
+                        // 1:1, от точки нажатия, как штатный скролл. Пока
+                        // содержимое реально ЕДЕТ, срок захвата отодвигается:
+                        // листание вкладки не может превратиться в перенос
+                        // панели ни на каком участке, даже если палец едет
+                        // медленно или содержимое упёрлось в кламп. Никаких
                         // «ранних захватов» у края: быстрый флик по короткому
-                        // списку (Misc чуть длиннее окна) — это всегда скролл,
-                        // а не перенос панели.
+                        // списку (Misc чуть длиннее окна) — это всегда скролл.
+                        if ([self rawScrollConsumesDelta:delta]) {
+                            _rawGrabDeadline = now + kRawGrabHold;
+                        }
                         if (delta.x * delta.x + delta.y * delta.y > 100.0 && !_rawScrollTouched) {
                             _rawScrollTouched = YES;
                             _rawMoved = YES;
