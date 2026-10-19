@@ -121,8 +121,11 @@ static UIColor *HUDText(void)      { return [UIColor colorWithWhite:(sMenuLight 
 // панели белый 0.07 не виден — берём чёрный 0.05.
 static UIColor *HUDSoftFill(void)  { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
                                                               alpha:(sMenuLight ? 0.05 : 0.07)]; }
-// Фон включённого тумблера: светлый 0.85 на белой панели сливается с ней.
-static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:(sMenuLight ? 0.35 : 0.85) alpha:1.0]; }
+// Фон включённого тумблера: плотная заливка ОДИНАКОВАЯ в обеих темах, как на
+// белой. На тёмной теме прежний светлый 0.85 почти совпадал со «выключенным»
+// треком iOS (он на светлом фоне ≈ 0.91), и включённый тумблер выглядел без
+// заливки; на белой панели 0.35 читался плотно — берём этот цвет везде.
+static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:0.35 alpha:1.0]; }
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
@@ -375,7 +378,7 @@ static const CGFloat kEdgeMargin     = 6.0;
 // «combot». Держим константами, потому что одни и те же числа нужны и сборке
 // строк, и раскладке, и размеру прокручиваемой области.
 static const CGFloat kSwitchRowHeight  = 40.0;
-static const CGFloat kSwitchRowGap     = 8.0;
+static const CGFloat kSwitchRowGap     = 4.0;
 static const CGFloat kSliderGroupHeight = 40.0;
 static const CGFloat kSliderGroupGap   = 6.0;
 // Визуальный масштаб тумблеров: стандартный UISwitch 51×31 на строке 40 pt
@@ -915,23 +918,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 }
 
-/// Съест ли прокрутка это смещение пальца: пока кламп contentOffset реально
-/// меняется, палец листает содержимое. Если содержимое УПЕРЛОСЬ (кламп вернул
-/// бы ту же точку), движение ничего не двигает — такой «мёртвый ход» нельзя
-/// копить до конца удержания: панель после захвата перебазируется от ТЕКУЩЕЙ
-/// точки и навсегда отстаёт от пальца на весь пройденный путь у края
-/// («таскается и отстаёт, если брать за нижнюю правую часть»). См.
-/// handleRawTouchPhase — там по этому признаку перенос включается сразу.
-- (BOOL)rawScrollConsumesDelta:(CGPoint)delta
-{
-    CGFloat minY = -_scroll.contentInset.top;
-    CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
-                       _scroll.contentInset.bottom, minY);
-    CGFloat y = _rawStartOffset.y - delta.y;
-    CGFloat clamped = MIN(MAX(y, minY), maxY);
-    return fabs(clamped - _scroll.contentOffset.y) > 0.5;
-}
-
 /// Начинает (или заново подхватывает после паузы) жест от указанной точки.
 /// Координаты — точка в своей иерархии (для hitTest) и точка в слое _stage (для
 /// смещения с учётом поворота экрана).
@@ -1130,21 +1116,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                 // прокрутка, и её не надо ломать. От шапки, колонки и квадрата
                 // перенос включается как раньше — почти сразу.
                 if (_rawHoldFromScroll) {
-                    // Палец вёл прокрутку, но содержимое УПЕРЛОСЬ в кламп —
-                    // мёртвый ход дальше копить нельзя: по истечении срока
-                    // удержания панель перебазируется от текущей точки и
-                    // навсегда отстаёт от пальца на всё, что тот прошёл у
-                    // края. На краю перенос включаем сразу, как только путь
-                    // стал заметен (>6 pt): дрожь руки при нажатии меньше
-                    // порога и по-прежнему считается нажатием (в конце жеста
-                    // панель всё равно возвращает на место kRawTapSlop).
-                    CGFloat armLen2 = delta.x * delta.x + delta.y * delta.y;
-                    BOOL atScrollEdge = ![self rawScrollConsumesDelta:delta];
-                    if ((now - _rawStartTime) < kRawGrabHold &&
-                        (!atScrollEdge || armLen2 < 36.0)) {
+                    if ((now - _rawStartTime) < kRawGrabHold) {
                         // Ещё не удержали: палец ведёт прокрутку содержимого —
-                        // 1:1, от точки нажатия, как штатный скролл.
-                        if (armLen2 > 100.0 && !_rawScrollTouched) {
+                        // 1:1, от точки нажатия, как штатный скролл. Никаких
+                        // «ранних захватов» у края: быстрый флик по короткому
+                        // списку (Misc чуть длиннее окна) — это всегда скролл,
+                        // а не перенос панели.
+                        if (delta.x * delta.x + delta.y * delta.y > 100.0 && !_rawScrollTouched) {
                             _rawScrollTouched = YES;
                             _rawMoved = YES;
                             AscentHUDLog(@"[gesture] поток: тяну содержимое вкладки");
@@ -1167,17 +1145,25 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     _rawTarget = HUDRawDragPanel;
                 }
                 if (_rawHoldFromScroll) {
-                    // Отсчёт заново от текущей точки и ТЕКУЩЕГО центра панели:
-                    // путь предшествовавшей прокрутки не должен прыгать панель
-                    // в момент захвата.
+                    // СНАП при захвате: один прыжок к «правильной» точке —
+                    // панель встаёт там, где была бы, если бы её тащили от
+                    // самого нажатия (центр на момент нажатия + весь путь
+                    // пальца), с клампом к экрану. Раньше отсчёт шёл от
+                    // ТЕКУЩЕГО центра при пальце, уже ушедшем на длину
+                    // прокрутки, — панель навсегда отставала от пальца
+                    // («таскается и отстаёт, если брать за нижнюю правую
+                    // часть»). Дальше — строго 1:1: отсчёт заново от
+                    // ТЕКУЩЕЙ точки, а локальную delta (посчитанную ВЫШЕ от
+                    // старого _rawStart) гасим, чтобы не увести панель второй
+                    // раз («телепортируется куда-то и сразу обратно»).
+                    CGSize panelSize = _panel.bounds.size;
+                    CGPoint aligned = CGPointMake(_rawStartCenter.x + delta.x,
+                                                  _rawStartCenter.y + delta.y);
+                    aligned = [self clampPanelCenter:aligned size:panelSize];
+                    _panel.center = aligned;
+                    _panelOffset = [self panelOffsetForCenter:aligned size:panelSize];
                     _rawStart = stagePoint;
-                    _rawStartCenter = _panel.center;
-                    // ЛОКАЛЬНАЯ delta посчитана ВЫШЕ от СТАРОГО _rawStart —
-                    // применить её сейчас после перебазации значит увести панель
-                    // на весь путь прокрутки и вернуть обратно следующим
-                    // событием («телепортируется куда-то и сразу обратно» —
-                    // жалоба на захват за чёрный фон). Считаем движение от
-                    // НОВОЙ стартовой точки: оно равно нулю.
+                    _rawStartCenter = aligned;
                     delta = CGPointZero;
                 }
                 AscentHUDLog(@"[gesture] перенос %@ (%.0f мс)",
@@ -2182,7 +2168,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // неё (по заказу). Тап по свотчу и по всей строке открывает пикер
         // всплывающей карточкой поверх меню. Иконки-палитры больше нет.
         _accentRow.hidden = NO;
-        CGFloat accentRowH = 30.0;
+        CGFloat accentRowH = 26.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
         CGFloat accentSwatchSize = 22.0;   // чуть меньше прежних 24
         // Целые координаты — рамка ложится ровно на пиксели, без «пиксельных»
@@ -2193,7 +2179,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _accentLabel.frame = CGRectMake(12.0, 0.0,
                                         _accentSwatch.frame.origin.x - 18.0 - 12.0,
                                         accentRowH);
-        y += accentRowH + 10.0;
+        y += accentRowH + 6.0;
 
         // menu theme: выбор ТЕМЫ — надпись слева, две пилюли dark | light
         // СПРАВА (как у accent color — раскладка та же). Реагируют только
