@@ -1775,6 +1775,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Строка переключателя БЕЗ серо-белого фона (по заказу): подложка
         // alpha 0.07 на мелком шрифте выглядела как грязная плашка.
         UIView *row = HUDRoundedBox(12.0, [UIColor clearColor]);
+        // И БЕЗ обводки: HUDRoundedBox рисует рамку 1 pt, которая на пустом
+        // фоне строки стала чётко видна — по заказу её убираем.
+        row.layer.borderWidth = 0.0;
         // Шрифт 12 (а не 13): карточка содержимого сузилась до 158 pt, чтобы
         // панель стала вертикальной, и «Distance» при 13 упиралось в край.
         UILabel *label = HUDLabel(switchTitles[i], 12, UIFontWeightMedium);
@@ -2149,10 +2152,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (baseW <= 0) { baseW = 51.0; }
     if (baseH <= 0) { baseH = 31.0; }
     CGFloat visW = baseW * kSwitchVisualScale;
-    CGFloat visH = baseH * kSwitchVisualScale;
     toggle.bounds = CGRectMake(0, 0, baseW, baseH);
-    toggle.center = CGPointMake(12.0 + visW / 2.0,
-                                (kSwitchRowHeight - visH) / 2.0);
+    // center — это ЦЕНТР view, а не её верх: раньше сюда подставляли верхнюю
+    // точку визуального бокса ((40 − высота) / 2), и тумблер уезжал вверх
+    // почти на полвысоты. Середина строки — правильная точка.
+    toggle.center = CGPointMake(12.0 + visW / 2.0, kSwitchRowHeight / 2.0);
 
     // Подпись — строго справа от визуального края тумблера, на всю высоту
     // строки (высота UILabel «тянется» от нулевого кадра, если её задать
