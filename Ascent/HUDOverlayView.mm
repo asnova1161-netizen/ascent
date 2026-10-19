@@ -480,6 +480,13 @@ static const CGFloat kRawDragArmMove       = 14.0;
 // случая: медленное листание превращалось в перенос, а сам перенос молчал
 // долю секунды, а потом «телепортировал» панель к пальцу.
 static const CGFloat kRawScrollDecide   = 8.0;
+// То же решение, но когда палец лёг НА управляющий элемент (тумблер строки,
+// пилюля, строка конфига). Там 8 pt мало: обычное нажатие дрожит сильнее, и
+// жест уходил в листание/перенос, а переключатель не срабатывал — жалоба
+// «тумблеры ели нажимаются, надо приноровиться». С такого элемента листание
+// забираем только ДЛИННЫМ и ЧИСТО вертикальным ходом, а переноса панели нет
+// вовсе: короткая дрожь остаётся нажатием.
+static const CGFloat kControlScrollDecide = 22.0;
 // Ползунок (вкладка Aim) занимает почти всю ширину карточки, поэтому решать
 // «тянут ползунок или листают вкладку» нужно по преобладанию оси — но с ЯВНЫМ
 // ПЕРЕВЕСОМ В СТОРОНУ ПОЛЗУНКА. У пальца первая дрожь почти всегда чуть
@@ -913,6 +920,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     BOOL _rawArmed;             // удержание прошло — жест стал переносом
     BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
     BOOL _rawHoldFromScroll;    // захват с карточки — долгим удержанием
+    BOOL _rawStartedOnControl;  // палец лёг НА управляющий элемент (тумблер и
+                                // т.п.): листание отбирает жест только явным
+                                // вертикальным ходом (см. kControlScrollDecide)
     BOOL _rawScrollTouched;     // карточку начали листать — это не тап
     BOOL _rawCanScrollUp;       // содержимое карточки может ехать вверх (dy > 0)
     BOOL _rawCanScrollDown;     // ...и вниз (dy < 0) — на момент нажатия
@@ -1201,6 +1211,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawHoldFromScroll = insideScroll &&
                          (_rawTarget == HUDRawDragScroll ||
                           _rawTarget == HUDRawDragControl);
+    // Нажатие легло НА управляющий элемент? Считаем и по цели жеста, и
+    // ГЕОМЕТРИЧЕСКИ (как тапы): внутри скролла hitTest часто возвращает сам
+    // скролл, и по нему строку с тумблером не определить.
+    _rawStartedOnControl = (_rawTarget == HUDRawDragControl) ||
+                           [self pointIsOnControlRow:point];
     // Ползунок (вкладка Aim) пока только ЗАПОМИНАЕМ: решение «драг ползунка
     // или листание вкладки» принимается по первому заметному движению в
     // handleRawTouchPhase: — сразу давить значение нельзя, иначе вертикальный
@@ -1364,11 +1379,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                 CGPoint jumpDelta = CGPointMake(stagePoint.x - _rawStart.x,
                                                 stagePoint.y - _rawStart.y);
                 CGFloat jumpLen = sqrt(jumpDelta.x * jumpDelta.x + jumpDelta.y * jumpDelta.y);
-                if (_rawHoldFromScroll) {
+                if (_rawHoldFromScroll && !_rawStartedOnControl) {
                     // С карточки режим «листать или таскать» решаем теми же
                     // правилами, что и на обычном движении (см. ниже): вертикально
                     // и содержимое ехает — листание; иначе — перенос панели. Только
                     // саму прокрутку к мусорным координатам не применяем.
+                    // С УПРАВЛЯЮЩЕГО элемента (тумблер и т.п.) мусорный скачок не
+                    // решает ничего: ни листания, ни переноса — короткое нажатие
+                    // так и остаётся нажатием.
                     if (jumpLen >= kRawScrollDecide) {
                         BOOL vertical = fabs(jumpDelta.y) > fabs(jumpDelta.x);
                         BOOL scrollable = (_rawCanScrollUp || _rawCanScrollDown);
@@ -1582,7 +1600,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     // удержания: медленное листание не превращается в перенос,
                     // а перенос идёт с первой точки движения — без молчания и
                     // «телепортов» к пальцу.
-                    if (len < kRawScrollDecide) {
+                    if (_rawStartedOnControl) {
+                        // Палец лёг НА управляющий элемент (тумблер, пилюля,
+                        // строка конфига): листание забирает жест только длинным
+                        // И чистым вертикальным ходом, а переноса панели с такой
+                        // строки нет вовсе — короткая дрожь остаётся нажатием
+                        // (жалоба: «тумблеры ели нажимаются, надо
+                        // приноровиться»). Раньше решение принималось с 8 pt, и
+                        // почти любое нажатие с дрожью уходило в листание.
+                        CGFloat adx = fabs(delta.x);
+                        CGFloat ady = fabs(delta.y);
+                        if (!(len >= kControlScrollDecide && ady >= adx * kSliderAxisSlope)) {
+                            return;   // ждём: палец либо пойдёт явно вертикально
+                                      // (листание), либо замрёт (нажатие)
+                        }
+                    } else if (len < kRawScrollDecide) {
                         // Покачали пальцем — ещё не решаем и ничего не двигаем:
                         // тап с дрожью не сдвинет ни строку, ни панель.
                         return;
@@ -1679,6 +1711,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawMoved = NO;
     _rawArmed = NO;
     _rawTapFired = NO;
+    _rawStartedOnControl = NO;
     _dragging = NO;
 }
 
@@ -1709,6 +1742,25 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (view == nil || view.hidden || view.alpha < 0.01) { return NO; }
     CGPoint local = [view convertPoint:point fromView:self];
     return CGRectContainsPoint(view.bounds, local);
+}
+
+/// Палец лежит НА управляющем элементе вкладки: строка тумблера, пилюли
+/// (target/theme), строка accent color или строка конфига. Считаем
+/// ГЕОМЕТРИЧЕСКИ, как тапы: строки лежат внутри скролла, и hitTest часто
+/// возвращает сам скролл — по нему ничего не определить.
+- (BOOL)pointIsOnControlRow:(CGPoint)point
+{
+    for (HUDFlatSwitch *toggle in _switches) {
+        if ([self pointIsOnScrollRow:point row:toggle.superview]) { return YES; }
+    }
+    if ([self pointIsOnScrollRow:point row:_accentRow]) { return YES; }
+    if ([self pointIsOnScrollRow:point row:_themeRow]) { return YES; }
+    if ([self pointIsOnScrollRow:point row:_targetRow]) { return YES; }
+    if ([self pointIsOnScrollRow:point row:_targetPillsRow]) { return YES; }
+    for (UIView *row in _configRows) {
+        if ([self pointIsOnScrollRow:point row:row]) { return YES; }
+    }
+    return NO;
 }
 
 /// Строка видна внутри прокрутки и точка попадает в неё. Строки ниже видимой
@@ -3023,15 +3075,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)selectTab:(NSInteger)tab
 {
+    // Нажатие по УЖЕ ВЫБРАННОЙ вкладке: ни анимации, ни сброса прокрутки — по
+    // заказу («если нажимаешь на уже включённую вкладку, анимации быть не
+    // должно»). Раньше здесь заново проигрывался фейд, и содержимое мигало.
+    if (tab == _tab) { return; }
     _tab = tab;
     _scroll.contentOffset = CGPointZero;   // по заказу: прокрутка всегда с верха
-    // По заказу вкладки переключаются БЕЗ анимации: содержимое просто меняется
-    // на новое (как у нативной вкладки SwiftUI). Пробовали и кросс-фейд, и
-    // проявление из прозрачности — оба варианта не понравились: появлялось
-    // заметное «пропадание» содержимого на время анимации.
-    _contentCard.alpha = 1.0;   // на случай прерванной анимации прошлых сборок
+    // Раскладку новой вкладки делаем СРАЗУ (без анимации), а само содержимое
+    // ПРОЯВЛЯЕМ из прозрачности: по заказу вкладки должны появляться постепенно
+    // и плавно.
     [self setNeedsLayout];
     [self layoutIfNeeded];
+    _contentCard.alpha = 0.0;
+    [UIView animateWithDuration:kMenuFadeDuration animations:^{
+        _contentCard.alpha = 1.0;
+    }];
 }
 
 /// Распознаватели жестов больше НЕ вешаем — и это важно.
