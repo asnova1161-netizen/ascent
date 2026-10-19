@@ -1820,12 +1820,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_accentRow addSubview:_accentLabel];
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
-    // Рамка СЕРАЯ, еле заметная (по заказу) и ТОНКАЯ: 1 pt (2 px на @2x) с
-    // целым радиусом — 1.5 pt на маленьком квадрате смотрелся жирно и
-    // «пиксельно».
+    // Рамка СЕРАЯ, еле заметная (по заказу): 0.5 pt — ровно 1 px на @2x,
+    // темноватая (белый 0.25): на 1 pt / 0.35 обводка была заметнее свотча.
     _accentSwatch.layer.cornerRadius = 5.0;
-    _accentSwatch.layer.borderWidth = 1.0;
-    _accentSwatch.layer.borderColor = [UIColor colorWithWhite:0.35 alpha:1.0].CGColor;
+    _accentSwatch.layer.borderWidth = 0.5;
+    _accentSwatch.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
     _accentSwatch.userInteractionEnabled = NO;
     [_accentRow addSubview:_accentSwatch];
 
@@ -2156,15 +2155,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // center — это ЦЕНТР view, а не её верх: раньше сюда подставляли верхнюю
     // точку визуального бокса ((40 − высота) / 2), и тумблер уезжал вверх
     // почти на полвысоты. Середина строки — правильная точка.
-    toggle.center = CGPointMake(12.0 + visW / 2.0, kSwitchRowHeight / 2.0);
+    // По заказу вся группа (тумблер + подпись) чуть ЛЕВЕЕ (отступ 8 вместо
+    // 12) и чуть ВЫШЕ середины строки (на 2 pt).
+    const CGFloat leftInset = 8.0;
+    const CGFloat liftUp = 2.0;
+    toggle.center = CGPointMake(leftInset + visW / 2.0,
+                                kSwitchRowHeight / 2.0 - liftUp);
 
     // Подпись — строго справа от визуального края тумблера, на всю высоту
     // строки (высота UILabel «тянется» от нулевого кадра, если её задать
-    // неполной — раньше текст уезжал ниже середины).
-    CGFloat labelX = 12.0 + visW + 12.0;
+    // неполной — раньше текст уезжал ниже середины), с тем же подъёмом
+    // на 2 pt вверх.
+    CGFloat labelX = leftInset + visW + 12.0;
     for (UIView *sub in row.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
-            sub.frame = CGRectMake(labelX, 0,
+            sub.frame = CGRectMake(labelX, -liftUp,
                                    MAX(0.0, width - labelX - 12.0),
                                    kSwitchRowHeight);
         }
