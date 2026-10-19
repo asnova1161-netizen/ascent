@@ -75,20 +75,10 @@ private struct LoaderContent: View {
                 // Шрифт — моноширинный (как у заголовка в меню-эталоне,
                 // там своя «техничная» гарнитура), и чуть ниже прежнего.
                 .font(.system(size: 44, weight: .heavy, design: .monospaced))
-                // Цвет надписи — тот же серо-тёмный градиент, что и у кнопки
-                // Start (по заказу). foregroundStyle — только iOS 15+, а цель
-                // проекта iOS 14, поэтому градиент кладём ФОНОМ и обрезаем его
-                // маской того же текста: получается ровно тот же вид.
-                .foregroundColor(.clear)
-                .background(
-                    LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
-                                   startPoint: .top, endPoint: .bottom)
-                        .mask(
-                            Text("ascent")
-                                .font(.system(size: 44, weight: .heavy, design: .monospaced))
-                                .foregroundColor(.black)
-                        )
-                )
+                // По заказу текст в приложении снова БЕЛЫЙ: серо-тёмный градиент
+                // (как у кнопки Start) нужен теперь только в ИКОНКЕ приложения —
+                // там перекрашены буквы «ascent» (см. AppIcon/icon-1024.png).
+                .foregroundColor(.white)
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
                 .offset(y: -8)
                 // Отладочное окно: длинный тап по заголовку.
