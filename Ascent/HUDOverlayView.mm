@@ -1071,6 +1071,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             if ([self sliderInGroup:cursor] != nil) { return HUDRawDragSlider; }
             cursor = cursor.superview;
         }
+        // hitTest мог вернуть сам скролл (строки лежат внутри скролла) — обход
+        // вверх тогда ползунок не найдёт. Проверяем ГЕОМЕТРИЧЕСКИ, как тап: палец
+        // прямо на дорожке ползунка — значит цель «ползунок», иначе движение вбок
+        // по нему не двигало бы значение («ползунки не тянутся»).
+        if ([self sliderUnderStagePoint:[_stage convertPoint:point fromView:self]] != nil) {
+            return HUDRawDragSlider;
+        }
     }
     // Управляющие элементы проверяем ДО шапки и карточки: вкладки, переключатели
     // и слайдеры лежат в панели, и без этого порядка их нажатие превращалось бы
@@ -1179,6 +1186,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             UISlider *slider = [self sliderInGroup:cursor];
             if (slider != nil) { _rawSlider = slider; break; }
             cursor = cursor.superview;
+        }
+        // hitTest мог вернуть сам скролл (строки лежат внутри скролла) — тогда
+        // обход вверх ползунок не найдёт. Ищем его ГЕОМЕТРИЧЕСКИ, по точке
+        // нажатия: без этого цель «ползунок» оставалась без ползунка, и жест
+        // не двигал ничего («ползунки не тянутся»).
+        if (_rawSlider == nil) {
+            _rawSlider = [self sliderUnderStagePoint:_rawStart];
         }
     }
     _rawScrollTouched = NO;
@@ -1392,6 +1406,28 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         }
 
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
+
+        // ПОЛЗУНОК ПОД ПАЛЬЦЕМ: попадание считаем ГЕОМЕТРИЧЕСКИ, как у тапа, а не
+        // по цели жеста. Строки ползунков лежат внутри скролла, и hitTest нередко
+        // отдаёт сам скролл — тогда цель доставалась прокрутке, и движение вбок
+        // по ползунку не давало НИЧЕГО (ни значения, ни листания): снаружи это
+        // выглядело как «ползунки не тянутся». Здесь жест перехватывает ползунок,
+        // если палец начал НА нём и ушёл явно вбок.
+        if (_rawTarget != HUDRawDragSlider && _rawSlider == nil && !_rawScrollTouched) {
+            CGFloat fdx = fabs(delta.x);
+            CGFloat fdy = fabs(delta.y);
+            if (fdx >= kSliderDragDecide && fdx >= fdy * kSliderAxisSlope) {
+                UISlider *under = [self sliderUnderStagePoint:_rawStart];
+                if (under != nil) {
+                    _rawTarget = HUDRawDragSlider;
+                    _rawSlider = under;
+                    _rawHoldable = NO;
+                    _rawArmed = NO;            // дальше — обычный порядок ползунка
+                    _rawHoldFromScroll = NO;
+                    AscentHUDLog(@"[gesture] ползунок под пальцем — тяну значение");
+                }
+            }
+        }
 
         // ПИКЕР: кружок в поле и риска на полосе ведутся пальцем СРАЗУ, без
         // удержания и порогов — прямое управление значением, как в системном
@@ -1630,6 +1666,27 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // это ровно проверка «строка сейчас видна на экране».
     if (!CGRectContainsPoint(_scroll.bounds, inScroll)) { return NO; }
     return CGRectContainsPoint(row.frame, inScroll);
+}
+
+/// Ползунок ПОД точкой — геометрически, как тап (см. performTapAtPoint:).
+/// Строки (и ползунки) лежат внутри скролла, поэтому hitTest для них ненадёжен:
+/// он может вернуть сам скролл, и ползунок тогда «не находится». Точка задаётся
+/// в координатах слоя _stage — оттуда приходят все точки жеста.
+- (UISlider *)sliderUnderStagePoint:(CGPoint)stagePoint
+{
+    if (_scroll == nil) { return nil; }
+    CGPoint point = [self convertPoint:stagePoint fromView:_stage];
+    for (UISlider *slider in _sliders) {
+        UIView *group = slider.superview;
+        if (group == nil || group.hidden) { continue; }
+        // Строка должна быть видна внутри прокрутки (иначе ползунок обрезан).
+        if (![self pointIsOnScrollRow:point row:group]) { continue; }
+        // Небольшой запас по краям: палец часто ложится чуть мимо дорожки.
+        CGRect reach = CGRectInset(slider.bounds, -6.0, -6.0);
+        CGPoint local = [slider convertPoint:point fromView:self];
+        if (CGRectContainsPoint(reach, local)) { return slider; }
+    }
+    return nil;
 }
 
 /// Тап прямо от потока касаний: попадаем в вид под точкой и выполняем его
