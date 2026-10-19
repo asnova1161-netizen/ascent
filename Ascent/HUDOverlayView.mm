@@ -515,9 +515,11 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
     // жест превращается в прокрутку. Без этого порога дрожь руки при нажатии
     // уводила бы содержимое, и кнопки «не нажимались».
     HUDRawDragControl,
-    // Ползунок (вкладка Aim): значение едет под пальцем СРАЗУ, без удержания —
-    // как маркеры пикера. Иначе протяжка по строке слайдера после kRawDragHold
-    // превращалась бы в перенос панели (ветка удержания Control → Panel).
+    // Ползунок (вкладка Aim): драг по горизонтали, но ВЕРТИКАЛЬНЫЙ свайп над
+    // ним обязан листать вкладку — ползунки занимают почти всю ширину карточки,
+    // и без такого решения жест «поднять палец снизу вверх» съедался слайдером
+    // и долистанная до низа вкладка не листалась бы обратно (решение — по
+    // kRawScrollDecide, см. handleRawTouchPhase:).
     HUDRawDragSlider,
     // Пикер accent color (всплывающая карточка поверх меню): прямое управление
     // значением пальцем — кружок в поле тянется, риска по радужной полосе
@@ -846,6 +848,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGSize _panelOffset;
     BOOL _panelOpen;
     NSInteger _tab;
+    NSInteger _contentTab;       // какая вкладка раскладывалась в последний раз:
+                                 // при СМЕНЕ вкладки прокрутку начинаем сверху
 
     // Перетаскивание/прокрутка прямо от потока касаний (тап работает и через
     // синтетические UITouch, а движение — только так).
@@ -1140,8 +1144,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawHoldFromScroll = insideScroll &&
                          (_rawTarget == HUDRawDragScroll ||
                           _rawTarget == HUDRawDragControl);
-    // Ползунок (вкладка Aim) ведётся пальцем с САМОГО начала, как маркеры
-    // пикера: значение сразу ставится под точкой нажатия, дальше палец едет.
+    // Ползунок (вкладка Aim) пока только ЗАПОМИНАЕМ: решение «драг ползунка
+    // или листание вкладки» принимается по первому заметному движению в
+    // handleRawTouchPhase: — сразу давить значение нельзя, иначе вертикальный
+    // свайп над ползунком съедался слайдером и вкладка не листалась обратно.
+    // Тап при этом работает и без этого решения — значение ставит
+    // applyTapToSlider на отпускании.
     _rawSlider = nil;
     if (_rawTarget == HUDRawDragSlider) {
         UIView *cursor = hit;
@@ -1149,10 +1157,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             UISlider *slider = [self sliderInGroup:cursor];
             if (slider != nil) { _rawSlider = slider; break; }
             cursor = cursor.superview;
-        }
-        if (_rawSlider != nil) {
-            _rawArmed = YES;
-            [self dragSlider:_rawSlider toStagePoint:stagePoint];
         }
     }
     _rawScrollTouched = NO;
@@ -1363,13 +1367,45 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             return;
         }
 
-        // ПОЛЗУНОК (вкладка Aim): значение едет под пальцем СРАЗУ, без
-        // удержания и порогов — точку события переводим в координаты слайдера
-        // (см. dragSlider:toStagePoint:). Файл не пишем — см. commitRawDrag.
+        // ПОЛЗУНОК (вкладка Aim): драг по горизонтали, но вертикальный свайп
+        // превращается в лИСТАНИЕ вкладки — иначе ползунки (они почти во всю
+        // ширину карточки) съедали бы вертикальные свайпы, и долистанная до
+        // низа вкладка не листалась бы обратно. Решение — по первому заметному
+        // движению, как у строк с карточки (kRawScrollDecide).
         if (_rawTarget == HUDRawDragSlider) {
-            _rawMoved = YES;
-            if (_rawSlider != nil) { [self dragSlider:_rawSlider toStagePoint:stagePoint]; }
-            return;
+            if (!_rawArmed) {
+                CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
+                if (len < kRawScrollDecide) {
+                    // Покачали пальцем — ещё не решаем и значение не двигаем:
+                    // короткое нажатие остаётся тапом по дорожке слайдера.
+                    return;
+                }
+                BOOL vertical = fabs(delta.y) > fabs(delta.x);
+                BOOL canScroll = (delta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
+                if (vertical && canScroll) {
+                    // Вертикально и вкладке есть куда ехать — это листание:
+                    // цель меняется на прокрутку, дальше жест живёт её
+                    // правилами. Якорь прокрутки — точка нажатия, поэтому
+                    // содержимое едет ровно за пальцем, без «догоняний».
+                    _rawTarget = HUDRawDragScroll;
+                    _rawHoldable = YES;
+                    _rawHoldFromScroll = NO;   // уже решено — без повторного decide
+                    _rawScrollTouched = YES;
+                    _rawSlider = nil;
+                    AscentHUDLog(@"[gesture] ползунок -> листание вкладки");
+                }
+                _rawArmed = YES;
+            }
+            if (_rawTarget == HUDRawDragSlider) {
+                // Горизонтально (или вкладке некуда ехать) — драгаем ползунок:
+                // точку события переводим в координаты слайдера (см.
+                // dragSlider:toStagePoint:). Файл пишем на отпускании.
+                _rawMoved = YES;
+                if (_rawSlider != nil) { [self dragSlider:_rawSlider toStagePoint:stagePoint]; }
+                return;
+            }
+            // Превратилось в листание: _rawArmed уже выставлен, ниже жест
+            // обработан общими правилами прокрутки.
         }
 
         // ПЕРЕНОС квадрата и панели — строго ЗА ПАЛЬЦЕМ, один к одному:
@@ -2521,6 +2557,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 /// элементы одним стеком сверху вниз. Заодно фиксируем contentSize прокрутки.
 - (void)layoutContentForTab:(NSInteger)tab width:(CGFloat)w
 {
+    // Вкладка сменилась (в т.ч. после ухода на другую и обратно) — прокрутку
+    // начинаем СВЕРХУ: долистанный до низа Aim при возврате не должен
+    // открываться снизу. При обычных переложениях ТОЙ ЖЕ вкладки (раскладка
+    // зовётся, например, при появлении клавиатуры) позицию НЕ трогаем.
+    BOOL tabChanged = (_contentTab != tab);
+    _contentTab = tab;
+
     CGFloat x = 10.0;
     CGFloat rowWidth = w - 20.0;
     CGFloat y = 4.0;   // контент чуть выше (по заказу)
@@ -2647,6 +2690,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
+    if (tabChanged) { _scroll.contentOffset = CGPointZero; }
 }
 
 - (void)layoutSwitchRow:(HUDFlatSwitch *)toggle x:(CGFloat)x y:(CGFloat *)y width:(CGFloat)width
