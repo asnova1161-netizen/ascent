@@ -296,6 +296,9 @@ static const NSTimeInterval kSwitchAnimDuration = 0.24;
 // Длительность анимаций самого меню (смена темы, переключение вкладки,
 // появление/исчезновение панели) — тот же порядок, что у тумблера.
 static const NSTimeInterval kMenuFadeDuration = 0.30;
+// Раскрытие списка целей (стрелочка у строки target, вкладка Aim) — заметно
+// БЫСТРЕЕ остальных переходов меню: по заказу стрелочка «долго открывалась».
+static const NSTimeInterval kTargetExpandDuration = 0.16;
 
 /// Тумблер вместо системного UISwitch. Закруглённая пилюля с круглым бегунком;
 /// включение/выключение ПЛАВНОЕ (~0.24 с): подложка перекрашивается и бегунок
@@ -3185,7 +3188,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (NSString *)suffixForKey:(NSString *)key
 {
     if ([key isEqualToString:@"cheat.fov"]) { return @""; }   // просто число, по заказу
-    if ([key isEqualToString:@"cheat.smooth"]) { return @"x"; }
+    // smooth — тоже без буквы «x» (по заказу): показываем просто число.
+    if ([key isEqualToString:@"cheat.smooth"]) { return @""; }
     return @"мс";
 }
 
@@ -3459,15 +3463,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
    textColorAnimated:(sMenuLight ? [UIColor whiteColor] : plainText)];
 }
 
-/// Список целей (вкладка Aim) — раскрыт/скрыт стрелочкой справа от надписи
-/// target. Пилюли head/neck/body/legs появляются ПОД строкой target и
-/// проявляются плавно, стрелочка поворачивается вправо -> вниз (по заказу).
-/// Раскладку менять нужно: раскрытая строка пилюль занимает место, от этого
-/// меняется высота содержимого вкладки.
+/// Список целей (вкладка Aim) — раскрыт/скрыт нажатием на строку target, а
+/// справа от надписи стрелочка: вправо = список скрыт, вниз = раскрыт (по
+/// заказу). Пилюли head/neck/body/legs появляются ПОД строкой target, и при
+/// раскрытии содержимое вкладки ПРОКРУЧИВАЕТСЯ вниз ровно настолько, чтобы их
+/// было видно целиком (окно вкладки ниже списка — без этого цели уезжали за
+/// нижний край). Раскладку менять нужно: раскрытая строка занимает место.
 - (void)setTargetExpanded:(BOOL)expanded
 {
     if (_targetExpanded == expanded) { return; }
     _targetExpanded = expanded;
+    CGFloat maxOffsetY = MAX(0.0, _scroll.contentSize.height - _scroll.bounds.size.height);
     if (expanded) {
         // Пилюли сначала прозрачные и лишь потом проявляются: иначе они
         // «выскочили» бы вместе с перекладкой содержимого.
@@ -3475,14 +3481,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _targetPillsRow.hidden = NO;
         [self setNeedsLayout];
         [self layoutIfNeeded];
-        [UIView animateWithDuration:kMenuFadeDuration animations:^{
+        // Прокрутка: показываем строку целей целиком. Если список уже виден,
+        // прокрутку НЕ трогаем (want ниже текущего положения не уводим).
+        CGFloat minimalOffsetY = CGRectGetMaxY(_targetPillsRow.frame) + 4.0
+                                 - _scroll.bounds.size.height;
+        CGFloat wantOffsetY = MAX(_scroll.contentOffset.y, minimalOffsetY);
+        wantOffsetY = MIN(MAX(wantOffsetY, 0.0), maxOffsetY);
+        [UIView animateWithDuration:kTargetExpandDuration animations:^{
             _targetPillsRow.alpha = 1.0;
             _targetArrow.transform = CGAffineTransformMakeRotation((CGFloat)M_PI_2);
+            _scroll.contentOffset = CGPointMake(_scroll.contentOffset.x, wantOffsetY);
         }];
     } else {
         // Скрытие: сначала пилюли гаснут (и стрелочка возвращается вправо), и
         // только потом строка прячется и отдаёт своё место обратно.
-        [UIView animateWithDuration:kMenuFadeDuration animations:^{
+        [UIView animateWithDuration:kTargetExpandDuration animations:^{
             _targetPillsRow.alpha = 0.0;
             _targetArrow.transform = CGAffineTransformIdentity;
         } completion:^(BOOL finished) {
@@ -3490,6 +3503,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
             _targetPillsRow.hidden = YES;
             [self setNeedsLayout];
             [self layoutIfNeeded];
+            // Содержимое стало короче — прокрутку подтягиваем в новые рамки,
+            // иначе вкладка осталась бы «прокрученной в пустоту».
+            CGFloat limitY = MAX(0.0, _scroll.contentSize.height - _scroll.bounds.size.height);
+            if (_scroll.contentOffset.y > limitY) {
+                [UIView animateWithDuration:kTargetExpandDuration animations:^{
+                    _scroll.contentOffset = CGPointMake(_scroll.contentOffset.x, limitY);
+                }];
+            }
         }];
     }
 }
