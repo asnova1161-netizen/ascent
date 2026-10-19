@@ -490,8 +490,10 @@ static const CGFloat kEdgeMargin     = 6.0;
 
 // Высота вкладок: строка переключателя, строка слайдера и содержимое вкладки
 // «combot». Держим константами, потому что одни и те же числа нужны и сборке
-// строк, и раскладке, и размеру прокручиваемой области.
-static const CGFloat kSwitchRowHeight  = 40.0;
+// строк, и раскладке, и размеру прокручиваемой области. По заказу строка
+// переключателя ПОТЯНЕЕ прежней 40 (32): и тумблер стоит выше, и над
+// accent color больше нет большого пустого резерва.
+static const CGFloat kSwitchRowHeight  = 32.0;
 static const CGFloat kSwitchRowGap     = 4.0;
 static const CGFloat kSliderGroupHeight = 40.0;
 static const CGFloat kSliderGroupGap   = 6.0;
@@ -839,6 +841,10 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint _rawPressCenter;    // положение элемента в момент нажатия (для возврата)
     CGPoint _rawStartCenter;    // позиция квадрата/панели на момент начала
     CGPoint _rawStartOffset;    // contentOffset на момент начала
+    CGRect _rawStageBounds;     // границы сцены на момент начала жеста: если сцена
+                                // пересобралась посреди жеста (быстрый Start сразу
+                                // разворачивает игру), координаты событий приходят
+                                // уже в новом кадре — якорь тогда перебазируем
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
     BOOL _rawArmed;             // удержание прошло — жест стал переносом
     BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
@@ -1069,6 +1075,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawStart = stagePoint;
     _rawLastPoint = stagePoint;
     _rawPressPoint = stagePoint;
+    _rawStageBounds = [self stageBounds];
     // Центр элемента переноса на момент нажатия: квадрат, карточка пикера
     // или панель — от него и считается весь путь пальца (1:1).
     if (_rawTarget == HUDRawDragTrigger) {
@@ -1132,6 +1139,30 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CGPoint stagePoint = [_stage convertPoint:location fromView:window];
 
     NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
+
+    // Сцена могла пересобраться ВО ВРЕМЯ жеста: быстрый Start разворачивает игру
+    // — координаты события приходят уже в новом кадре сцены, а якорь
+    // (_rawStart/_rawStartCenter) считался в старом. Без этого дельты «улетали»
+    // в сторону, панель вела себя как застрявшая, а на отпускании телепортировалась
+    // в точку пальца. Перебазируемся от текущей точки и текущего центра: элемент
+    // остаётся где стоял, дальше идёт строго за пальцем.
+    if (_rawTarget != HUDRawDragNone &&
+        !CGRectEqualToRect(_rawStageBounds, [self stageBounds])) {
+        _rawStageBounds = [self stageBounds];
+        _rawStart = stagePoint;
+        _rawLastPoint = stagePoint;
+        _rawPressPoint = stagePoint;
+        _rawStartOffset = _scroll.contentOffset;
+        if (_rawTarget == HUDRawDragTrigger) {
+            _rawStartCenter = _trigger.center;
+        } else if (_rawTarget == HUDRawDragPickerCard) {
+            _rawStartCenter = _pickerCard.center;
+        } else {
+            _rawStartCenter = _panel.center;
+        }
+        _rawPressCenter = _rawStartCenter;
+        AscentHUDLog(@"[gesture] сцена пересобралась во время жеста — якорь перебазирован");
+    }
 
     if (phase == UITouchPhaseBegan) {
         [self beginRawDragAtPoint:point stagePoint:stagePoint];
@@ -1203,15 +1234,51 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             // и карточка «телепортировалась» к меню. Поэтому оставляем только
             // !_rawArmed: для держимых целей поведение ровно прежнее.
             if (!_rawArmed) {
-                // Перенос ещё не идёт: шаг вести нечем — считаем событие
-                // мусорным и просто перебазируемся. Нажатие при этом не
-                // теряется — точку нажатия помним отдельно (_rawPressPoint).
+                // Перенос ещё не идёт: координаты выглядят как мусорные (остаток
+                // прошлого касания), поэтому ЭТО событие элемент не двигает. Но
+                // якорь (_rawStart/_rawStartCenter) НЕ перебазируем — именно этим
+                // накапливался главный баг «панель стоит, на отпускании телепорт»:
+                // пока главный поток занят стартом игры, события склеиваются, шаг
+                // между ними легко больше kRawJumpLimit, и каждое такое событие
+                // сбрасывало отсчёт от настоящей точки нажатия. Панель тогда стояла
+                // на месте весь перенос, а на первом «нормальном» событии (часто
+                // уже на отпускании) догоняла пальца — ровно тот телепорт, что и
+                // жаловались поймать. Теперь якорь остаётся настоящей точкой
+                // нажатия, а сам жест по прежним правилам включается прямо здесь —
+                // дальше он ведёт элемент сразу, не дожидаясь конца движения.
+                // Мусорное событие чужого касания при этом по-прежнему ничего не
+                // двигает: применять его некуда, а вот уже начатый перенос пропускает
+                // его ниже, не сбивая отсчёт.
                 AscentHUDLog(@"[gesture] скачок %.0f pt — мусорное событие, элемент не двигаю", stepLen);
-                _rawStart = stagePoint;
-                _rawStartOffset = _scroll.contentOffset;
-                _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
-                _rawMoved = NO;
-                _rawArmed = NO;
+                CGPoint jumpDelta = CGPointMake(stagePoint.x - _rawStart.x,
+                                                stagePoint.y - _rawStart.y);
+                CGFloat jumpLen = sqrt(jumpDelta.x * jumpDelta.x + jumpDelta.y * jumpDelta.y);
+                if (_rawHoldFromScroll) {
+                    // С карточки режим «листать или таскать» решаем теми же
+                    // правилами, что и на обычном движении (см. ниже): вертикально
+                    // и содержимое ехает — листание; иначе — перенос панели. Только
+                    // саму прокрутку к мусорным координатам не применяем.
+                    if (jumpLen >= kRawScrollDecide) {
+                        BOOL vertical = fabs(jumpDelta.y) > fabs(jumpDelta.x);
+                        BOOL canScroll = (jumpDelta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
+                        if (vertical && canScroll) {
+                            _rawScrollTouched = YES;
+                        } else {
+                            _rawTarget = HUDRawDragPanel;
+                        }
+                        _rawArmed = YES;
+                    }
+                } else if ((now - _rawStartTime) >= kRawDragHold ||
+                           jumpLen >= kRawDragArmMove) {
+                    // Держание уже вышло (или палец ушёл далеко) — считаем жест
+                    // начатым. _rawMoved НЕ трогаем: движение к этому моменту не
+                    // применялось, поэтому короткое нажатие на месте останется
+                    // нажатием (см. ветку tinyQuick в конце жеста).
+                    if (_rawTarget == HUDRawDragControl) {
+                        _rawTarget = HUDRawDragPanel;
+                    }
+                    _rawArmed = YES;
+                }
                 return;
             }
             // Перенос уже идёт 1:1, а шаг больше предела настоящего пальца —
@@ -1581,7 +1648,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     if (_rawTarget == HUDRawDragPanel) {
-        CGSize panelSize = _panel.bounds.size;
+        // Размер панели берём ТОТ ЖЕ, что применит layoutPanel после жеста: он
+        // считается от dragArea (а bounds панели во время переноса не
+        // пересчитываются — раскладка пропущена). Иначе смещение сохранялось бы
+        // «от другого размера», и на отпускании панель телепортировалась бы.
+        CGSize panelSize = [self panelSizeForArea:[self dragArea]];
         CGPoint center = CGPointMake(_rawStartCenter.x + delta.x, _rawStartCenter.y + delta.y);
         center = LimitStep(_panel.center, center, kRawDragStepMax);
         center = [self clampPanelCenter:center size:panelSize];
@@ -1642,7 +1713,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     if (_rawTarget == HUDRawDragPanel) {
-        CGSize panelSize = _panel.bounds.size;
+        // Размер — как в applyRawDragDelta:, чтобы смещение совпало с тем, что
+        // восстановит layoutPanel сразу после жеста (без «прыжка» на отпускании).
+        CGSize panelSize = [self panelSizeForArea:[self dragArea]];
         CGPoint center = [self clampPanelCenter:_panel.center size:panelSize];
         _panelOffset = [self panelOffsetForCenter:center size:panelSize];
         HUDOverlaySetNumber(@"hud.panel.x", _panelOffset.width);
@@ -2008,10 +2081,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_accentRow addSubview:_accentLabel];
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
-    // Рамка СЕРАЯ, еле заметная (по заказу): 0.5 pt — ровно 1 px на @2x,
-    // темноватая (белый 0.25): на 1 pt / 0.35 обводка была заметнее свотча.
-    _accentSwatch.layer.cornerRadius = 5.0;
-    _accentSwatch.layer.borderWidth = 0.5;
+    // Рамка СЕРАЯ, еле заметная и ПОТОНЬШЕ прежних 0.5 pt (по заказу: толстая
+    // выглядела «пиксельной») — 0.35 pt мягче ложится на @2x. Углы, наоборот,
+    // КРУТЧЕ (7 вместо 5) — свотч стал круглее; сам он меньше (20, см.
+    // layoutContentForTab).
+    _accentSwatch.layer.cornerRadius = 7.0;
+    _accentSwatch.layer.borderWidth = 0.35;
     _accentSwatch.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
     _accentSwatch.userInteractionEnabled = NO;
     [_accentRow addSubview:_accentSwatch];
@@ -2306,22 +2381,26 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: надпись слева, свотч текущего цвета СПРАВА от
-        // неё (по заказу). Тап по свотчу и по всей строке открывает пикер
-        // всплывающей карточкой поверх меню. Иконки-палитры больше нет.
+        // Строка accent color: надпись слева, свотч текущего цвета СРАЗУ РЯДОМ
+        // С НЕЙ (по заказу — раньше свотч висел у дальнего края строки). Тап
+        // по свотчу и по всей строке открывает пикер всплывающей карточкой
+        // поверх меню. Иконки-палитры больше нет.
         _accentRow.hidden = NO;
-        CGFloat accentRowH = 26.0;
+        // Строка компактная (20 вместо 26): большого резерва сверху и снизу
+        // больше нет, вкладка Misc при этом укладывается в окно БЕЗ прокрутки.
+        CGFloat accentRowH = 20.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
-        CGFloat accentSwatchSize = 22.0;   // чуть меньше прежних 24
-        // Целые координаты — рамка ложится ровно на пиксели, без «пиксельных»
-        // краёв.
-        _accentSwatch.frame = CGRectMake(round(rowWidth - 10.0 - accentSwatchSize),
+        CGFloat accentSwatchSize = 20.0;   // меньше прежних 22 (по заказу)
+        // Надпись — в её натуральную ширину, и свотч вплотную справа от неё.
+        // Целые координаты — рамка и текст ложатся ровно на пиксели, без
+        // «пиксельных» краёв.
+        CGSize accentTextSize = [_accentLabel sizeThatFits:CGSizeMake(rowWidth, accentRowH)];
+        CGFloat accentLabelW = ceil(accentTextSize.width);
+        _accentLabel.frame = CGRectMake(12.0, 0.0, accentLabelW, accentRowH);
+        _accentSwatch.frame = CGRectMake(round(12.0 + accentLabelW + 8.0),
                                          round((accentRowH - accentSwatchSize) / 2.0),
                                          accentSwatchSize, accentSwatchSize);
-        _accentLabel.frame = CGRectMake(12.0, 0.0,
-                                        _accentSwatch.frame.origin.x - 18.0 - 12.0,
-                                        accentRowH);
-        y += accentRowH + 6.0;
+        y += accentRowH + 2.0;
 
         // menu theme: выбор ТЕМЫ — надпись слева, две пилюли dark | light
         // СПРАВА (как у accent color — раскладка та же). Реагируют только
@@ -2342,12 +2421,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _themeLabel.frame = CGRectMake(12.0, 0.0,
                                        MAX(0.0, themeDarkX - 12.0 - 6.0),
                                        themeRowH);
-        y += themeRowH + 10.0;
+        y += themeRowH + 6.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
         _unloadButton.hidden = NO;
         _unloadButton.frame = CGRectMake(x, y, rowWidth, 32);
-        y += 32 + 10;
+        y += 32 + 6;
     } else {
         // Слайдеры fov/smooth/delay из вкладки убраны — сразу список конфигов.
 
@@ -2744,6 +2823,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // Обводки у панели нет (по заказу) — borderColor не выставляем.
     _sidebarBg.backgroundColor = HUDCard();
     _contentCard.backgroundColor = HUDCard();
+    // Квадрат-триггер следует теме меню (по заказу): в СВЕТЛОЙ теме он БЕЛЫЙ,
+    // а ползунки-иконки на нём ЧЁРНЫЕ; в тёмной — прежний серый градиент с
+    // белой иконкой. В light градиент почти плоский (чуть темнее книзу), чтобы
+    // квадрат не слипался с белой панелью меню.
+    if (sMenuLight) {
+        _triggerGradient.colors = @[ (id)[UIColor whiteColor].CGColor,
+                                     (id)HUDColor(0.93, 0.93, 0.95).CGColor ];
+        _triggerIcon.tintColor = [UIColor colorWithWhite:0.10 alpha:1.0];
+        _trigger.layer.borderColor = [UIColor colorWithWhite:0.0 alpha:0.15].CGColor;
+    } else {
+        _triggerGradient.colors = @[ (id)HUDColor(0.52, 0.52, 0.56).CGColor,
+                                     (id)HUDColor(0.29, 0.29, 0.33).CGColor ];
+        _triggerIcon.tintColor = [UIColor whiteColor];
+        _trigger.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+    }
     _sectionTitle.textColor = HUDText();
     _unloadButton.backgroundColor = HUDGray();
     [_unloadButton setTitleColor:HUDText() forState:UIControlStateNormal];
