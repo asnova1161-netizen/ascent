@@ -273,16 +273,16 @@ static UIImage *HUDTriggerImage(BOOL open)
 
 #pragma mark - Плоский тумблер
 
-// Размер плоского тумблера (по заказу прямоугольный, «расплющенный»): подложка
-// 44×20 со слабым скруглением 5 pt — не пилюля и не квадрат; бегунок внутри —
-// квадрат 14×14 со скруглением 3 pt цвета #d4d6d9, заметно меньше прежнего.
+// Размер тумблера (по заказу — ЗАКРУГЛЁННЫЙ): подложка-пилюля 44×20 (скругление
+// = половина высоты), бегунок внутри — КРУГ диаметром 14 pt цвета #d4d6d9.
 static const CGFloat kFlatSwitchW = 44.0;
 static const CGFloat kFlatSwitchH = 20.0;
 
-/// Плоский переключатель вместо системного UISwitch: тот — «жирная» пилюля с
-/// большим белым бегунком, а нужен плоский прямоугольник. Касания класс НЕ
-/// обрабатывает (как и раньше): строку переключает жест панели (см.
-/// switchRowTapped: и performTapAtPoint:), переключатель — индикатор состояния.
+/// Тумблер вместо системного UISwitch. Закруглённая пилюля с круглым бегунком;
+/// включение/выключение ПЛАВНОЕ (~0.35 с): подложка перекрашивается и бегунок
+/// едет на место (см. setOn:). Касания класс НЕ обрабатывает (как и раньше):
+/// строку переключает жест панели (см. switchRowTapped: и performTapAtPoint:),
+/// переключатель — индикатор состояния.
 @interface HUDFlatSwitch : UIControl
 /// Включён или выключен; при смене перекрашивает подложку и двигает бегунок.
 @property (nonatomic, assign) BOOL on;
@@ -304,21 +304,50 @@ static const CGFloat kFlatSwitchH = 20.0;
     if (self == nil) { return nil; }
     // Касания не обрабатываем — состояние двигает только жест строки.
     self.userInteractionEnabled = NO;
-    self.layer.cornerRadius = 5.0;
+    // Пилюля (по заказу тумблер закруглённый): скругление = половина высоты.
+    self.layer.cornerRadius = kFlatSwitchH / 2.0;
     _knob = [[UIView alloc] initWithFrame:CGRectZero];
-    // Бегунок #d4d6d9 (по заказу) — не чистый белый.
+    // Бегунок #d4d6d9 (по заказу) — не чистый белый; он КРУГЛЫЙ (по заказу) —
+    // радиус positionKnob считает как side / 2.
     _knob.backgroundColor = [UIColor colorWithRed:0.831 green:0.839 blue:0.851 alpha:1.0];
-    _knob.layer.cornerRadius = 3.0;
     [self addSubview:_knob];
     return self;
 }
 
 - (BOOL)on { return _on; }
 
+/// Куда встать бегунок: слева (выкл) или справа (вкл), с отступом 3 pt от края.
+- (void)positionKnob
+{
+    CGFloat pad = 3.0;
+    CGFloat side = self.bounds.size.height - 2.0 * pad;
+    CGFloat x = _on ? self.bounds.size.width - side - pad : pad;
+    _knob.frame = CGRectMake(round(x), pad, side, side);
+    _knob.layer.cornerRadius = side / 2.0;   // круг (по заказу)
+}
+
 - (void)setOn:(BOOL)on
 {
     _on = on;
-    [self refreshColors];
+    UIColor *target = _on ? _onColor : _offColor;
+    void (^apply)(void) = ^{
+        self.backgroundColor = target;
+        [self positionKnob];
+    };
+    // Плавное включение/выключение ~0.35 с (по заказу): подложка перекрашивается
+    // и бегунок ЕДЕТ на место одновременно. Раньше здесь менялся только цвет —
+    // кадр бегунка пересчитывался лишь при layout, поэтому он «стоял на месте».
+    // До первого layout кадр пуст — анимировать нечего, ставим состояние сразу.
+    if (CGRectIsEmpty(self.bounds)) {
+        apply();
+        return;
+    }
+    [UIView animateWithDuration:0.35
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:apply
+                     completion:nil];
 }
 
 - (void)refreshColors
@@ -329,11 +358,7 @@ static const CGFloat kFlatSwitchH = 20.0;
 - (void)layoutSubviews
 {
     [super layoutSubviews];
-    // Бегунок слева (выкл) или справа (вкл), с одинаковым отступом 3 pt.
-    CGFloat pad = 3.0;
-    CGFloat side = self.bounds.size.height - 2.0 * pad;
-    CGFloat x = _on ? self.bounds.size.width - side - pad : pad;
-    _knob.frame = CGRectMake(round(x), pad, side, side);
+    [self positionKnob];
 }
 
 @end
@@ -1942,11 +1967,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         label.autoresizingMask = UIViewAutoresizingNone;
         [row addSubview:label];
 
-        // Плоский прямоугольный тумблер вместо системного UISwitch (по заказу):
-        // тот смотрелся «жирной» пилюлей с большим белым бегунком. Касания не
-        // обрабатывает (выставлено в initWithFrame: класса) — состояние двигает
-        // только жест строки, иначе касания воюют с ним и получается двойное
-        // переключение.
+        // Закруглённый тумблер вместо системного UISwitch (по заказу): своя
+        // пилюля с круглым бегунком и плавной анимацией (см. HUDFlatSwitch).
+        // Касания не обрабатывает (выставлено в initWithFrame: класса) —
+        // состояние двигает только жест строки, иначе касания воюют с ним и
+        // получается двойное переключение.
         HUDFlatSwitch *toggle = [[HUDFlatSwitch alloc] initWithFrame:
                                     CGRectMake(0, 0, kFlatSwitchW, kFlatSwitchH)];
         toggle.onColor = HUDSwitchOn();
@@ -2348,9 +2373,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     row.hidden = NO;
     row.frame = CGRectMake(x, *y, width, kSwitchRowHeight);
 
-    // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Тумблер плоский
-    // прямоугольный (см. HUDFlatSwitch), никаких transform — кадр задаём
-    // напрямую, центрируя по высоте строки.
+    // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Тумблер закруглённый
+    // (см. HUDFlatSwitch), никаких transform — кадр задаём напрямую, центрируя
+    // по высоте строки.
     // По заказу вся группа (тумблер + подпись) чуть ЛЕВЕЕ (отступ 8 вместо
     // 12) и чуть ВЫШЕ середины строки (на 2 pt).
     const CGFloat leftInset = 8.0;
