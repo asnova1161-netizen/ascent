@@ -360,6 +360,11 @@ static const CGFloat kSwitchRowHeight  = 40.0;
 static const CGFloat kSwitchRowGap     = 8.0;
 static const CGFloat kSliderGroupHeight = 40.0;
 static const CGFloat kSliderGroupGap   = 6.0;
+// Визуальный масштаб тумблеров: стандартный UISwitch 51×31 на строке 40 pt
+// смотрелся громоздко (по заказу все переключатели меньше). Меняем только ВИД
+// через transform — bounds/center остаются «родными», позицию в строке считает
+// layoutSwitchRow: по визуальному размеру.
+static const CGFloat kSwitchVisualScale = 0.72;
 
 // Что тянет палец в потоке касаний (см. handleRawTouchPhase:...).
 typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
@@ -1767,7 +1772,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                                            @"Aimbot",
                                            @"Overlay" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
-        UIView *row = HUDRoundedBox(12.0, [UIColor colorWithWhite:1.0 alpha:0.07]);
+        // Строка переключателя БЕЗ серо-белого фона (по заказу): подложка
+        // alpha 0.07 на мелком шрифте выглядела как грязная плашка.
+        UIView *row = HUDRoundedBox(12.0, [UIColor clearColor]);
         // Шрифт 12 (а не 13): карточка содержимого сузилась до 158 pt, чтобы
         // панель стала вертикальной, и «Distance» при 13 упиралось в край.
         UILabel *label = HUDLabel(switchTitles[i], 12, UIFontWeightMedium);
@@ -1785,6 +1792,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // на строке и получается двойное переключение) — состояние двигает только
         // наш жест, а сам переключатель остаётся индикатором.
         toggle.userInteractionEnabled = NO;
+        toggle.transform = CGAffineTransformMakeScale(kSwitchVisualScale,
+                                                       kSwitchVisualScale);
         [row addSubview:toggle];
 
         [self addTapGesture:row action:@selector(switchRowTapped:)];
@@ -1797,7 +1806,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // всей строке открывает HSV-пикер всплывающей карточкой поверх меню
     // (см. togglePicker). Иконки-палитры больше нет — убрана по заказу.
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
-    _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+    // Без серо-белой подложки (по заказу) — строка живёт только на фоне вкладки,
+    // её читают надпись и свотч. Вкладка/раскладка при этом НЕ меняются.
+    _accentRow.backgroundColor = [UIColor clearColor];
     _accentRow.layer.cornerRadius = 12.0;
     _accentRow.autoresizingMask = UIViewAutoresizingNone;
     _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
@@ -2129,23 +2140,31 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     row.hidden = NO;
     row.frame = CGRectMake(x, *y, width, kSwitchRowHeight);
 
-    // Подпись задаём ЯВНО и ровно по высоте строки: у UILabel иначе
-    // «тянется» высота (autoresizing) от нулевого размера строки, и текст
-    // уезжает ниже её середины — надписи выглядели сдвинутыми вниз.
-    // Карточка снова широкая (≈258 pt), поэтому отступы обычные.
+    // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Кадр тумблера
+    // задаём через bounds/center (НЕ frame: при активном transform свойство
+    // frame не определено и позиция «плясала» бы). Позицию считаем по
+    // ВИЗУАЛЬНОМУ размеру — transform масштабирует только вид, не bounds.
+    CGFloat baseW = toggle.bounds.size.width;
+    CGFloat baseH = toggle.bounds.size.height;
+    if (baseW <= 0) { baseW = 51.0; }
+    if (baseH <= 0) { baseH = 31.0; }
+    CGFloat visW = baseW * kSwitchVisualScale;
+    CGFloat visH = baseH * kSwitchVisualScale;
+    toggle.bounds = CGRectMake(0, 0, baseW, baseH);
+    toggle.center = CGPointMake(12.0 + visW / 2.0,
+                                (kSwitchRowHeight - visH) / 2.0);
+
+    // Подпись — строго справа от визуального края тумблера, на всю высоту
+    // строки (высота UILabel «тянется» от нулевого кадра, если её задать
+    // неполной — раньше текст уезжал ниже середины).
+    CGFloat labelX = 12.0 + visW + 12.0;
     for (UIView *sub in row.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
-            sub.frame = CGRectMake(14, 0, width - 80.0, kSwitchRowHeight);
+            sub.frame = CGRectMake(labelX, 0,
+                                   MAX(0.0, width - labelX - 12.0),
+                                   kSwitchRowHeight);
         }
     }
-
-    CGFloat toggleWidth = toggle.bounds.size.width;
-    if (toggleWidth <= 0) { toggleWidth = 51.0; }
-    CGFloat toggleHeight = toggle.bounds.size.height;
-    if (toggleHeight <= 0) { toggleHeight = 31.0; }
-    toggle.frame = CGRectMake(width - toggleWidth - 10,
-                              (kSwitchRowHeight - toggleHeight) / 2.0,
-                              toggleWidth, toggleHeight);
     *y += kSwitchRowHeight + kSwitchRowGap;
 }
 
