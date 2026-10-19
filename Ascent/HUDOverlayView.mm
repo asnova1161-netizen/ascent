@@ -2200,7 +2200,15 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel.layer removeAllAnimations];
     if (_panelOpen) {
         [self reloadCheatControls];
-        [self selectTab:_tab];
+        // Вкладку НЕ переключаем через selectTab: при открытии панель и так
+        // проявляется целиком, и фейд содержимого поверх этого только мигал бы.
+        // Раскладку всё равно делаем заранее — до начала фейда панели.
+        _scroll.contentOffset = CGPointZero;
+        // Содержимое карточки показываем сразу: фейд вкладки мог остаться
+        // незавершённым, если панель закрыли на середине анимации.
+        _contentCard.alpha = 1.0;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
         // _captureHidden: при записи экрана панель остаётся скрытой, даже если
         // квадрат «открылся» — иначе меню засветилось бы в записи.
         _panel.hidden = _captureHidden;
@@ -2698,10 +2706,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat cardH = h - 2.0 * inset;
 
     _panelHeader.frame = CGRectMake(0, 0, w, h);   // зона переноса — вся панель
-    // По заказу надпись «ascent» — ПО ЦЕНТРУ колонки вкладок (раньше была
-    // прижата к левому краю и выглядела смещённой влево). Ширину берём ровно по
-    // колонке, как у метки сборки внизу; текст центрируется внутри неё.
-    _panelTitle.frame = CGRectMake(sidebarX, titleTop, sidebarW, titleH);
+    // По заказу надпись «ascent» — по центру колонки вкладок, но ЧУТЬ ЛЕВЕЕ
+    // центра: кадр берём уже колонки (на 24 pt), текст внутри центрируется, и
+    // надпись уезжает на 12 pt влево. Раньше она шла ровно по центру и читалась
+    // правее, чем нужно.
+    _panelTitle.frame = CGRectMake(sidebarX, titleTop, MAX(sidebarW - 24.0, 40.0), titleH);
     _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
     // Метка сборки — в самый низ колонки, под столбиком вкладок (у вкладок
     // «кучно сверху», снизу колонки всегда пусто).
@@ -2953,17 +2962,18 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)selectTab:(NSInteger)tab
 {
     _tab = tab;
-    // Переключение вкладки — с анимацией (по заказу): старое содержимое
-    // перетекает в новое (кросс-фейд transitionWithView берёт «до» и «после»
-    // карточки целиком — номер вкладки и цвет индикатора тоже перетекают).
-    [UIView transitionWithView:_scroll
-                      duration:kMenuFadeDuration
-                       options:UIViewAnimationOptionTransitionCrossDissolve
-                    animations:^{
-        [self setNeedsLayout];
-        [self layoutIfNeeded];
-    } completion:nil];
-    _scroll.contentOffset = CGPointZero;
+    _scroll.contentOffset = CGPointZero;   // по заказу: прокрутка всегда с верха
+    // Раскладку новой вкладки делаем СРАЗУ (без анимации), а само содержимое
+    // ПРОЯВЛЯЕМ фейдом из прозрачности: по заказу вкладки должны появляться
+    // постепенно и плавно. Кросс-фейд (transitionWithView) на этом месте
+    // выглядел как «вылет» карточки — особенно при первом открытии панели, когда
+    // снимок «до» брался у ещё невидимой панели (alpha = 0).
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    _contentCard.alpha = 0.0;
+    [UIView animateWithDuration:kMenuFadeDuration animations:^{
+        _contentCard.alpha = 1.0;
+    }];
 }
 
 /// Распознаватели жестов больше НЕ вешаем — и это важно.
