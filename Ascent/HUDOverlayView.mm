@@ -126,6 +126,9 @@ static UIColor *HUDSoftFill(void)  { return [UIColor colorWithWhite:(sMenuLight 
 // треком iOS (он на светлом фоне ≈ 0.91), и включённый тумблер выглядел без
 // заливки; на белой панели 0.35 читался плотно — берём этот цвет везде.
 static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:0.35 alpha:1.0]; }
+// Фон ВЫКЛЮЧЕННОГО тумблера: полупрозрачный серый текущей темы.
+static UIColor *HUDSwitchOff(void) { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
+                                                              alpha:(sMenuLight ? 0.20 : 0.22)]; }
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
@@ -258,15 +261,82 @@ static UIView *HUDRoundedBox(CGFloat radius, UIColor *fill)
     return view;
 }
 
-/// Иконка квадратика. Размер/вес ровно как у SwiftUI-версии в приложении
-/// (`.font(.system(size: 20, weight: .bold))`), иначе при передаче эстафеты от
-/// квадрата в приложении к квадрату HUD иконка «толстела/худела» на глазах.
+/// Иконка квадратика. Вес Medium вместо Bold (по заказу): ползунки на иконке
+/// были «жирными» — на размере 20 pt они читаются и тоньше. Приложение квадрат
+/// больше не рисует (см. LoaderView), держать пару весов больше не с чем.
 static UIImage *HUDTriggerImage(BOOL open)
 {
     UIImageSymbolConfiguration *config =
-        [UIImageSymbolConfiguration configurationWithPointSize:20.0 weight:UIImageSymbolWeightBold];
+        [UIImageSymbolConfiguration configurationWithPointSize:20.0 weight:UIImageSymbolWeightMedium];
     return [UIImage systemImageNamed:(open ? @"xmark" : @"slider.horizontal.3") withConfiguration:config];
 }
+
+#pragma mark - Плоский тумблер
+
+// Размер плоского тумблера (по заказу прямоугольный, «расплющенный»): подложка
+// 44×20 со слабым скруглением 5 pt — не пилюля и не квадрат; бегунок внутри —
+// квадрат 14×14 со скруглением 3 pt цвета #d4d6d9, заметно меньше прежнего.
+static const CGFloat kFlatSwitchW = 44.0;
+static const CGFloat kFlatSwitchH = 20.0;
+
+/// Плоский переключатель вместо системного UISwitch: тот — «жирная» пилюля с
+/// большим белым бегунком, а нужен плоский прямоугольник. Касания класс НЕ
+/// обрабатывает (как и раньше): строку переключает жест панели (см.
+/// switchRowTapped: и performTapAtPoint:), переключатель — индикатор состояния.
+@interface HUDFlatSwitch : UIControl
+/// Включён или выключен; при смене перекрашивает подложку и двигает бегунок.
+@property (nonatomic, assign) BOOL on;
+/// Цвета подложки вкл/выкл — их задаёт палитра темы (см. applyMenuTheme).
+@property (nonatomic, strong) UIColor *onColor;
+@property (nonatomic, strong) UIColor *offColor;
+/// Перекрасить подложку под текущее состояние (после смены onColor/offColor).
+- (void)refreshColors;
+@end
+
+@implementation HUDFlatSwitch {
+    BOOL _on;
+    UIView *_knob;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self == nil) { return nil; }
+    // Касания не обрабатываем — состояние двигает только жест строки.
+    self.userInteractionEnabled = NO;
+    self.layer.cornerRadius = 5.0;
+    _knob = [[UIView alloc] initWithFrame:CGRectZero];
+    // Бегунок #d4d6d9 (по заказу) — не чистый белый.
+    _knob.backgroundColor = [UIColor colorWithRed:0.831 green:0.839 blue:0.851 alpha:1.0];
+    _knob.layer.cornerRadius = 3.0;
+    [self addSubview:_knob];
+    return self;
+}
+
+- (BOOL)on { return _on; }
+
+- (void)setOn:(BOOL)on
+{
+    _on = on;
+    [self refreshColors];
+}
+
+- (void)refreshColors
+{
+    self.backgroundColor = _on ? _onColor : _offColor;
+}
+
+- (void)layoutSubviews
+{
+    [super layoutSubviews];
+    // Бегунок слева (выкл) или справа (вкл), с одинаковым отступом 3 pt.
+    CGFloat pad = 3.0;
+    CGFloat side = self.bounds.size.height - 2.0 * pad;
+    CGFloat x = _on ? self.bounds.size.width - side - pad : pad;
+    _knob.frame = CGRectMake(round(x), pad, side, side);
+}
+
+@end
 
 #pragma mark - Ориентация
 
@@ -352,21 +422,26 @@ static const CGFloat kRawDragStepMax       = 240.0;
 // сверяется с kRawTapSlop, и короткое нажатие остаётся нажатием.
 static const NSTimeInterval kRawDragHold   = 0.06;
 static const CGFloat kRawDragArmMove       = 14.0;
-// Захват панели с ЧЁРНОЙ карточки (прокрутка и строки внутри неё): меню должно
-// таскаться и за чёрные области, а не только за серые поля. Карточка отдаёт
-// перенос по ДОЛГОМУ удержанию; движение ДО срока — обычная прокрутка, поэтому
-// листать вкладки по-прежнему можно. С короткими задержками захват не спутать:
-// настоящий свайп начинается раньше 0.25 с, а удержание без движения — нет.
-static const NSTimeInterval kRawGrabHold   = 0.25;
+// Жест, начатый на чёрной карточке вкладки (прокрутка и строки внутри неё),
+// решается по первому заметному движению — без каких-либо таймеров удержания:
+// вертикальное движение в сторону, где содержимое ещё может ехать, = листание
+// до конца жеста; если ехать некуда (лист у края) или движение горизонтальное,
+// = перенос панели, идущий СРАЗУ и строго за пальцем. Таймеры ломали оба
+// случая: медленное листание превращалось в перенос, а сам перенос молчал
+// долю секунды, а потом «телепортировал» панель к пальцу.
+static const CGFloat kRawScrollDecide   = 8.0;
 // Борт панели: касание в пределах этого расстояния от края панели — это ВСЕГДА
 // «взять меню», даже если попало на чёрную карточку вкладки. Строки и скролл
-// начинаются глубже, поэтому у края панель берётся сразу (без удержания) и её
-// можно таскать за любую сторону — в том числе за нижнюю правую — без
-// «пролагивания» в первые 0.25 с.
+// начинаются глубже, поэтому у края панель берётся сразу, за любую сторону.
 static const CGFloat kPanelGrabRim      = 14.0;
 // Если за весь жест палец прошёл меньше этого, жест считается НАЖАТИЕМ:
 // элемент возвращается ровно на место, где был в момент нажатия.
 static const CGFloat kRawTapSlop           = 14.0;
+// Возврат «это было нажатие» действует только для коротких жестов: если палец
+// водил дольше срока, крошечный путь — это уже НАМЕРЕННОЕ «чуть перетащить»,
+// и элемент остаётся там, где его оставили (иначе панель после маленького
+// переноса телепортировалась назад к точке захвата).
+static const NSTimeInterval kRawTapMaxTime   = 0.25;
 
 // Раскладка панели (по образцу меню-эталона MY IMGUI): заголовок слева сверху,
 // под ним колонка вкладок, справа — тёмная карточка контента во всю высоту.
@@ -387,11 +462,6 @@ static const CGFloat kSwitchRowHeight  = 40.0;
 static const CGFloat kSwitchRowGap     = 4.0;
 static const CGFloat kSliderGroupHeight = 40.0;
 static const CGFloat kSliderGroupGap   = 6.0;
-// Визуальный масштаб тумблеров: стандартный UISwitch 51×31 на строке 40 pt
-// смотрелся громоздко (по заказу все переключатели меньше). Меняем только ВИД
-// через transform — bounds/center остаются «родными», позицию в строке считает
-// layoutSwitchRow: по визуальному размеру.
-static const CGFloat kSwitchVisualScale = 0.72;
 
 // Что тянет палец в потоке касаний (см. handleRawTouchPhase:...).
 typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
@@ -706,7 +776,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Запись экрана/AirPlay: панель и квадрат скрыты, пока UIScreen.isCaptured
     // (вкладка Misc, переключатель overlay).
     BOOL _captureHidden;
-    NSMutableArray<UISwitch *> *_switches;
+    NSMutableArray<HUDFlatSwitch *> *_switches;
     NSMutableArray<UISlider *> *_sliders;
     NSMutableDictionary<NSString *, UILabel *> *_sliderValueLabels;
     // Тёмная колонка вкладок слева (лежит ВНУТРИ _panelHeader — см. buildPanel).
@@ -740,9 +810,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     BOOL _rawArmed;             // удержание прошло — жест стал переносом
     BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
     BOOL _rawHoldFromScroll;    // захват с карточки — долгим удержанием
-    BOOL _rawScrollTouched;     // карточку успели прокрутить — это не тап
-    NSTimeInterval _rawGrabDeadline; // крайний срок удержания для захвата с
-                                     // карточки (отодвигается, пока идёт скролл)
+    BOOL _rawScrollTouched;     // карточку начали листать — это не тап
+    BOOL _rawCanScrollUp;       // содержимое карточки может ехать вверх (dy > 0)
+    BOOL _rawCanScrollDown;     // ...и вниз (dy < 0) — на момент нажатия
     BOOL _rawTapFired;          // тап уже отработан этим жестом (не дважды)
     BOOL _dragging;             // жест сейчас владеет позицией квадрата/панели
     CGFloat _rawThreshold;      // порог «это уже протяжка, а не тап»
@@ -790,26 +860,35 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _espView.hidden = YES;
     [_stage addSubview:_espView];
 
+    // По заказу при КАЖДОМ новом запуске сбрасываются ВСЕ настройки меню:
+    // позиции квадрата и панели, акцент, тема и все переключатели. Список
+    // конфигов НЕ трогаем — он лежит в отдельном файле. Всё делается ОДНИМ
+    // словарём и ОДНОЙ записью файла: раньше шло восемь отдельных
+    // HUDOverlaySetFlag, и каждый заново читал plist и атомарно его
+    // перезаписывал. Значения по умолчанию: переключатели выключены (см.
+    // HUDSwitchDefault), акцент — красный (см. HUDMenuAccentLoad), тема — dark.
+    NSMutableDictionary *fresh = HUDOverlayDict();
+    [fresh removeObjectsForKeys:@[ @"cheat.esp", @"cheat.aimbot", @"misc.overlay",
+                                   @"hud.accent", @"hud.accent.h", @"hud.accent.s",
+                                   @"hud.accent.v", @"hud.theme" ]];
+    fresh[@"trigger.x"] = @0;
+    fresh[@"trigger.y"] = @0;
+    fresh[@"hud.panel.x"] = @0;
+    fresh[@"hud.panel.y"] = @0;
+    // Под-опций ESP в меню больше нет (остался только Enable), а старые значения
+    // в файле прочитал бы холст ESP — приводим их к нужным.
+    fresh[@"esp.box"] = @1;
+    fresh[@"esp.health"] = @1;
+    fresh[@"esp.name"] = @1;
+    fresh[@"esp.distance"] = @1;
+    fresh[@"esp.snapline"] = @0;
+    HUDOverlayWrite(fresh);
+
     _triggerOffset = CGSizeMake(HUDOverlayNumber(@"trigger.x", 0),
                                 HUDOverlayNumber(@"trigger.y", 0));
     _panelOffset = CGSizeMake(HUDOverlayNumber(@"hud.panel.x", 0),
                               HUDOverlayNumber(@"hud.panel.y", 0));
     _tab = 0;
-
-    // Читы по умолчанию ВЫКЛЮЧЕНЫ. В общем файле значения переживают
-    // перезапуск, поэтому меню открывалось со всем включённым — сбрасываем
-    // переключатели при каждом подъёме оверлея. Позиции квадрата и панели при
-    // этом сохраняются.
-    HUDOverlaySetFlag(@"cheat.esp", NO);
-    HUDOverlaySetFlag(@"cheat.aimbot", NO);
-    // Под-опций ESP в меню больше нет (остался только Enable), а старые
-    // значения лежат в общем файле. Приводим их к тому, что читает холст ESP,
-    // — иначе, например, snapline остался бы включённым навсегда, без кнопки.
-    HUDOverlaySetFlag(@"esp.box", YES);
-    HUDOverlaySetFlag(@"esp.health", YES);
-    HUDOverlaySetFlag(@"esp.name", YES);
-    HUDOverlaySetFlag(@"esp.distance", YES);
-    HUDOverlaySetFlag(@"esp.snapline", NO);
 
     _configRows = [NSMutableArray array];
     _configNames = [NSMutableArray array];
@@ -825,8 +904,17 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     sMenuLight = (HUDOverlayNumber(@"hud.theme", 0.0) > 0.5);
 
     [self buildTrigger];
-    [self buildPanel];
     [self startOrientationObserver];
+
+    // Панель (сборка контента, конфиги, тема — самая тяжёлая часть поднятия
+    // оверлея) собираем на СЛЕДУЮЩЕМ такте главной очереди: квадрат к этому
+    // моменту уже добавлен в иерархию и появляется на экране раньше — меню
+    // после Start выезжает как можно быстрее. Тап по квадрату, пока панели
+    // ещё нет, просто игнорируется (см. togglePanel).
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self buildPanel];
+        [self setNeedsLayout];
+    });
 
     // Сообщаем приложению, что квадрат рисует HUD и дублировать его в app не
     // нужно. Приложение покажет свой запасной квадрат, только если этой метки
@@ -926,22 +1014,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 }
 
-/// Двигает ли палец содержимое вкладки прямо СЕЙЧАС: пока кламп contentOffset
-/// реально меняется, это листание. Листание не должно никогда превращаться в
-/// перенос панели, поэтому по этому признаку в handleRawTouchPhase отодвигается
-/// срок удержания (kRawGrabHold). Если содержимое УПЕРЛОСЬ (кламп вернул бы ту
-/// же точку), «мёртвый ход» идёт уже ни за чем — удержание в этой точке
-/// считается обычным, и панель после него захватывается.
-- (BOOL)rawScrollConsumesDelta:(CGPoint)delta
-{
-    CGFloat minY = -_scroll.contentInset.top;
-    CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
-                       _scroll.contentInset.bottom, minY);
-    CGFloat y = _rawStartOffset.y - delta.y;
-    CGFloat clamped = MIN(MAX(y, minY), maxY);
-    return fabs(clamped - _scroll.contentOffset.y) > 0.5;
-}
-
 /// Начинает (или заново подхватывает после паузы) жест от указанной точки.
 /// Координаты — точка в своей иерархии (для hitTest) и точка в слое _stage (для
 /// смещения с учётом поворота экрана).
@@ -986,10 +1058,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawArmed = (_rawTarget == HUDRawDragPickerSV ||
                  _rawTarget == HUDRawDragPickerHue ||
                  _rawTarget == HUDRawDragPickerCard);
-    // Где удержание вообще разрешено. Квадрат, панель, кнопки вкладок — как
-    // раньше, почти сразу. С ЧЁРНОЙ карточки (прокрутка и строки внутри) панель
-    // берётся ДОЛГИМ удержанием (kRawGrabHold), а движение до срока уходит в
-    // прокрутку — иначе перенос по строке съедал бы листание вкладок.
+    // Где жест вообще может стать переносом. Квадрат, панель, кнопки вкладок —
+    // как раньше, почти сразу. С ЧЁРНОЙ карточки (прокрутка и строки внутри)
+    // режим «листать или таскать» решается первым заметным движением по
+    // направлению и возможности прокрутки (см. handleRawTouchPhase) — таймеров
+    // тут нет ни никаких: из-за них листание и перенос путались.
     UIView *hit = [self hitTest:point withEvent:nil];
     BOOL insideScroll = (hit != nil && [hit isDescendantOfView:_scroll]);
     _rawHoldable = (_rawTarget == HUDRawDragTrigger ||
@@ -1004,11 +1077,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _dragging = YES;
     _rawStartTime = [[NSProcessInfo processInfo] systemUptime];
     _rawLastTime = _rawStartTime;
-    // Срок захвата с чёрной карточки. Он отодвигается, пока палец реально
-    // ЛИСТАЕТ содержимое (см. rawScrollConsumesDelta в handleRawTouchPhase):
-    // листание никогда не превращается в перенос панели, захват возможен
-    // только после паузы, когда содержимое уже стоит.
-    _rawGrabDeadline = _rawStartTime + kRawGrabHold;
+    // Может ли содержимое карточки ещё ехать вверх/вниз с этой точки нажатия:
+    // от этого зависит решение «листать или таскать» (см. handleRawTouchPhase).
+    CGFloat minY = -_scroll.contentInset.top;
+    CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
+                       _scroll.contentInset.bottom, minY);
+    _rawCanScrollUp = (_scroll.contentOffset.y - minY) > 0.5;
+    _rawCanScrollDown = (maxY - _scroll.contentOffset.y) > 0.5;
 }
 
 - (void)handleRawTouchPhase:(UITouchPhase)phase
@@ -1152,70 +1227,44 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         // смещение элемента всегда равно смещению пальца.
         if (_rawHoldable) {
             if (!_rawArmed) {
-                // С ЧЁРНОЙ карточки (и с её строк) панель берётся только по
-                // ДОЛГОМУ удержанию: всё, что палец сделал до срока, — это
-                // прокрутка, и её не надо ломать. От шапки, колонки и квадрата
-                // перенос включается как раньше — почти сразу.
+                CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
                 if (_rawHoldFromScroll) {
-                    if (now < _rawGrabDeadline) {
-                        // Ещё не удержали: палец ведёт прокрутку содержимого —
-                        // 1:1, от точки нажатия, как штатный скролл. Пока
-                        // содержимое реально ЕДЕТ, срок захвата отодвигается:
-                        // листание вкладки не может превратиться в перенос
-                        // панели ни на каком участке, даже если палец едет
-                        // медленно или содержимое упёрлось в кламп. Никаких
-                        // «ранних захватов» у края: быстрый флик по короткому
-                        // списку (Misc чуть длиннее окна) — это всегда скролл.
-                        if ([self rawScrollConsumesDelta:delta]) {
-                            _rawGrabDeadline = now + kRawGrabHold;
-                        }
-                        if (delta.x * delta.x + delta.y * delta.y > 100.0 && !_rawScrollTouched) {
-                            _rawScrollTouched = YES;
-                            _rawMoved = YES;
-                            AscentHUDLog(@"[gesture] поток: тяну содержимое вкладки");
-                        }
-                        [self applyRawDragDelta:delta];
+                    // Жест на чёрной карточке: режим «листать или таскать»
+                    // решаем ОДИН раз по первому заметному движению
+                    // (kRawScrollDecide) и держим до конца жеста. Вертикально
+                    // и содержимое может ехать в ту сторону — листание; если
+                    // ехать некуда (лист у края) или движение горизонтальное —
+                    // сразу перенос панели, строго за пальцем. Никаких таймеров
+                    // удержания: медленное листание не превращается в перенос,
+                    // а перенос идёт с первой точки движения — без молчания и
+                    // «телепортов» к пальцу.
+                    if (len < kRawScrollDecide) {
+                        // Покачали пальцем — ещё не решаем и ничего не двигаем:
+                        // тап с дрожью не сдвинет ни строку, ни панель.
                         return;
+                    }
+                    BOOL vertical = fabs(delta.y) > fabs(delta.x);
+                    BOOL canScroll = (delta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
+                    if (vertical && canScroll) {
+                        // Листание — и до конца жеста переносом уже не станет.
+                        _rawScrollTouched = YES;
+                        AscentHUDLog(@"[gesture] поток: листаю содержимое вкладки");
+                    } else {
+                        _rawTarget = HUDRawDragPanel;
+                        AscentHUDLog(@"[gesture] перенос панели с карточки");
                     }
                 } else {
                     // Включаем перенос либо по очень короткому удержанию, либо
                     // сразу, если палец успел уйти далеко. Нажатие короткое и почти
                     // без движения, поэтому переносом не становится.
-                    CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
                     if ((now - _rawStartTime) < kRawDragHold && len < kRawDragArmMove) { return; }
+                    // Удержание на кнопке вкладки тоже переносит панель — так
+                    // меню можно утащить не только за шапку.
+                    if (_rawTarget == HUDRawDragControl) {
+                        _rawTarget = HUDRawDragPanel;
+                    }
                 }
                 _rawArmed = YES;
-                // Удержание на кнопке вкладки и долгое удержание на карточке
-                // тоже переносят панель — так меню можно утащить не только за
-                // шапку, но и за чёрные области.
-                if (_rawTarget == HUDRawDragControl || _rawTarget == HUDRawDragScroll) {
-                    _rawTarget = HUDRawDragPanel;
-                }
-                if (_rawHoldFromScroll) {
-                    // СНАП при захвате: один прыжок к «правильной» точке —
-                    // панель встаёт там, где была бы, если бы её тащили от
-                    // самого нажатия (центр на момент нажатия + весь путь
-                    // пальца), с клампом к экрану. Раньше отсчёт шёл от
-                    // ТЕКУЩЕГО центра при пальце, уже ушедшем на длину
-                    // прокрутки, — панель навсегда отставала от пальца
-                    // («таскается и отстаёт, если брать за нижнюю правую
-                    // часть»). Дальше — строго 1:1: отсчёт заново от
-                    // ТЕКУЩЕЙ точки, а локальную delta (посчитанную ВЫШЕ от
-                    // старого _rawStart) гасим, чтобы не увести панель второй
-                    // раз («телепортируется куда-то и сразу обратно»).
-                    CGSize panelSize = _panel.bounds.size;
-                    CGPoint aligned = CGPointMake(_rawStartCenter.x + delta.x,
-                                                  _rawStartCenter.y + delta.y);
-                    aligned = [self clampPanelCenter:aligned size:panelSize];
-                    _panel.center = aligned;
-                    _panelOffset = [self panelOffsetForCenter:aligned size:panelSize];
-                    _rawStart = stagePoint;
-                    _rawStartCenter = aligned;
-                    delta = CGPointZero;
-                }
-                AscentHUDLog(@"[gesture] перенос %@ (%.0f мс)",
-                             _rawTarget == HUDRawDragTrigger ? @"квадрата" : @"панели",
-                             (now - _rawStartTime) * 1000.0);
             }
             _rawMoved = YES;
             [self applyRawDragDelta:delta];
@@ -1229,16 +1278,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
     // Ended / Cancelled: фиксируем результат (позицию или смещение прокрутки).
     if (_rawMoved && _rawHoldable && !_rawScrollTouched) {
-        // Смотрим ВЕСЬ путь пальца от точки нажатия. Если он крошечный — это
-        // всё-таки нажатие, а не перенос: возвращаем элемент ровно туда, где он
-        // был в момент нажатия, и обрабатываем как тап. Без этого медленное
-        // нажатие с дрожью руки съедало бы нажатие, а элемент оставался
-        // сдвинутым на пару точек. Если палец успел прокрутить содержимое
-        // карточки — это протяжка, а не тап: квадрат с панелью просто
-        // фиксируем, нажатие не засчитывая.
+        // Смотрим ВЕСЬ путь пальца от точки нажатия. Если он крошечный И жест
+        // был коротким — это всё-таки нажатие, а не перенос: возвращаем элемент
+        // ровно туда, где он был в момент нажатия, и обрабатываем как тап. Без
+        // этого медленное нажатие с дрожью руки съедало бы нажатие, а элемент
+        // оставался сдвинутым на пару точек. Если же палец водил дольше срока —
+        // крошечный путь это НАМЕРЕННОЕ «чуть перетащить», и элемент остаётся
+        // там, где его оставили (иначе панель после маленького переноса
+        // телепортировалась обратно к точке захвата). Если палец успел
+        // прокрутить содержимое карточки — это протяжка, а не тап: квадрат с
+        // панелью просто фиксируем, нажатие не засчитывая.
         CGFloat pathX = stagePoint.x - _rawPressPoint.x;
         CGFloat pathY = stagePoint.y - _rawPressPoint.y;
-        if ((pathX * pathX + pathY * pathY) < kRawTapSlop * kRawTapSlop) {
+        BOOL tinyQuick = (pathX * pathX + pathY * pathY) < kRawTapSlop * kRawTapSlop &&
+                         (now - _rawStartTime) < kRawTapMaxTime;
+        if (tinyQuick) {
             if (_rawTarget == HUDRawDragTrigger) {
                 _trigger.center = _rawPressCenter;
                 CGPoint base = [self triggerBaseCenter];
@@ -1390,7 +1444,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
     // Строки переключателей и группы слайдеров ищем ГЕОМЕТРИЧЕСКИ, а не по
     // hitTest: только так нажатие находит переключатель под строкой.
-    for (UISwitch *toggle in _switches) {
+    for (HUDFlatSwitch *toggle in _switches) {
         UIView *row = toggle.superview;
         if (![self pointIsOnScrollRow:point row:row]) { continue; }
         toggle.on = !toggle.on;
@@ -1725,6 +1779,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)togglePanel
 {
+    if (_panel == nil) { return; }   // панель ещё собирается — тап игнорируем
     _panelOpen = !_panelOpen;
     AscentHUDLog(@"HUD: панель %@", _panelOpen ? @"открыта" : @"закрыта");
     if (_panelOpen) {
@@ -1887,16 +1942,16 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         label.autoresizingMask = UIViewAutoresizingNone;
         [row addSubview:label];
 
-        UISwitch *toggle = [[UISwitch alloc] init];
-        toggle.onTintColor = HUDSwitchOn();
+        // Плоский прямоугольный тумблер вместо системного UISwitch (по заказу):
+        // тот смотрелся «жирной» пилюлей с большим белым бегунком. Касания не
+        // обрабатывает (выставлено в initWithFrame: класса) — состояние двигает
+        // только жест строки, иначе касания воюют с ним и получается двойное
+        // переключение.
+        HUDFlatSwitch *toggle = [[HUDFlatSwitch alloc] initWithFrame:
+                                    CGRectMake(0, 0, kFlatSwitchW, kFlatSwitchH)];
+        toggle.onColor = HUDSwitchOn();
+        toggle.offColor = HUDSwitchOff();
         toggle.accessibilityIdentifier = switchKeys[i];
-        [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-        // Переключатель сам касания не обрабатывает (иначе они воюют с жестом
-        // на строке и получается двойное переключение) — состояние двигает только
-        // наш жест, а сам переключатель остаётся индикатором.
-        toggle.userInteractionEnabled = NO;
-        toggle.transform = CGAffineTransformMakeScale(kSwitchVisualScale,
-                                                       kSwitchVisualScale);
         [row addSubview:toggle];
 
         [self addTapGesture:row action:@selector(switchRowTapped:)];
@@ -2144,8 +2199,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // как в эталоне. Высоту ограничиваем и запасом снизу: иначе последняя
     // вкладка «уезжала» бы за край колонки и обрезалась маской панели.
     NSInteger tabCount = (NSInteger)_tabButtons.count;
-    CGFloat tabPadTop = 5.0;
-    CGFloat tabGap = 5.0;
+    // По заказу вкладки ПОБЛИЖЕ друг к другу: отступ сверху 3 и зазор 2
+    // вместо прежних 5/5.
+    CGFloat tabPadTop = 3.0;
+    CGFloat tabGap = 2.0;
     CGFloat tabRowH = 24.0;
     if (tabCount > 0) {
         tabRowH = floor((sidebarH - tabPadTop - (tabCount - 1) * tabGap - 4.0) / (CGFloat)tabCount);
@@ -2190,7 +2247,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat rowWidth = w - 20.0;
     CGFloat y = 6.0;
 
-    for (UISwitch *toggle in _switches) { toggle.superview.hidden = YES; }
+    for (HUDFlatSwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
     _accentRow.hidden = YES;
@@ -2285,37 +2342,27 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
 }
 
-- (void)layoutSwitchRow:(UISwitch *)toggle x:(CGFloat)x y:(CGFloat *)y width:(CGFloat)width
+- (void)layoutSwitchRow:(HUDFlatSwitch *)toggle x:(CGFloat)x y:(CGFloat *)y width:(CGFloat)width
 {
     UIView *row = toggle.superview;
     row.hidden = NO;
     row.frame = CGRectMake(x, *y, width, kSwitchRowHeight);
 
-    // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Кадр тумблера
-    // задаём через bounds/center (НЕ frame: при активном transform свойство
-    // frame не определено и позиция «плясала» бы). Позицию считаем по
-    // ВИЗУАЛЬНОМУ размеру — transform масштабирует только вид, не bounds.
-    CGFloat baseW = toggle.bounds.size.width;
-    CGFloat baseH = toggle.bounds.size.height;
-    if (baseW <= 0) { baseW = 51.0; }
-    if (baseH <= 0) { baseH = 31.0; }
-    CGFloat visW = baseW * kSwitchVisualScale;
-    toggle.bounds = CGRectMake(0, 0, baseW, baseH);
-    // center — это ЦЕНТР view, а не её верх: раньше сюда подставляли верхнюю
-    // точку визуального бокса ((40 − высота) / 2), и тумблер уезжал вверх
-    // почти на полвысоты. Середина строки — правильная точка.
+    // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Тумблер плоский
+    // прямоугольный (см. HUDFlatSwitch), никаких transform — кадр задаём
+    // напрямую, центрируя по высоте строки.
     // По заказу вся группа (тумблер + подпись) чуть ЛЕВЕЕ (отступ 8 вместо
     // 12) и чуть ВЫШЕ середины строки (на 2 pt).
     const CGFloat leftInset = 8.0;
     const CGFloat liftUp = 2.0;
-    toggle.center = CGPointMake(leftInset + visW / 2.0,
-                                kSwitchRowHeight / 2.0 - liftUp);
+    toggle.frame = CGRectMake(leftInset,
+                              round((kSwitchRowHeight - kFlatSwitchH) / 2.0) - liftUp,
+                              kFlatSwitchW, kFlatSwitchH);
 
-    // Подпись — строго справа от визуального края тумблера, на всю высоту
-    // строки (высота UILabel «тянется» от нулевого кадра, если её задать
-    // неполной — раньше текст уезжал ниже середины), с тем же подъёмом
-    // на 2 pt вверх.
-    CGFloat labelX = leftInset + visW + 12.0;
+    // Подпись — строго справа от тумблера, на всю высоту строки (высота
+    // UILabel «тянется» от нулевого кадра, если её задать неполной — раньше
+    // текст уезжал ниже середины), с тем же подъёмом на 2 pt вверх.
+    CGFloat labelX = leftInset + kFlatSwitchW + 12.0;
     for (UIView *sub in row.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
             sub.frame = CGRectMake(labelX, -liftUp,
@@ -2419,10 +2466,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 #pragma mark - Игровые настройки
 
-- (UISwitch *)switchInRow:(UIView *)row
+- (HUDFlatSwitch *)switchInRow:(UIView *)row
 {
     for (UIView *sub in row.subviews) {
-        if ([sub isKindOfClass:[UISwitch class]]) { return (UISwitch *)sub; }
+        if ([sub isKindOfClass:[HUDFlatSwitch class]]) { return (HUDFlatSwitch *)sub; }
     }
     return nil;
 }
@@ -2438,7 +2485,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 /// Тап по строке переключает её свитч — состояние двигает только наш жест.
 - (void)switchRowTapped:(UITapGestureRecognizer *)gesture
 {
-    UISwitch *toggle = [self switchInRow:gesture.view];
+    HUDFlatSwitch *toggle = [self switchInRow:gesture.view];
     if (toggle == nil) { return; }
     toggle.on = !toggle.on;
     AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
@@ -2470,7 +2517,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)reloadCheatControls
 {
-    for (UISwitch *toggle in _switches) {
+    for (HUDFlatSwitch *toggle in _switches) {
         NSString *key = toggle.accessibilityIdentifier;
         toggle.on = HUDOverlayFlag(key, HUDSwitchDefault(key));
     }
@@ -2511,9 +2558,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     label.text = [NSString stringWithFormat:@"%d%@", (int)lroundf(slider.value), [self suffixForKey:key]];
 }
 
-- (void)switchChanged:(UISwitch *)sender
+- (void)switchChanged:(HUDFlatSwitch *)sender
 {
-    HUDOverlaySetFlag(sender.accessibilityIdentifier, sender.isOn);
+    HUDOverlaySetFlag(sender.accessibilityIdentifier, sender.on);
     if ([sender.accessibilityIdentifier isEqualToString:@"misc.overlay"]) {
         // Сразу применяем видимость: если запись уже идёт, панель и квадрат
         // исчезнут в тот же кадр.
@@ -2667,8 +2714,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _configNameField.textColor = HUDText();
     _accentLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
     _themeLabel.textColor = _accentLabel.textColor;
-    for (UISwitch *toggle in _switches) {
-        toggle.onTintColor = HUDSwitchOn();
+    for (HUDFlatSwitch *toggle in _switches) {
+        toggle.onColor = HUDSwitchOn();
+        toggle.offColor = HUDSwitchOff();
+        [toggle refreshColors];
     }
     for (UIView *row in _configRows) {
         row.backgroundColor = HUDSoftFill();
@@ -3064,8 +3113,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
     NSMutableDictionary *configs = [AscentConfigsRead() mutableCopy];
     NSMutableDictionary *values = [NSMutableDictionary dictionary];
-    for (UISwitch *toggle in _switches) {
-        values[toggle.accessibilityIdentifier] = @(toggle.isOn ? 1 : 0);
+    for (HUDFlatSwitch *toggle in _switches) {
+        values[toggle.accessibilityIdentifier] = @(toggle.on ? 1 : 0);
     }
     for (UISlider *slider in _sliders) {
         values[slider.accessibilityIdentifier] = @(slider.value);
@@ -3092,7 +3141,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         return;
     }
 
-    for (UISwitch *toggle in _switches) {
+    for (HUDFlatSwitch *toggle in _switches) {
         NSNumber *value = values[toggle.accessibilityIdentifier];
         if (value == nil) { continue; }
         BOOL on = value.doubleValue > 0.5;
