@@ -2273,6 +2273,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // ужимается, а не обрезается многоточием.
     _panelTitle.adjustsFontSizeToFitWidth = YES;
     _panelTitle.minimumScaleFactor = 0.85;
+    // По заказу — по центру своей колонки (см. раскладку в layoutPanel).
+    _panelTitle.textAlignment = NSTextAlignmentCenter;
     [_panelHeader addSubview:_panelTitle];
 
     // Метка времени СБОРКИ (компиляция — на CI, время UTC): мелко и внизу
@@ -2688,9 +2690,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat cardH = h - 2.0 * inset;
 
     _panelHeader.frame = CGRectMake(0, 0, w, h);   // зона переноса — вся панель
-    // По заказу надпись «ascent» ЧУТЬ ПРАВЕЕ прежнего отступа (8 вместо 3).
-    _panelTitle.frame = CGRectMake(sidebarX + 8.0, titleTop,
-                                   MAX(cardX - (sidebarX + 8.0) - 3.0, 40.0), titleH);
+    // По заказу надпись «ascent» — ПО ЦЕНТРУ колонки вкладок (раньше была
+    // прижата к левому краю и выглядела смещённой влево). Ширину берём ровно по
+    // колонке, как у метки сборки внизу; текст центрируется внутри неё.
+    _panelTitle.frame = CGRectMake(sidebarX, titleTop, sidebarW, titleH);
     _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
     // Метка сборки — в самый низ колонки, под столбиком вкладок (у вкладок
     // «кучно сверху», снизу колонки всегда пусто).
@@ -3414,10 +3417,15 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     UIFontDescriptor *rounded =
         [font.fontDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
     if (rounded != nil) { font = [UIFont fontWithDescriptor:rounded size:14.0]; }
+    // Выравнивание задаём и абзацем: у attributed-строки оно перебивает
+    // label.textAlignment, и без этого надпись осталась бы прижата влево.
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
     _panelTitle.attributedText =
         [[NSAttributedString alloc] initWithString:@"ascent"
                                         attributes:@{ NSFontAttributeName: font,
                                                       NSKernAttributeName: @(1.0),
+                                                      NSParagraphStyleAttributeName: para,
                                                       NSForegroundColorAttributeName:
                                                           (color ?: HUDMenuAccent()) }];
 }
