@@ -3175,7 +3175,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // По заказу: fov выбирается ОТ 10 ДО 100, стартовое значение 45.
         slider.minimumValue = 10; slider.maximumValue = 100; slider.value = 45;
     } else if ([key isEqualToString:@"cheat.smooth"]) {
-        slider.minimumValue = 1; slider.maximumValue = 20; slider.value = 4;
+        // По заказу: smooth — ОТ 1 ДО 10 (было до 20), стартовое значение 4.
+        slider.minimumValue = 1; slider.maximumValue = 10; slider.value = 4;
     } else {
         slider.minimumValue = 0; slider.maximumValue = 300; slider.value = 60;
     }
