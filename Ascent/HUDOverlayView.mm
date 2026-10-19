@@ -118,6 +118,10 @@ static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
 static CGFloat sMenuAccentH = 0.0;   // оттенок, 0..360 (0 — красный)
 static CGFloat sMenuAccentS = 0.9;   // насыщенность, 0..1 (как HUDAccent)
 static CGFloat sMenuAccentV = 1.0;   // яркость, 0..1
+// Есть ли цвет, ещё НЕ записанный в файл: во время перетаскивания его не
+// пишем (см. HUDMenuAccentSetHSV), но закрытие пикера от этого не должно
+// подтормаживать — запись нужна, только если перенос успели прервать.
+static BOOL sMenuAccentSavePending = NO;
 
 /// Читаем сохранённый цвет ровно ОДИН раз — при создании оверлея
 /// (см. initWithFrame:). Дальше работает только кэш.
@@ -184,9 +188,14 @@ static void HUDMenuAccentSetHSV(double h, double s, double v)
 /// Разовая запись текущего цвета в plist.
 static void HUDMenuAccentSave(void)
 {
-    HUDOverlaySetNumber(@"hud.accent.h", sMenuAccentH);
-    HUDOverlaySetNumber(@"hud.accent.s", sMenuAccentS);
-    HUDOverlaySetNumber(@"hud.accent.v", sMenuAccentV);
+    // ОДНО чтение и ОДНА запись файла вместо трёх: HUDOverlaySetNumber на
+    // каждый вызов заново читал весь plist и писал его атомарно с chmod —
+    // три таких пар на закрытии пикера давали «маленькую задержку».
+    NSMutableDictionary *dict = HUDOverlayDict();
+    dict[@"hud.accent.h"] = @(sMenuAccentH);
+    dict[@"hud.accent.s"] = @(sMenuAccentS);
+    dict[@"hud.accent.v"] = @(sMenuAccentV);
+    HUDOverlayWrite(dict);
 }
 
 /// Позиция тапа на вертикальной полосе оттенка — 0..1 по высоте
@@ -197,6 +206,15 @@ static CGFloat HUDAccentRatioAtY(CGPoint local, UIView *strip)
     if (usable <= 0.0) { return 0.0; }
     CGFloat value = (local.y - strip.frame.origin.y - 1.5) / usable;
     return MIN(MAX(value, 0.0), 1.0);
+}
+
+/// Оттенок из позиции пальца на полосе: 0..359, а НЕ 0..360. Строгое 360
+/// сводилось к 0 через fmod — и белая риска ПРЫГАЛА С САМОГО НИЗА НАВЕРХ,
+/// как только палец доезжал до конца полосы («перекидывает наверх»).
+/// 359° на глаз неотличимо от 360° (обе — красный), но риска остаётся внизу.
+static CGFloat HUDAccentHueAtRatio(CGFloat ratio)
+{
+    return MIN(ratio * 360.0, 359.0);
 }
 
 static UILabel *HUDLabel(NSString *text, CGFloat size, UIFontWeight weight)
@@ -643,6 +661,10 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     CAGradientLayer *_hueGradient;
     UIView *_svMarker;          // круг-маркер выбранной точки поля
     UIView *_hueMarker;         // белая риска на полосе оттенка
+    // Кэш hud.picker.x/y — смещение карточки от центра сцены: с диска читаем
+    // один раз (ensurePickerCard), пишем при перетаскивании (commitRawDrag).
+    // Раньше это читал layoutPicker на КАЖДОМ открытии — открытие подтормаживало.
+    CGSize _pickerOffset;
     // Запись экрана/AirPlay: панель и квадрат скрыты, пока UIScreen.isCaptured
     // (вкладка Misc, переключатель overlay).
     BOOL _captureHidden;
@@ -1231,7 +1253,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                                 save:YES];
         } else if (CGRectContainsPoint(_hueStrip.frame, local)) {
             CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
-            [self applyMenuAccentHue:ratio * 360.0
+            [self applyMenuAccentHue:HUDAccentHueAtRatio(ratio)
                           saturation:sMenuAccentS
                           brightness:sMenuAccentV
                                 save:YES];
@@ -1391,6 +1413,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Палец отпущен после перетаскивания: цвет уже применён кэшем, файл
         // пишем разово (во время движения пальца plist не трогали).
         HUDMenuAccentSave();
+        sMenuAccentSavePending = NO;
         AscentHUDLog(@"[accent] перетаскивание закончено, цвет h=%.0f s=%.2f v=%.2f",
                      sMenuAccentH, sMenuAccentS, sMenuAccentV);
         return;
@@ -1402,8 +1425,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         CGPoint center = [self clampPickerCenter:_pickerCard.center];
         _pickerCard.center = center;
         CGSize offset = [self pickerOffsetForCenter:center];
-        HUDOverlaySetNumber(@"hud.picker.x", offset.width);
-        HUDOverlaySetNumber(@"hud.picker.y", offset.height);
+        _pickerOffset = offset;
+        // Одна запись файла вместо двух: HUDOverlaySetNumber на каждый вызов
+        // заново читал весь plist и писал его — на отпускании пальца это
+        // было две пары «чтение+запись» диска.
+        NSMutableDictionary *dict = HUDOverlayDict();
+        dict[@"hud.picker.x"] = @(offset.width);
+        dict[@"hud.picker.y"] = @(offset.height);
+        HUDOverlayWrite(dict);
         AscentHUDLog(@"[gesture] пикер: перетаскивание закончилось, смещение=(%.0f, %.0f)",
                      offset.width, offset.height);
         return;
@@ -1777,9 +1806,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_accentRow addSubview:_accentLabel];
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
-    _accentSwatch.layer.cornerRadius = 6.0;
+    _accentSwatch.layer.cornerRadius = 5.5;
     _accentSwatch.layer.borderWidth = 1.5;
-    _accentSwatch.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    // Рамка СЕРАЯ и еле заметная (по заказу) — раньше была беловатой.
+    _accentSwatch.layer.borderColor = [UIColor colorWithWhite:0.35 alpha:1.0].CGColor;
     _accentSwatch.userInteractionEnabled = NO;
     [_accentRow addSubview:_accentSwatch];
 
@@ -2042,7 +2072,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _accentRow.hidden = NO;
         CGFloat accentRowH = 30.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
-        CGFloat accentSwatchSize = 24.0;
+        CGFloat accentSwatchSize = 22.0;   // чуть меньше прежних 24
         _accentSwatch.frame = CGRectMake(rowWidth - 10.0 - accentSwatchSize,
                                          (accentRowH - accentSwatchSize) / 2.0,
                                          accentSwatchSize, accentSwatchSize);
@@ -2384,6 +2414,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 {
     HUDMenuAccentSetHSV(h, s, v);
     if (save) { HUDMenuAccentSave(); }
+    // save=NO — палец ещё ведёт: в файл пока не пишем, но помним, что
+    // накопилось несохранённое (см. closePicker — там запись строго по флагу).
+    sMenuAccentSavePending = !save;
     [self updateAccentUI];
     if (save) {
         AscentHUDLog(@"[accent] цвет h=%.0f s=%.2f v=%.2f", sMenuAccentH, sMenuAccentS, sMenuAccentV);
@@ -2406,7 +2439,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                             save:NO];
     } else {
         CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
-        [self applyMenuAccentHue:ratio * 360.0
+        [self applyMenuAccentHue:HUDAccentHueAtRatio(ratio)
                       saturation:sMenuAccentS
                       brightness:sMenuAccentV
                             save:NO];
@@ -2435,6 +2468,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
     // Поля ещё может не быть — пикер собирается лениво при первом открытии.
     if (_svBase != nil) {
+        // CAGradientLayer — «голый» слой, и Core Animation по умолчанию
+        // АНИМИРУЕТ смену colors (кросс-фейд ~0.25 с): пока палец мотал полосу
+        // оттенка, поле перекрашивалось с задержкой и «плавно» — цвет
+        // отставал от пальца. Меняем мгновенно, без анимации.
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         _svBase.colors = @[
             (id)[UIColor whiteColor].CGColor,
             (id)[UIColor colorWithHue:sMenuAccentH / 360.0
@@ -2442,6 +2481,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                            brightness:1.0
                                 alpha:1.0].CGColor,
         ];
+        [CATransaction commit];
     }
 
     [self placeAccentSVMarker];
@@ -2496,6 +2536,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _pickerCard.hidden = YES;
     _pickerCard.userInteractionEnabled = NO;
     [_stage addSubview:_pickerCard];
+
+    // Сохранённое смещение карточки читаем ОДИН раз на сессию (раньше это
+    // были два полных чтения plist на каждое открытие пикера — см. layoutPicker).
+    _pickerOffset = CGSizeMake(HUDOverlayNumber(@"hud.picker.x", 0.0),
+                               HUDOverlayNumber(@"hud.picker.y", 0.0));
 
     // Поле: слева белое (насыщенность 0) → справа чистый цвет (1), сверху
     // яркое (v=1) → снизу чёрное (v=0). Скругление — на самих слоях
@@ -2602,9 +2647,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat cardW = inset + square + gap + stripW + inset;
     CGFloat cardH = inset + square + inset;
     _pickerCard.frame = CGRectMake(0.0, 0.0, cardW, cardH);
-    CGSize offset = CGSizeMake(HUDOverlayNumber(@"hud.picker.x", 0.0),
-                               HUDOverlayNumber(@"hud.picker.y", 0.0));
+    // Смещение — из кэша, без чтения диска: раньше тут были два полных
+    // парса plist на каждом открытии, и пикер «открывался с задержкой».
+    CGSize offset = _pickerOffset;
     _pickerCard.center = [self clampPickerCenter:[self pickerCenterForOffset:offset]];
+    // Кадры — без самопроизвольной анимации: голые слои градиентов
+    // (CAGradientLayer) иначе анимируют своё появление 0.25 с при первом
+    // открытии — пикер выглядел «открывающимся с задержкой». При повороте
+    // экрана layoutPicker вызывается внутри UIView-анимации — там транзакцию
+    // с запретом действий НЕ открываем, чтобы поворот остался плавным.
+    BOOL turning = ([UIView inheritedAnimationDuration] > 0.0);
+    if (!turning) { [CATransaction begin]; [CATransaction setDisableActions:YES]; }
     _svSquare.frame = CGRectMake(inset, inset, square, square);
     _svBase.frame = _svSquare.bounds;
     _svBase.cornerRadius = 6.0;
@@ -2613,6 +2666,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _hueStrip.frame = CGRectMake(inset + square + gap, inset, stripW, square);
     _hueGradient.frame = _hueStrip.bounds;
     _hueGradient.cornerRadius = 4.0;
+    if (!turning) { [CATransaction commit]; }
     [self placeAccentSVMarker];
     [self placeAccentHueMarker];
 }
@@ -2643,8 +2697,16 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)closePicker
 {
     if (_pickerCard == nil || _pickerCard.hidden) { return; }
-    HUDMenuAccentSave();
+    // Сначала скрываем — кадр закрытия уходит сразу. Раньше здесь, ДО
+    // скрытия, стояли синхронные записи в plist, и закрытие «подтормаживало».
+    // Файл и так сохранён при каждом изменении цвета (тап или отпускание
+    // пальца), поэтому пишем только если перенос успели прервать — см.
+    // sMenuAccentSavePending.
     _pickerCard.hidden = YES;
+    if (sMenuAccentSavePending) {
+        sMenuAccentSavePending = NO;
+        HUDMenuAccentSave();
+    }
     AscentHUDLog(@"[accent] пикер закрыт, цвет h=%.0f s=%.2f v=%.2f",
                  sMenuAccentH, sMenuAccentS, sMenuAccentV);
 }
