@@ -1806,9 +1806,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_accentRow addSubview:_accentLabel];
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
-    _accentSwatch.layer.cornerRadius = 5.5;
-    _accentSwatch.layer.borderWidth = 1.5;
-    // Рамка СЕРАЯ и еле заметная (по заказу) — раньше была беловатой.
+    // Рамка СЕРАЯ, еле заметная (по заказу) и ТОНКАЯ: 1 pt (2 px на @2x) с
+    // целым радиусом — 1.5 pt на маленьком квадрате смотрелся жирно и
+    // «пиксельно».
+    _accentSwatch.layer.cornerRadius = 5.0;
+    _accentSwatch.layer.borderWidth = 1.0;
     _accentSwatch.layer.borderColor = [UIColor colorWithWhite:0.35 alpha:1.0].CGColor;
     _accentSwatch.userInteractionEnabled = NO;
     [_accentRow addSubview:_accentSwatch];
@@ -2073,8 +2075,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         CGFloat accentRowH = 30.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
         CGFloat accentSwatchSize = 22.0;   // чуть меньше прежних 24
-        _accentSwatch.frame = CGRectMake(rowWidth - 10.0 - accentSwatchSize,
-                                         (accentRowH - accentSwatchSize) / 2.0,
+        // Целые координаты — рамка ложится ровно на пиксели, без «пиксельных»
+        // краёв.
+        _accentSwatch.frame = CGRectMake(round(rowWidth - 10.0 - accentSwatchSize),
+                                         round((accentRowH - accentSwatchSize) / 2.0),
                                          accentSwatchSize, accentSwatchSize);
         _accentLabel.frame = CGRectMake(12.0, 0.0,
                                         _accentSwatch.frame.origin.x - 18.0 - 12.0,
