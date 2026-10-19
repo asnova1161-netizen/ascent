@@ -833,12 +833,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_themeLabel;
     UILabel *_themeDarkLabel;
     UILabel *_themeLightLabel;
-    // Строка target (вкладка Aim): цель аимбота — четыре пилюли head / neck /
-    // body / legs; выбранную красит updateTargetUI, значение лежит в plist
-    // (cheat.target).
+    // Строка target (вкладка Aim): надпись target, а СРАЗУ СПРАВА от неё —
+    // стрелочка раскрытия. Сами цели (пилюли head / neck / body / legs) лежат в
+    // ОТДЕЛЬНОЙ строке _targetPillsRow ПОД target и по умолчанию скрыты:
+    // нажатие на строку target раскрывает список, стрелочка поворачивается вниз,
+    // пилюли появляются снизу (по заказу). Выбранную красит updateTargetUI,
+    // значение лежит в plist (cheat.target).
     UIView *_targetRow;
     UILabel *_targetLabel;
+    UILabel *_targetArrow;
+    UIView *_targetPillsRow;
     NSMutableArray<UILabel *> *_targetPills;
+    BOOL _targetExpanded;
     // Пикер — ВСПЛЫВАЮЩАЯ карточка поверх меню (не внутри панели и не в
     // отдельном окне): тёмная карточка с полем «насыщенность × яркость» и
     // вертикальной радужной полосой оттенка. Рисуется в том же HUD-слое
@@ -1048,6 +1054,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         if ([cursor isKindOfClass:[UIControl class]]) { return YES; }
         if (cursor == _accentRow) { return YES; }
         if (cursor == _targetRow) { return YES; }
+        if (cursor == _targetPillsRow) { return YES; }
         if ([_configRows indexOfObjectIdenticalTo:cursor] != NSNotFound) { return YES; }
         if ([self switchInRow:cursor] != nil) { return YES; }
         if ([self sliderInGroup:cursor] != nil) { return YES; }
@@ -1839,10 +1846,20 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Строка target (вкладка Aim): тап по ПИЛЮЛЕ head/neck/body/legs выбирает
-    // цель; надпись слева выбором не является (как в menu theme).
+    // Строка target (вкладка Aim): тап по СТРОКЕ раскрывает/скрывает список
+    // целей — стрелочка справа от надписи смотрит вправо, пока список скрыт, и
+    // вниз, когда он раскрыт (по заказу). Сами пилюли — в строке ПОД target, их
+    // не трогаем: тап по строке target только раскрывает список.
     if (_targetRow != nil && [self pointIsOnScrollRow:point row:_targetRow]) {
-        CGPoint local = [_targetRow convertPoint:point fromView:self];
+        [self setTargetExpanded:!_targetExpanded];
+        return;
+    }
+
+    // Пилюли head/neck/body/legs (вкладка Aim, видны только в раскрытом
+    // списке): тап по пилюле выбирает цель.
+    if (_targetExpanded && _targetPillsRow != nil &&
+        [self pointIsOnScrollRow:point row:_targetPillsRow]) {
+        CGPoint local = [_targetPillsRow convertPoint:point fromView:self];
         for (NSInteger i = 0; i < (NSInteger)_targetPills.count; i++) {
             if (CGRectContainsPoint(_targetPills[i].frame, local)) {
                 HUDOverlaySetNumber(@"cheat.target", (double)i);
@@ -2476,19 +2493,40 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
     [_scroll addSubview:_themeRow];
 
-    // Строка target (вкладка Aim, по заказу): цель аимбота — четыре пилюли
-    // head | neck | body | legs, выбранную красит updateTargetUI. Как и в
-    // menu theme, НАДПИСЬ слева выбором не является — только пилюли.
+    // Строка target (вкладка Aim, по заказу): надпись target, а СПРАВА от неё —
+    // стрелочка раскрытия. По умолчанию она смотрит ВПРАВО (список целей
+    // скрыт); нажатие на строку раскрывает список — стрелочка поворачивается
+    // ВНИЗ, а снизу появляются пилюли head | neck | body | legs. Выбранную
+    // пилюлю красит updateTargetUI.
     _targetRow = [[UIView alloc] initWithFrame:CGRectZero];
     _targetRow.backgroundColor = [UIColor clearColor];
     _targetRow.autoresizingMask = UIViewAutoresizingNone;
-    _targetLabel = HUDLabel(@"target", 11, UIFontWeightMedium);
+    // Надпись крупнее прежней (по заказу).
+    _targetLabel = HUDLabel(@"target", 13, UIFontWeightMedium);
     _targetLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
     _targetLabel.adjustsFontSizeToFitWidth = YES;
     _targetLabel.minimumScaleFactor = 0.65;
     _targetLabel.lineBreakMode = NSLineBreakByClipping;
     _targetLabel.autoresizingMask = UIViewAutoresizingNone;
     [_targetRow addSubview:_targetLabel];
+    // Стрелочка — ГЛИФОМ (как «▶» и «✕» в конфигах), без картинок: вправо даёт
+    // «›», а положение «вниз» — поворот того же глифа на 90° (см.
+    // setTargetExpanded:), поэтому второй символ не нужен.
+    _targetArrow = HUDLabel(@"›", 19, UIFontWeightSemibold);
+    _targetArrow.textAlignment = NSTextAlignmentCenter;
+    _targetArrow.textColor = _targetLabel.textColor;
+    _targetArrow.adjustsFontSizeToFitWidth = YES;
+    _targetArrow.minimumScaleFactor = 0.7;
+    _targetArrow.autoresizingMask = UIViewAutoresizingNone;
+    [_targetRow addSubview:_targetArrow];
+    [_scroll addSubview:_targetRow];
+
+    // Пилюли head/neck/body/legs — в СВОЕЙ строке ПОД target. По умолчанию она
+    // скрыта и места не занимает: раскрывает её нажатие на строку target.
+    _targetPillsRow = [[UIView alloc] initWithFrame:CGRectZero];
+    _targetPillsRow.backgroundColor = [UIColor clearColor];
+    _targetPillsRow.autoresizingMask = UIViewAutoresizingNone;
+    _targetPillsRow.hidden = YES;
     _targetPills = [NSMutableArray array];
     for (NSString *name in @[ @"head", @"neck", @"body", @"legs" ]) {
         UILabel *pill = HUDLabel(name, 10, UIFontWeightSemibold);
@@ -2496,10 +2534,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         pill.layer.cornerRadius = 8.0;
         pill.clipsToBounds = YES;
         pill.autoresizingMask = UIViewAutoresizingNone;
-        [_targetRow addSubview:pill];
+        [_targetPillsRow addSubview:pill];
         [_targetPills addObject:pill];
     }
-    [_scroll addSubview:_targetRow];
+    [_scroll addSubview:_targetPillsRow];
 
     // Поле, полоса и маркеры пикера собираются лениво — при первом открытии
     // (см. ensurePickerCard). Здесь только перекрашиваем акцентные элементы
@@ -2785,6 +2823,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentRow.hidden = YES;
     _themeRow.hidden = YES;
     _targetRow.hidden = YES;
+    _targetPillsRow.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
@@ -2801,23 +2840,41 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [self layoutSliderGroup:_sliders[0] x:x y:&y width:rowWidth];  // fov
         [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];  // smooth
 
-        // target: надпись слева, четыре пилюли head/neck/body/legs справа
-        // (раскладка как у menu theme).
+        // target: надпись слева + стрелочка раскрытия СРАЗУ СПРАВА от неё; сами
+        // пилюли head/neck/body/legs лежат в СВОЕЙ строке ПОД target и видны
+        // только когда список раскрыт (по заказу).
         _targetRow.hidden = NO;
-        CGFloat targetRowH = 28.0;
+        CGFloat targetRowH = 26.0;
         _targetRow.frame = CGRectMake(x, y, rowWidth, targetRowH);
+        // Надпись — вплотную к левому краю карточки (как тумблеры строк выше,
+        // по заказу «левее») и чуть ВЫШЕ середины строки (по заказу).
+        CGFloat targetArrowW = 22.0;
+        CGFloat targetLabelH = 22.0;
+        CGFloat targetLabelY = -4.0;
+        CGSize targetTextSize = [_targetLabel sizeThatFits:CGSizeMake(rowWidth, targetLabelH)];
+        CGFloat targetLabelW = ceil(targetTextSize.width) + 2.0;
+        if (targetLabelW > rowWidth - targetArrowW - 6.0) {
+            targetLabelW = MAX(0.0, rowWidth - targetArrowW - 6.0);
+        }
+        _targetLabel.frame = CGRectMake(0.0, targetLabelY, targetLabelW, targetLabelH);
+        _targetArrow.frame = CGRectMake(round(CGRectGetMaxX(_targetLabel.frame) + 4.0),
+                                        targetLabelY, targetArrowW, targetLabelH);
+        y += targetRowH + 2.0;
+
+        // Строка пилюль: в раскрытом списке занимает место и проявляется, в
+        // свернутом — скрыта (место не тратится, содержимое короче).
+        CGFloat pillsRowH = 24.0;
+        _targetPillsRow.hidden = !_targetExpanded;
+        _targetPillsRow.frame = CGRectMake(x, y, rowWidth, pillsRowH);
         CGFloat pillH = 22.0;
         CGFloat pillGap = 4.0;
-        CGFloat pillW = floor((rowWidth - 60.0 - pillGap * 3.0) / 4.0);
-        CGFloat pillX = round(rowWidth - 12.0 - (pillW * 4.0 + pillGap * 3.0));
-        CGFloat pillY = round((targetRowH - pillH) / 2.0);
+        CGFloat pillW = floor((rowWidth - pillGap * 3.0) / 4.0);
         for (NSInteger i = 0; i < (NSInteger)_targetPills.count; i++) {
-            _targetPills[i].frame = CGRectMake(round(pillX + i * (pillW + pillGap)),
-                                               pillY, pillW, pillH);
+            _targetPills[i].frame = CGRectMake(round(i * (pillW + pillGap)),
+                                               round((pillsRowH - pillH) / 2.0),
+                                               pillW, pillH);
         }
-        _targetLabel.frame = CGRectMake(12.0, 0.0,
-                                        MAX(0.0, pillX - 12.0 - 6.0), targetRowH);
-        y += targetRowH + 4.0;
+        if (_targetExpanded) { y += pillsRowH + 4.0; }
     } else if (tab == 2) {
         // Misc: переключатель overlay, строка accent color и кнопка unload.
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
@@ -3088,6 +3145,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)reloadCheatControls
 {
+    // При каждом открытии меню список целей — СВЁРНУТ (по заказу: по умолчанию
+    // стрелочка смотрит вправо, пилюли скрыты). Заодно гасим недокрученный
+    // поворот стрелочки от прошлого закрытия панели.
+    _targetExpanded = NO;
+    _targetPillsRow.hidden = YES;
+    _targetPillsRow.alpha = 1.0;
+    _targetArrow.transform = CGAffineTransformIdentity;
+
     for (HUDFlatSwitch *toggle in _switches) {
         NSString *key = toggle.accessibilityIdentifier;
         toggle.on = HUDOverlayFlag(key, HUDSwitchDefault(key));
@@ -3392,6 +3457,41 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _themeLightLabel.backgroundColor = sMenuLight ? activeFill : plainFill;
     [self setLabel:_themeLightLabel
    textColorAnimated:(sMenuLight ? [UIColor whiteColor] : plainText)];
+}
+
+/// Список целей (вкладка Aim) — раскрыт/скрыт стрелочкой справа от надписи
+/// target. Пилюли head/neck/body/legs появляются ПОД строкой target и
+/// проявляются плавно, стрелочка поворачивается вправо -> вниз (по заказу).
+/// Раскладку менять нужно: раскрытая строка пилюль занимает место, от этого
+/// меняется высота содержимого вкладки.
+- (void)setTargetExpanded:(BOOL)expanded
+{
+    if (_targetExpanded == expanded) { return; }
+    _targetExpanded = expanded;
+    if (expanded) {
+        // Пилюли сначала прозрачные и лишь потом проявляются: иначе они
+        // «выскочили» бы вместе с перекладкой содержимого.
+        _targetPillsRow.alpha = 0.0;
+        _targetPillsRow.hidden = NO;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+        [UIView animateWithDuration:kMenuFadeDuration animations:^{
+            _targetPillsRow.alpha = 1.0;
+            _targetArrow.transform = CGAffineTransformMakeRotation((CGFloat)M_PI_2);
+        }];
+    } else {
+        // Скрытие: сначала пилюли гаснут (и стрелочка возвращается вправо), и
+        // только потом строка прячется и отдаёт своё место обратно.
+        [UIView animateWithDuration:kMenuFadeDuration animations:^{
+            _targetPillsRow.alpha = 0.0;
+            _targetArrow.transform = CGAffineTransformIdentity;
+        } completion:^(BOOL finished) {
+            if (_targetExpanded) { return; }   // за время анимации раскрыли снова
+            _targetPillsRow.hidden = YES;
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }];
+    }
 }
 
 /// Пилюли head/neck/body/legs (вкладка Aim): выбранная — цветом акцента (как
