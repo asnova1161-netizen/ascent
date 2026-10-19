@@ -354,12 +354,12 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
     // жест превращается в прокрутку. Без этого порога дрожь руки при нажатии
     // уводила бы содержимое, и кнопки «не нажимались».
     HUDRawDragControl,
-    // Пикер accent color в ОТДЕЛЬНОМ окне (не в меню): прямое управление
+    // Пикер accent color (всплывающая карточка поверх меню): прямое управление
     // значением пальцем — кружок в поле тянется, риска по радужной полосе
     // мотается вверх-вниз. Удержания не требуют, порог не нужен.
     HUDRawDragPickerSV,
     HUDRawDragPickerHue,
-    // Остальное при открытом пикере: окно пикера перекрывает экран, поэтому
+    // Остальное при открытом пикере: карточка перекрывает меню, поэтому
     // «пустой» жест — тап по нему закрывает пикер, а меню под ним не трогается.
     HUDRawDragPickerOutside,
 };
@@ -618,16 +618,22 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIScrollView *_scroll;
     UIButton *_unloadButton;
     // Вкладка Misc: строка accent color — свотч текущего цвета слева от
-    // надписи. Тап по СВОТЧУ открывает HSV-пикер в ОТДЕЛЬНОМ окне (не в
-    // меню) — см. togglePicker.
+    // надписи и кнопка-квадратик СПРАВА. По кнопке (и по всей строке — чтобы
+    // легко попадать) открывается HSV-пикер. См. togglePicker.
     UIView *_accentRow;
-    UIView *_accentSwatch;      // свотч текущего цвета — он же кнопка пикера
+    UIView *_accentSwatch;      // свотч текущего цвета (показ выбранного цвета)
     UILabel *_accentLabel;
-    // Окно пикера (выше панели HUD): тёмная карточка с полем «насыщенность ×
-    // яркость» и вертикальной радужной полосой оттенка. Касания идут не в
-    // это окно, а в HUD по потоку HID — окно только рисует (см.
+    UIView *_accentButton;      // кнопка-квадратик справа: открывает пикер
+    UIImageView *_accentIcon;   // иконка палитры внутри кнопки
+    // Пикер — ВСПЛЫВАЮЩАЯ карточка поверх меню (не внутри панели и не в
+    // отдельном окне): тёмная карточка с полем «насыщенность × яркость» и
+    // вертикальной радужной полосой оттенка. Рисуется в том же HUD-слое
+    // (_stage), что и меню, — отдельное UIWindow здесь НЕ годится: HUD живёт
+    // в системном окне поверх всех приложений, а обычное окно приложения
+    // остаётся ПОД игрой, и пикер был бы невидим (именно поэтому кнопка
+    // «не нажималась» — пикер открывался, но его не было видно). Касания
+    // идут в HUD по потоку HID и разбираются геометрически (см.
     // rawDragTargetAtPoint и handleRawTouchPhase:).
-    UIWindow *_pickerWindow;
     UIView *_pickerCard;
     UIView *_svSquare;          // поле: слева белое → справа чистый цвет
     CAGradientLayer *_svBase;   // горизонталь: белый → цвет текущего оттенка
@@ -806,11 +812,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 /// же вью работает всегда.
 - (HUDRawDragTarget)rawDragTargetAtPoint:(CGPoint)point
 {
-    // Пикер в отдельном окне открыт — его окно ВЫШЕ панели HUD, поэтому цели
-    // жеста решаем ДО hitTest по меню: кружок в поле и риска на полосе
-    // тянутся пальцем сразу, без удержания; всё остальное — «пустое» (тап
-    // закроет пикер, а меню под ним палец не тронет).
-    if (_pickerWindow != nil && !_pickerWindow.hidden) {
+    // Пикер открыт (всплывающая карточка поверх меню) — проверяем ДО hitTest
+    // по меню: кружок в поле и риска на полосе тянутся пальцем сразу, без
+    // удержания; всё остальное — «пустое» (тап закроет пикер, а меню под ним
+    // палец не тронет).
+    if (_pickerCard != nil && !_pickerCard.hidden) {
         CGPoint local = [_pickerCard convertPoint:point fromView:self];
         if (CGRectContainsPoint(_svSquare.frame, local)) { return HUDRawDragPickerSV; }
         if (CGRectContainsPoint(_hueStrip.frame, local)) { return HUDRawDragPickerHue; }
@@ -1210,10 +1216,10 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Пикер accent color в отдельном окне открыт: окно его выше панели, так
-    // что проверяем ДО всего меню. Тап по полю задаёт насыщенность/яркость,
-    // по радужной полосе — оттенок, а тап МИМО карточки закрывает пикер.
-    if (_pickerWindow != nil && !_pickerWindow.hidden) {
+    // Пикер accent color открыт (всплывающая карточка поверх меню): тап по
+    // полю задаёт насыщенность/яркость, по радужной полосе — оттенок, а тап
+    // МИМО карточки закрывает пикер. Проверяем ДО всего меню.
+    if (_pickerCard != nil && !_pickerCard.hidden) {
         CGPoint local = [_pickerCard convertPoint:point fromView:self];
         CGRect square = _svSquare.frame;
         if (CGRectContainsPoint(square, local) && square.size.width > 0.0) {
@@ -1235,8 +1241,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Строка accent color (вкладка Misc): тап по свотчу (и по всей строке —
-    // чтобы легко попадать) открывает пикер цвета в отдельном окне.
+    // Строка accent color (вкладка Misc): тап по кнопке-квадратику СПРАВА от
+    // надписи (и по всей строке — чтобы легко попадать) открывает пикер.
     if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
         [self togglePicker];
         return;
@@ -1399,6 +1405,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // «откатывается» и панель с квадратом никогда не выезжают за край.
     [self layoutTrigger];
     [self layoutPanel];
+    // Пикер — всплывающая карточка в сцене: при повороте/раскладке
+    // пересчитываем её позицию по центру сцены.
+    if (_pickerCard != nil && !_pickerCard.hidden) { [self layoutPicker]; }
 }
 
 /// Поворачиваем слой с контентом под текущую ориентацию. Окно остаётся
@@ -1699,8 +1708,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     // Строка accent color (вкладка Misc): свотч текущего цвета слева от
-    // надписи — по ТАПУ НА СВОТЧ открывается HSV-пикер в ОТДЕЛЬНОМ окне
-    // (см. togglePicker). Сам пикер в меню не показывается.
+    // надписи (показывает выбранный цвет) и кнопка-квадратик СПРАВА — по ней
+    // открывается HSV-пикер всплывающей карточкой поверх меню (см.
+    // togglePicker). Сам пикер в строке не показывается.
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
     _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     _accentRow.layer.cornerRadius = 12.0;
@@ -1717,10 +1727,29 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentLabel.autoresizingMask = UIViewAutoresizingNone;
     [_accentRow addSubview:_accentLabel];
 
+    // Кнопка-квадратик справа: иконка палитры. Жесты меню идут через свой
+    // разбор потока касаний, а не через hitTest, поэтому кнопка — обычный
+    // UIView, а тап по ней ловится геометрически (см. performTapAtPoint:).
+    _accentButton = [[UIView alloc] initWithFrame:CGRectZero];
+    _accentButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    _accentButton.layer.cornerRadius = 7.0;
+    _accentButton.layer.borderWidth = 1.0;
+    _accentButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
+    _accentButton.userInteractionEnabled = NO;
+    _accentIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
+    UIImage *pickerGlyph = [UIImage systemImageNamed:@"paintpalette.fill"];
+    _accentIcon.image = [pickerGlyph imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    _accentIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    _accentIcon.contentMode = UIViewContentModeScaleAspectFit;
+    _accentIcon.autoresizingMask = UIViewAutoresizingNone;
+    _accentIcon.userInteractionEnabled = NO;
+    [_accentButton addSubview:_accentIcon];
+    [_accentRow addSubview:_accentButton];
+
     [_scroll addSubview:_accentRow];
-    // Поле, полоса и маркеры пикера живут в ЕГО собственном окне и собираются
-    // лениво — при первом открытии (см. ensurePickerWindow). Здесь только
-    // перекрашиваем акцентные элементы панели по загруженному HSV.
+    // Поле, полоса и маркеры пикера собираются лениво — при первом открытии
+    // (см. ensurePickerCard). Здесь только перекрашиваем акцентные элементы
+    // панели по загруженному HSV.
     [self updateAccentUI];
 
     // Слайдеры fov/smooth/delay из меню убраны по заказу: вкладка Config
@@ -1970,14 +1999,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: свотч текущего цвета слева от надписи — он же
-        // кнопка: тап по свотчу открывает пикер в отдельном окне (см.
-        // togglePicker). Сам пикер в меню не рисуем.
+        // Строка accent color: свотч текущего цвета слева от надписи и
+        // кнопка-квадратик СПРАВА — по ней (и по всей строке, чтобы легко
+        // попадать) открывается пикер всплывающей карточкой поверх меню.
         _accentRow.hidden = NO;
-        CGFloat accentRowH = 28.0;
+        CGFloat accentRowH = 30.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
         _accentSwatch.frame = CGRectMake(10.0, (accentRowH - 22.0) / 2.0, 22.0, 22.0);
-        _accentLabel.frame = CGRectMake(40.0, 0.0, rowWidth - 50.0, accentRowH);
+        CGFloat accentButtonSize = 24.0;
+        _accentButton.frame = CGRectMake(rowWidth - 10.0 - accentButtonSize,
+                                         (accentRowH - accentButtonSize) / 2.0,
+                                         accentButtonSize, accentButtonSize);
+        _accentIcon.frame = CGRectInset(_accentButton.bounds, 5.0, 5.0);
+        _accentLabel.frame = CGRectMake(40.0, 0.0,
+                                        _accentButton.frame.origin.x - 46.0,
+                                        accentRowH);
         y += accentRowH + 10.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
@@ -2255,9 +2291,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (wantHide == _captureHidden) { return; }
     _captureHidden = wantHide;
     if (wantHide) {
-        // Скрытая панель не должна продолжать чужой жест; пикер в отдельном
-        // окне тоже прячем — его окно выше панели и secure-флаг на него не
-        // действует (свой флаг не выставлялся).
+        // Скрытая панель не должна продолжать чужой жест; пикер тоже
+        // прячем явно — он в том же окне, что и меню, но закрытый пикер
+        // не должен «всплыть» после конца записи.
         [self closePicker];
         [self endRawGesture];
         _panel.hidden = YES;
@@ -2392,31 +2428,29 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _hueMarker.layer.cornerRadius = 1.5;
 }
 
-#pragma mark - Окно пикера
+#pragma mark - Всплывающий пикер
 
-/// Ленивая сборка окна пикера: собственное прозрачное окно ВЫШЕ панели HUD,
-/// в центре экрана — тёмная карточка с полем и радужной полосой. Окно касаний
-/// не получает само (все они приходят в HUD по потоку HID) — оно только
-/// рисует; разбор касаний пикера идёт геометрически в HUD (см.
-/// rawDragTargetAtPoint и handleRawTouchPhase:).
-- (void)ensurePickerWindow
+/// Ленивая сборка карточки пикера: тёмная карточка с полем и радужной
+/// полосой. Карточка лежит в _stage — том же слое HUD, что и меню, — поэтому
+/// гарантированно рисуется поверх игры и поверх панели. Отдельное UIWindow
+/// для этого НЕ годится: HUD живёт в системном окне поверх приложений, а
+/// обычное окно приложения остаётся ПОД игрой — пикер был бы невидим (именно
+/// поэтому кнопка «не нажималась»: пикер открывался, но его не было видно).
+/// Касания в карточку приходят не сами: они идут в HUD по потоку HID и
+/// разбираются геометрически (см. rawDragTargetAtPoint и
+/// handleRawTouchPhase:).
+- (void)ensurePickerCard
 {
-    if (_pickerWindow != nil) { return; }
-    _pickerWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    _pickerWindow.backgroundColor = [UIColor clearColor];
-    // Выше всех окон процесса — пикер обязан рисоваться поверх панели HUD.
-    _pickerWindow.windowLevel = UIWindowLevelAlert + 100.0;
-    _pickerWindow.userInteractionEnabled = NO;
-    UIViewController *host = [[UIViewController alloc] init];
-    host.view.backgroundColor = [UIColor clearColor];
-    _pickerWindow.rootViewController = host;
+    if (_pickerCard != nil) { return; }
 
     _pickerCard = [[UIView alloc] initWithFrame:CGRectZero];
     _pickerCard.backgroundColor = HUDFill();
     _pickerCard.layer.cornerRadius = 16.0;
     _pickerCard.layer.borderWidth = 1.0;
     _pickerCard.layer.borderColor = HUDLine().CGColor;
-    [host.view addSubview:_pickerCard];
+    _pickerCard.hidden = YES;
+    _pickerCard.userInteractionEnabled = NO;
+    [_stage addSubview:_pickerCard];
 
     // Поле: слева белое (насыщенность 0) → справа чистый цвет (1), сверху
     // яркое (v=1) → снизу чёрное (v=0). Скругление — на самих слоях
@@ -2477,18 +2511,19 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 }
 
 /// Раскладка карточки пикера: поле 150×150 слева, полоса оттенка справа,
-/// карточка — по центру экрана.
+/// карточка — по центру сцены (то есть по центру экрана; сцена повёрнута
+/// вместе с игрой, поэтому в ландшафте карточка тоже стоит «правильно»).
 - (void)layoutPicker
 {
-    CGRect screen = UIScreen.mainScreen.bounds;
+    CGRect stage = _stage.bounds;
     CGFloat inset = 14.0;
     CGFloat square = 150.0;
     CGFloat stripW = 18.0;
     CGFloat gap = 10.0;
     CGFloat cardW = inset + square + gap + stripW + inset;
     CGFloat cardH = inset + square + inset;
-    _pickerCard.frame = CGRectMake((screen.size.width - cardW) / 2.0,
-                                   (screen.size.height - cardH) / 2.0 - 20.0,
+    _pickerCard.frame = CGRectMake((stage.size.width - cardW) / 2.0,
+                                   (stage.size.height - cardH) / 2.0 - 10.0,
                                    cardW, cardH);
     _svSquare.frame = CGRectMake(inset, inset, square, square);
     _svBase.frame = _svSquare.bounds;
@@ -2504,29 +2539,32 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)togglePicker
 {
-    if (_pickerWindow != nil && !_pickerWindow.hidden) {
+    if (_pickerCard != nil && !_pickerCard.hidden) {
         [self closePicker];
     } else {
         [self openPicker];
     }
 }
 
-/// Открывает пикер в отдельном окне (кнопка-квадратик в строке accent color).
+/// Открывает пикер всплывающей карточкой поверх меню (кнопка-квадратик
+/// справа от надписи accent color). Карточку поднимаем наверх слоя, чтобы
+/// она была поверх панели.
 - (void)openPicker
 {
-    [self ensurePickerWindow];
+    [self ensurePickerCard];
     [self layoutPicker];
     [self updateAccentUI];
-    _pickerWindow.hidden = NO;
+    [_stage bringSubviewToFront:_pickerCard];
+    _pickerCard.hidden = NO;
     AscentHUDLog(@"[accent] пикер открыт");
 }
 
 /// Закрывает пикер (тап мимо карточки, закрытие меню, запись экрана).
 - (void)closePicker
 {
-    if (_pickerWindow == nil || _pickerWindow.hidden) { return; }
+    if (_pickerCard == nil || _pickerCard.hidden) { return; }
     HUDMenuAccentSave();
-    _pickerWindow.hidden = YES;
+    _pickerCard.hidden = YES;
     AscentHUDLog(@"[accent] пикер закрыт, цвет h=%.0f s=%.2f v=%.2f",
                  sMenuAccentH, sMenuAccentS, sMenuAccentV);
 }
