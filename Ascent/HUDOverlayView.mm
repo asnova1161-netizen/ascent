@@ -358,6 +358,12 @@ static const CGFloat kRawDragArmMove       = 14.0;
 // листать вкладки по-прежнему можно. С короткими задержками захват не спутать:
 // настоящий свайп начинается раньше 0.25 с, а удержание без движения — нет.
 static const NSTimeInterval kRawGrabHold   = 0.25;
+// Борт панели: касание в пределах этого расстояния от края панели — это ВСЕГДА
+// «взять меню», даже если попало на чёрную карточку вкладки. Строки и скролл
+// начинаются глубже, поэтому у края панель берётся сразу (без удержания) и её
+// можно таскать за любую сторону — в том числе за нижнюю правую — без
+// «пролагивания» в первые 0.25 с.
+static const CGFloat kPanelGrabRim      = 14.0;
 // Если за весь жест палец прошёл меньше этого, жест считается НАЖАТИЕМ:
 // элемент возвращается ровно на место, где был в момент нажатия.
 static const CGFloat kRawTapSlop           = 14.0;
@@ -942,6 +948,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)beginRawDragAtPoint:(CGPoint)point stagePoint:(CGPoint)stagePoint
 {
     _rawTarget = [self rawDragTargetAtPoint:point];
+    // БОРТ панели: касание у её края (обод ~kPanelGrabRim по всему периметру,
+    // то есть и нижний правый угол) — сразу перенос, без долгого удержания.
+    // Внутри карточки удержание, как раньше: листание вкладки захватом не
+    // становится ни на каком участке. Срабатывает ДО расчёта порога, чтобы у
+    // края действовал порог панели, а не прокрутки.
+    if (_rawTarget == HUDRawDragScroll || _rawTarget == HUDRawDragControl) {
+        CGPoint local = [_panel convertPoint:point fromView:self];
+        CGRect grabZone = CGRectInset(_panel.bounds, kPanelGrabRim, kPanelGrabRim);
+        if (CGRectContainsPoint(_panel.bounds, local) && !CGRectContainsPoint(grabZone, local)) {
+            _rawTarget = HUDRawDragPanel;
+        }
+    }
     _rawThreshold = [self rawThresholdForTarget:_rawTarget];
     _rawStart = stagePoint;
     _rawLastPoint = stagePoint;
