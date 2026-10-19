@@ -76,9 +76,19 @@ private struct LoaderContent: View {
                 // там своя «техничная» гарнитура), и чуть ниже прежнего.
                 .font(.system(size: 44, weight: .heavy, design: .monospaced))
                 // Цвет надписи — тот же серо-тёмный градиент, что и у кнопки
-                // Start (по заказу): тот же LinearGradient сверху вниз.
-                .foregroundStyle(LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
-                                                startPoint: .top, endPoint: .bottom))
+                // Start (по заказу). foregroundStyle — только iOS 15+, а цель
+                // проекта iOS 14, поэтому градиент кладём ФОНОМ и обрезаем его
+                // маской того же текста: получается ровно тот же вид.
+                .foregroundColor(.clear)
+                .background(
+                    LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
+                                   startPoint: .top, endPoint: .bottom)
+                        .mask(
+                            Text("ascent")
+                                .font(.system(size: 44, weight: .heavy, design: .monospaced))
+                                .foregroundColor(.black)
+                        )
+                )
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
                 .offset(y: -8)
                 // Отладочное окно: длинный тап по заголовку.
