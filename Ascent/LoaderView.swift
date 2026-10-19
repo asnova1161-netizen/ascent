@@ -75,7 +75,10 @@ private struct LoaderContent: View {
                 // Шрифт — моноширинный (как у заголовка в меню-эталоне,
                 // там своя «техничная» гарнитура), и чуть ниже прежнего.
                 .font(.system(size: 44, weight: .heavy, design: .monospaced))
-                .foregroundColor(.white)
+                // Цвет надписи — тот же серо-тёмный градиент, что и у кнопки
+                // Start (по заказу): тот же LinearGradient сверху вниз.
+                .foregroundStyle(LinearGradient(colors: [Theme.grayTop, Theme.grayBottom],
+                                                startPoint: .top, endPoint: .bottom))
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
                 .offset(y: -8)
                 // Отладочное окно: длинный тап по заголовку.
