@@ -1672,19 +1672,24 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 /// Строки (и ползунки) лежат внутри скролла, поэтому hitTest для них ненадёжен:
 /// он может вернуть сам скролл, и ползунок тогда «не находится». Точка задаётся
 /// в координатах слоя _stage — оттуда приходят все точки жеста.
+///
+/// Берём ВСЮ строку ползунка (надписи над дорожкой — её часть) плюс 3 pt запаса
+/// сверху и снизу: целиться в тонкую дорожку пальцем не нужно, хватается вся
+/// строка. По вертикали вбок это не мешает — свайп всё равно решается по
+/// преобладанию оси (вбок — значение, вертикально — листание).
 - (UISlider *)sliderUnderStagePoint:(CGPoint)stagePoint
 {
     if (_scroll == nil) { return nil; }
     CGPoint point = [self convertPoint:stagePoint fromView:_stage];
+    // bounds скролла в его же координатах начинаются с contentOffset — это и
+    // есть проверка «строка сейчас видна на экране» (обрезанную не хватаем).
+    CGPoint inScroll = [_scroll convertPoint:point fromView:self];
+    if (!CGRectContainsPoint(_scroll.bounds, inScroll)) { return nil; }
     for (UISlider *slider in _sliders) {
         UIView *group = slider.superview;
         if (group == nil || group.hidden) { continue; }
-        // Строка должна быть видна внутри прокрутки (иначе ползунок обрезан).
-        if (![self pointIsOnScrollRow:point row:group]) { continue; }
-        // Небольшой запас по краям: палец часто ложится чуть мимо дорожки.
-        CGRect reach = CGRectInset(slider.bounds, -6.0, -6.0);
-        CGPoint local = [slider convertPoint:point fromView:self];
-        if (CGRectContainsPoint(reach, local)) { return slider; }
+        CGRect reach = CGRectInset(group.frame, 0.0, -3.0);
+        if (CGRectContainsPoint(reach, inScroll)) { return slider; }
     }
     return nil;
 }
