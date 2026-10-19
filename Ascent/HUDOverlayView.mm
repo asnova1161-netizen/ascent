@@ -110,8 +110,8 @@ static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
 
 // Акцентный цвет меню (вкладка Misc): хранится как СОСТАВЛЯЮЩИЕ HSV (оттенок,
-// насыщенность, яркость) в plist — так выбирается ЛЮБОЙ цвет, а не только из
-// списка. Компоненты кэшируются в static: HUDOverlayNumber читает файл
+// насыщенность, яркость) в plist — пикер на классической схеме HSV даёт выбор
+// ЛЮБОГО цвета. Компоненты кэшируются в static: HUDOverlayNumber читает файл
 // СИНХРОННО, а HUDMenuAccent() спрашивают на каждом кадре раскладки (цвет
 // активной вкладки, полоска-индикатор, заголовок) — без кэша это было бы
 // чтение файла десятки раз в секунду.
@@ -130,14 +130,14 @@ static void HUDMenuAccentLoad(void)
     double s = HUDOverlayNumber(@"hud.accent.s", -1.0);
     double v = HUDOverlayNumber(@"hud.accent.v", -1.0);
     if (h >= 0.0 && s >= 0.0 && v >= 0.0 && s <= 1.0 && v <= 1.0) {
-        sMenuAccentH = fmod(h, 360.0);
+        sMenuAccentH = (CGFloat)fmod(h, 360.0);
         if (sMenuAccentH < 0.0) { sMenuAccentH += 360.0; }
         sMenuAccentS = (CGFloat)s;
         sMenuAccentV = (CGFloat)v;
         return;
     }
     // Старый формат: индекс фиксированной палитры (ключ hud.accent) —
-    // переводим его цвет в HSV, чтобы чей-то выбор не слетал при обновлении.
+    // переводим его цвет в HSV, чтобы выбор не слетел при обновлении.
     static const CGFloat kOldPalette[][3] = {
         { 1.000, 0.100, 0.100 },  // 0 — красный
         { 1.000, 0.584, 0.000 },  // 1 — оранжевый
@@ -180,13 +180,13 @@ static void HUDMenuAccentSetHSV(double h, double s, double v)
     HUDOverlaySetNumber(@"hud.accent.v", v);
 }
 
-/// Во сколько превращается позиция тапа на полосе accent color (0..1):
-/// маркер 3 pt шириной стоит по центру значения — читаем от его середины.
-static CGFloat HUDAccentRatioAtX(CGPoint local, UIView *strip)
+/// Позиция тапа на вертикальной полосе оттенка — 0..1 по высоте
+/// (маркер-риска 3 pt, читаем от его середины).
+static CGFloat HUDAccentRatioAtY(CGPoint local, UIView *strip)
 {
-    CGFloat usable = strip.bounds.size.width - 3.0;
+    CGFloat usable = strip.bounds.size.height - 3.0;
     if (usable <= 0.0) { return 0.0; }
-    CGFloat value = (local.x - strip.frame.origin.x - 1.5) / usable;
+    CGFloat value = (local.y - strip.frame.origin.y - 1.5) / usable;
     return MIN(MAX(value, 0.0), 1.0);
 }
 
@@ -601,21 +601,20 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIScrollView *_scroll;
     UIButton *_unloadButton;
     // Вкладка Misc: строка accent color — свотч слева от надписи, под ними
-    // три полосы-градиента (оттенок / насыщенность / яркость). Тап по полосе
-    // ставит составляющую по позиции пальца — выбирается любой цвет, а не
-    // только из списка (см. performTapAtPoint:).
+    // HSV-пикер как в системном выборе цвета: поле «насыщенность × яркость»
+    // и вертикальная радужная полоса оттенка справа от него. Тап по полю
+    // задаёт насыщенность/яркость, тап по полосе — оттенок (см.
+    // performTapAtPoint:).
     UIView *_accentRow;
     UIView *_accentSwatch;
     UILabel *_accentLabel;
-    UIView *_hueStrip;       // полоса оттенков (градиент статичный)
-    UIView *_satStrip;       // полоса насыщенности (зависит от H и V)
-    UIView *_valStrip;       // полоса яркости (зависит от H и S)
+    UIView *_svSquare;          // поле: слева белое → справа чистый цвет
+    CAGradientLayer *_svBase;   // горизонталь: белый → цвет текущего оттенка
+    CAGradientLayer *_svShade;  // вертикаль: прозрачный сверху → чёрный снизу
+    UIView *_hueStrip;          // вертикальная радужная полоса оттенка
     CAGradientLayer *_hueGradient;
-    CAGradientLayer *_satGradient;
-    CAGradientLayer *_valGradient;
-    UIView *_hueMarker;      // белая риска текущего положения на полосе
-    UIView *_satMarker;
-    UIView *_valMarker;
+    UIView *_svMarker;          // круг-маркер выбранной точки поля
+    UIView *_hueMarker;         // белая риска на полосе оттенка
     // Запись экрана/AirPlay: панель и квадрат скрыты, пока UIScreen.isCaptured
     // (вкладка Misc, переключатель overlay).
     BOOL _captureHidden;
@@ -1168,28 +1167,24 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Строка accent color (вкладка Misc): три полосы-градиента. Тап по полосе
-    // ставит оттенок/насыщенность/яркость по позиции пальца — так выбирается
-    // любой цвет (темнее, светлее, другой оттенок), а не только из списка.
+    // Строка accent color (вкладка Misc): HSV-пикер. Тап по полю задаёт
+    // насыщенность/яркость, тап по радужной полосе — оттенок.
     if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
         CGPoint local = [_accentRow convertPoint:point fromView:self];
-        if (CGRectContainsPoint(_hueStrip.frame, local)) {
-            CGFloat ratio = HUDAccentRatioAtX(local, _hueStrip);
+        CGRect square = _svSquare.frame;
+        if (CGRectContainsPoint(square, local) && square.size.width > 0.0) {
+            CGFloat sx = (local.x - square.origin.x) / square.size.width;
+            CGFloat sy = (local.y - square.origin.y) / square.size.height;
+            [self applyMenuAccentHue:sMenuAccentH
+                          saturation:MIN(MAX(sx, 0.0), 1.0)
+                          brightness:1.0 - MIN(MAX(sy, 0.0), 1.0)];
+        } else if (CGRectContainsPoint(_hueStrip.frame, local)) {
+            CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
             [self applyMenuAccentHue:ratio * 360.0
                           saturation:sMenuAccentS
                           brightness:sMenuAccentV];
-        } else if (CGRectContainsPoint(_satStrip.frame, local)) {
-            CGFloat ratio = HUDAccentRatioAtX(local, _satStrip);
-            [self applyMenuAccentHue:sMenuAccentH
-                          saturation:ratio
-                          brightness:sMenuAccentV];
-        } else if (CGRectContainsPoint(_valStrip.frame, local)) {
-            CGFloat ratio = HUDAccentRatioAtX(local, _valStrip);
-            [self applyMenuAccentHue:sMenuAccentH
-                          saturation:sMenuAccentS
-                          brightness:ratio];
         }
-        return;   // тап по строке, но не по полосе — ничего не делаем
+        return;   // тап по строке, но не по пикеру — ничего не делаем
     }
 
     for (UISlider *slider in _sliders) {
@@ -1638,9 +1633,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     // Строка accent color (вкладка Misc): свотч текущего цвета слева от
-    // надписи, под ними три полосы-градиента — оттенок, насыщенность, яркость.
-    // Тап по полосе ставит составляющую по позиции пальца, поэтому цвет
-    // выбирается ЛЮБОЙ (темнее/светлее/другой оттенок), а не из списка.
+    // надписи, под ними HSV-пикер как в системном выборе цвета — поле
+    // «насыщенность × яркость» и вертикальная радужная полоса оттенка.
+    // Тап по полю/полосе задаёт цвет (см. performTapAtPoint:).
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
     _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     _accentRow.layer.cornerRadius = 12.0;
@@ -1656,54 +1651,65 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentLabel.autoresizingMask = UIViewAutoresizingNone;
     [_accentRow addSubview:_accentLabel];
 
-    // Оттенки: полный спектр радуги, градиент статичный — собираем один раз.
-    _hueStrip = [[UIView alloc] initWithFrame:CGRectZero];
-    _hueStrip.layer.cornerRadius = 4.0;
-    _hueStrip.clipsToBounds = YES;
-    _hueStrip.userInteractionEnabled = NO;
-    _hueGradient = [CAGradientLayer layer];
-    _hueGradient.colors = @[
-        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // красный
-        (id)HUDColor(1.000, 0.800, 0.000).CGColor,   // жёлтый
-        (id)HUDColor(0.000, 1.000, 0.200).CGColor,   // зелёный
-        (id)HUDColor(0.000, 0.900, 1.000).CGColor,   // голубой
-        (id)HUDColor(0.100, 0.200, 1.000).CGColor,   // синий
-        (id)HUDColor(0.800, 0.100, 1.000).CGColor,   // фиолетовый
-        (id)HUDColor(1.000, 0.000, 0.500).CGColor,   // розовый
-        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // снова красный
+    // Поле: слева белое (насыщенность 0) → справа чистый цвет (1), сверху
+    // яркое (v=1) → снизу чёрное (v=0). Скругление ставим на сами слои
+    // градиентов — контейнер НЕ режет подложки, чтобы круг-маркер мог
+    // вылезать за край.
+    _svSquare = [[UIView alloc] initWithFrame:CGRectZero];
+    _svBase = [CAGradientLayer layer];
+    _svBase.startPoint = CGPointMake(0.0, 0.5);
+    _svBase.endPoint = CGPointMake(1.0, 0.5);
+    [_svSquare.layer addSublayer:_svBase];
+    _svShade = [CAGradientLayer layer];
+    _svShade.startPoint = CGPointMake(0.5, 0.0);
+    _svShade.endPoint = CGPointMake(0.5, 1.0);
+    _svShade.colors = @[
+        (id)[UIColor colorWithWhite:0.0 alpha:0.0].CGColor,
+        (id)[UIColor blackColor].CGColor,
     ];
-    _hueGradient.locations = @[ @0.0, @(1.0/7.0), @(2.0/7.0), @(3.0/7.0),
-                                @(4.0/7.0), @(5.0/7.0), @(6.0/7.0), @1.0 ];
+    [_svSquare.layer addSublayer:_svShade];
+    _svMarker = [[UIView alloc] initWithFrame:CGRectZero];
+    _svMarker.backgroundColor = [UIColor clearColor];
+    _svMarker.layer.borderWidth = 2.0;
+    _svMarker.layer.borderColor = [UIColor whiteColor].CGColor;
+    _svMarker.layer.shadowColor = [UIColor blackColor].CGColor;
+    _svMarker.layer.shadowOpacity = 0.8;
+    _svMarker.layer.shadowRadius = 2.0;
+    _svMarker.layer.shadowOffset = CGSizeZero;
+    _svMarker.userInteractionEnabled = NO;
+    [_accentRow addSubview:_svSquare];
+    [_accentRow addSubview:_svMarker];
+
+    // Вертикальная радужная полоса оттенка (градиент статичен — собираем
+    // один раз; сверху красный 0°, донизу снова красный 360°).
+    _hueStrip = [[UIView alloc] initWithFrame:CGRectZero];
+    _hueGradient = [CAGradientLayer layer];
+    _hueGradient.startPoint = CGPointMake(0.5, 0.0);
+    _hueGradient.endPoint = CGPointMake(0.5, 1.0);
+    _hueGradient.colors = @[
+        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // красный (0°)
+        (id)HUDColor(1.000, 0.850, 0.000).CGColor,   // жёлтый (60°)
+        (id)HUDColor(0.000, 1.000, 0.000).CGColor,   // зелёный (120°)
+        (id)HUDColor(0.000, 0.900, 0.900).CGColor,   // голубой (180°)
+        (id)HUDColor(0.000, 0.000, 1.000).CGColor,   // синий (240°)
+        (id)HUDColor(0.850, 0.000, 0.850).CGColor,   // пурпурный (300°)
+        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // снова красный (360°)
+    ];
+    _hueGradient.locations = @[ @0.0, @(1.0/6.0), @(2.0/6.0), @(3.0/6.0),
+                                @(4.0/6.0), @(5.0/6.0), @1.0 ];
     [_hueStrip.layer addSublayer:_hueGradient];
-    _hueMarker = [self makeAccentMarker];
-    [_hueStrip addSubview:_hueMarker];
+    _hueMarker = [[UIView alloc] initWithFrame:CGRectZero];
+    _hueMarker.backgroundColor = [UIColor whiteColor];
+    _hueMarker.layer.shadowColor = [UIColor blackColor].CGColor;
+    _hueMarker.layer.shadowOpacity = 0.8;
+    _hueMarker.layer.shadowRadius = 2.0;
+    _hueMarker.layer.shadowOffset = CGSizeZero;
+    _hueMarker.userInteractionEnabled = NO;
     [_accentRow addSubview:_hueStrip];
-
-    // Насыщенность: от серого (текущая яркость) до чистого цвета текущего
-    // оттенка — градиент пересобираем при смене H/V (см. updateAccentUI).
-    _satStrip = [[UIView alloc] initWithFrame:CGRectZero];
-    _satStrip.layer.cornerRadius = 4.0;
-    _satStrip.clipsToBounds = YES;
-    _satStrip.userInteractionEnabled = NO;
-    _satGradient = [CAGradientLayer layer];
-    [_satStrip.layer addSublayer:_satGradient];
-    _satMarker = [self makeAccentMarker];
-    [_satStrip addSubview:_satMarker];
-    [_accentRow addSubview:_satStrip];
-
-    // Яркость: от чёрного до цвета текущего оттенка в полной яркости.
-    _valStrip = [[UIView alloc] initWithFrame:CGRectZero];
-    _valStrip.layer.cornerRadius = 4.0;
-    _valStrip.clipsToBounds = YES;
-    _valStrip.userInteractionEnabled = NO;
-    _valGradient = [CAGradientLayer layer];
-    [_valStrip.layer addSublayer:_valGradient];
-    _valMarker = [self makeAccentMarker];
-    [_valStrip addSubview:_valMarker];
-    [_accentRow addSubview:_valStrip];
+    [_accentRow addSubview:_hueMarker];
 
     [_scroll addSubview:_accentRow];
-    // Красим полосы, ставим маркеры и акцентные элементы — сразу при сборке
+    // Красим поле под текущий оттенок и ставим маркеры — сразу при сборке
     // (HSV уже загружен в init).
     [self updateAccentUI];
 
@@ -1954,27 +1960,28 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: свотч слева от надписи, под ними три полосы —
-        // оттенок, насыщенность, яркость (выбор любого цвета тапом).
+        // Строка accent color: свотч слева от надписи, под ними HSV-пикер —
+        // поле «насыщенность × яркость» слева, радужная полоса оттенка
+        // справа (как в системном выборе цвета).
         _accentRow.hidden = NO;
-        CGFloat accentH = 80.0;   // строка подписи 22 + три полосы 14 с зазорами
-        _accentRow.frame = CGRectMake(x, y, rowWidth, accentH);
+        CGFloat pickerY = 22.0;
+        CGFloat pickerH = 96.0;
+        CGFloat stripW = 14.0;
+        CGFloat pickerX = 10.0;
+        _accentRow.frame = CGRectMake(x, y, rowWidth, pickerY + pickerH + 8.0);
         _accentSwatch.frame = CGRectMake(10.0, 3.0, 16.0, 16.0);
         _accentLabel.frame = CGRectMake(32.0, 0.0, rowWidth - 42.0, 22.0);
-        CGFloat stripX = 10.0;
-        CGFloat stripW = rowWidth - 20.0;
-        _hueStrip.frame = CGRectMake(stripX, 22.0, stripW, 14.0);
-        _satStrip.frame = CGRectMake(stripX, 40.0, stripW, 14.0);
-        _valStrip.frame = CGRectMake(stripX, 58.0, stripW, 14.0);
-        // Размеры полос заданы — растягиваем их градиенты и переставляем
-        // маркеры (цвета градиентов остаются как их собрал buildContent).
+        _svSquare.frame = CGRectMake(pickerX, pickerY, pickerH, pickerH);
+        _svBase.frame = _svSquare.bounds;
+        _svBase.cornerRadius = 6.0;
+        _svShade.frame = _svSquare.bounds;
+        _svShade.cornerRadius = 6.0;
+        _hueStrip.frame = CGRectMake(pickerX + pickerH + 6.0, pickerY, stripW, pickerH);
         _hueGradient.frame = _hueStrip.bounds;
-        _satGradient.frame = _satStrip.bounds;
-        _valGradient.frame = _valStrip.bounds;
-        [self placeAccentMarker:_hueMarker value:sMenuAccentH / 360.0];
-        [self placeAccentMarker:_satMarker value:sMenuAccentS];
-        [self placeAccentMarker:_valMarker value:sMenuAccentV];
-        y += accentH + 10.0;
+        _hueGradient.cornerRadius = 4.0;
+        [self placeAccentSVMarker];
+        [self placeAccentHueMarker];
+        y += pickerY + pickerH + 8.0 + 10.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
         _unloadButton.hidden = NO;
@@ -2299,21 +2306,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 #pragma mark - Accent color (вкладка Misc)
 
-/// Белая риска текущего положения на полосе (с тенью — видна на любом фоне).
-- (UIView *)makeAccentMarker
-{
-    UIView *marker = [[UIView alloc] initWithFrame:CGRectZero];
-    marker.backgroundColor = [UIColor whiteColor];
-    marker.layer.cornerRadius = 1.5;
-    marker.layer.shadowColor = [UIColor blackColor].CGColor;
-    marker.layer.shadowOpacity = 0.7;
-    marker.layer.shadowRadius = 2.0;
-    marker.layer.shadowOffset = CGSizeZero;
-    marker.userInteractionEnabled = NO;
-    return marker;
-}
-
-/// Тап по полосе: ставим соответствующую составляющую HSV и перекрашиваем
+/// Тап по пикеру: ставим соответствующую составляющую HSV и перекрашиваем
 /// всё, что зависит от акцента (свотч, заголовок, активная вкладка, полоски).
 - (void)applyMenuAccentHue:(CGFloat)h saturation:(CGFloat)s brightness:(CGFloat)v
 {
@@ -2322,8 +2315,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     AscentHUDLog(@"[accent] цвет h=%.0f s=%.2f v=%.2f", sMenuAccentH, sMenuAccentS, sMenuAccentV);
 }
 
-/// Перекраска всего, что зависит от текущего HSV: акцентные элементы, градиенты
-/// полос насыщенности/яркости (они зависят от H и V) и маркеры положения.
+/// Перекраска всего, что зависит от текущего HSV: акцентные элементы, поле
+/// пикера (его горизонтальный градиент зависит от оттенка) и маркеры.
 - (void)updateAccentUI
 {
     UIColor *accent = HUDMenuAccent();
@@ -2331,34 +2324,42 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _panelTitle.textColor = accent;
     _tabIndicator.backgroundColor = accent;
 
-    // Насыщенность: от серого при текущей яркости до чистого цвета.
-    _satGradient.colors = @[
+    // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
+    _svBase.colors = @[
+        (id)[UIColor whiteColor].CGColor,
         (id)[UIColor colorWithHue:sMenuAccentH / 360.0
-                       saturation:0.0
-                       brightness:sMenuAccentV
-                            alpha:1.0].CGColor,
-        (id)accent.CGColor,
-    ];
-    // Яркость: от чёрного до цвета текущего оттенка в полной яркости.
-    _valGradient.colors = @[
-        (id)[UIColor blackColor].CGColor,
-        (id)[UIColor colorWithHue:sMenuAccentH / 360.0
-                       saturation:MIN(sMenuAccentS, 1.0)
+                       saturation:1.0
                        brightness:1.0
                             alpha:1.0].CGColor,
     ];
 
-    [self placeAccentMarker:_hueMarker value:sMenuAccentH / 360.0];
-    [self placeAccentMarker:_satMarker value:sMenuAccentS];
-    [self placeAccentMarker:_valMarker value:sMenuAccentV];
+    [self placeAccentSVMarker];
+    [self placeAccentHueMarker];
 }
 
-/// Ставим маркер на значение 0..1 по ширине своей полосы.
-- (void)placeAccentMarker:(UIView *)marker value:(CGFloat)value
+/// Круг-маркер на выбранной точке поля: x = насыщенность, y = яркость
+/// (сверху яркое, снизу чёрное — как в системном пикере).
+- (void)placeAccentSVMarker
 {
-    CGFloat w = marker.superview.bounds.size.width;
-    if (w <= 0.0) { return; }
-    marker.frame = CGRectMake(value * (w - 3.0) + 1.0, 0.0, 3.0, marker.superview.bounds.size.height);
+    CGRect sq = _svSquare.frame;
+    if (sq.size.width <= 0.0) { return; }
+    CGFloat cx = sq.origin.x + sMenuAccentS * sq.size.width;
+    CGFloat cy = sq.origin.y + (1.0 - sMenuAccentV) * sq.size.height;
+    _svMarker.bounds = CGRectMake(0.0, 0.0, 12.0, 12.0);
+    _svMarker.center = CGPointMake(MIN(MAX(cx, sq.origin.x + 6.0), CGRectGetMaxX(sq) - 6.0),
+                                   MIN(MAX(cy, sq.origin.y + 6.0), CGRectGetMaxY(sq) - 6.0));
+    _svMarker.layer.cornerRadius = 6.0;
+}
+
+/// Белая риска на полосе оттенка (оттенок 0..360 сверху вниз).
+- (void)placeAccentHueMarker
+{
+    CGRect strip = _hueStrip.frame;
+    if (strip.size.height <= 0.0) { return; }
+    CGFloat cy = strip.origin.y + (sMenuAccentH / 360.0) * strip.size.height;
+    _hueMarker.frame = CGRectMake(strip.origin.x - 2.0, cy - 1.5,
+                                  strip.size.width + 4.0, 3.0);
+    _hueMarker.layer.cornerRadius = 1.5;
 }
 
 - (void)sliderChanged:(UISlider *)sender
