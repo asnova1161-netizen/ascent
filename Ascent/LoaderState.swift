@@ -35,6 +35,12 @@ final class LoaderState: ObservableObject {
     private var debugTimer: Timer?
     private var heartbeatTimer: Timer?
     private var isStarting = false
+    /// Токен поколения запуска: каждое нажатие Start/Exit увеличивает счётчик.
+    /// Фоновые блоки запуска и остановки берут его на входе и сверяют перед
+    /// каждым важным шагом — так Exit мгновенно отменяет ещё поднимающийся
+    /// HUD, а сторож остановки выходит, как только пользователь снова нажал
+    /// Start (иначе он мог бы погасить УЖЕ новый оверлей).
+    private var startGeneration = 0
     private var didFetchCrashLog = false
 
     init() {
@@ -69,19 +75,23 @@ final class LoaderState: ObservableObject {
 
     // MARK: - Кнопка Start / Exit
 
-    /// Кнопка Start/Exit. Повторное нажатие во время запуска игнорируем.
+    /// Кнопка Start/Exit. Показываем Exit по showing || engaged: engaged
+    /// включается сразу при Start, поэтому кнопка переключается МГНОВЕННО,
+    /// не дожидаясь PID-файла (тот появляется лишь через 1–2 с загрузки
+    /// HUD-процесса). Exit во время запуска не игнорируется, а ОТМЕНЯЕТ его:
+    /// stopHUD поднимает startGeneration, и незавершённый Start-блок сверху
+    /// выходит, не дойдя до конца.
     func tapStart() {
-        if isStarting {
-            return
-        }
-        if showing {
+        if showing || engaged {
             stopHUD()
-        } else {
+        } else if !isStarting {
             startHUD()
         }
     }
 
     private func startHUD() {
+        startGeneration += 1
+        let generation = startGeneration
         isStarting = true
         running = true
         engaged = true
@@ -102,26 +112,39 @@ final class LoaderState: ObservableObject {
             SetHUDEnabled(true)
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
+                // Запуск отменили (нажали Exit), пока хелпер поднимал HUD, —
+                // дальше не идём: состояние уже сброшено в stopHUD.
+                guard generation == self.startGeneration else {
+                    AscentHUDLogMessage("Swift: Start отменён на этапе подъёма хелпера")
+                    return
+                }
                 AscentHUDLogMessage("Swift: Start — HUD поднят, собираю диагностику")
                 // Оверлей поднят — держим диагностику свежей всё время, пока он включён.
                 self.refreshDebug()
                 AscentHUDLogMessage("Swift: Start — диагностика собрана, жду PID-файл")
                 self.startDiagnosticsRefresh()
-                self.waitForHUDStart()
-                AscentHUDLogMessage("Swift: Start — готово, показываю: \(self.showing ? "Exit" : "Start")")
+                self.waitForHUDStart(generation: generation)
+                AscentHUDLogMessage("Swift: Start — готово, показываю: \(self.showing || self.engaged ? "Exit" : "Start")")
             }
         }
         // Не блокируем UI: диагностика и ожидание продолжатся в фоне.
     }
 
     /// Ждём до 3 секунд, пока HUD-процесс запишет PID-файл и окажется живым.
-    private func waitForHUDStart() {
+    /// `generation` — токен запуска: если пользователь уже нажал Exit,
+    /// таймер молча гаснет, ничего не перезаписывая.
+    private func waitForHUDStart(generation: Int) {
         startupPollTimer?.invalidate()
 
         let deadline = Date().addingTimeInterval(3.0)
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
+                return
+            }
+            guard generation == self.startGeneration else {
+                timer.invalidate()
+                self.startupPollTimer = nil
                 return
             }
 
@@ -159,6 +182,8 @@ final class LoaderState: ObservableObject {
                 self.startupPollTimer = nil
                 self.isStarting = false
                 self.showing = false
+                // Запуск не удался — кнопка возвращается к Start.
+                self.engaged = false
                 AscentHUDLogMessage("Swift: оверлей НЕ подтвердился за 3 с")
             }
         }
@@ -170,6 +195,11 @@ final class LoaderState: ObservableObject {
     /// Exit: гасим HUD-процесс и снимаем состояние.
     private func stopHUD() {
         AscentHUDLogMessage("Swift: нажат Exit")
+        // Поднимаем токен: незавершённый Start-блок (если запуск ещё шёл)
+        // увидит несовпадение и выйдет, не трогая состояние. Заодно сторож
+        // остановки ниже выйдет, как только пользователь снова нажал Start.
+        startGeneration += 1
+        let generation = startGeneration
         startupPollTimer?.invalidate()
         startupPollTimer = nil
         stopHeartbeat()
@@ -186,8 +216,29 @@ final class LoaderState: ObservableObject {
         // Делаем остановку HUD-процесса в фоне, чтобы кнопка
         // «Start/Exit» сразу перестала показывать Exit и не была с анимацией
         // с задержкой ~1 секунду из-за синхронного ожидания.
-        DispatchQueue.global(qos: .userInitiated).async {
-            SetHUDEnabled(false)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Сторож гонки «Exit до записи PID-файла»: если запуск ещё шёл,
+            // PID-файл мог отсутствовать — тогда первый SetHUDEnabled(false)
+            // ничего не погасил, и на пару секунд оставался живой оверлей.
+            // Перепроверяем до 3 с (15 × 200 мс) и гасим повторно. Перед
+            // КАЖДЫМ гашением сверяем токен: новый Start запрещает трогать
+            // уже поднимающийся HUD.
+            func killHUDIfStillWanted() -> Bool {
+                guard let self = self, self.startGeneration == generation else {
+                    return false
+                }
+                SetHUDEnabled(false)
+                return true
+            }
+            guard killHUDIfStillWanted() else { return }
+            for _ in 0..<15 {
+                usleep(200_000)
+                guard let self = self, self.startGeneration == generation else {
+                    return
+                }
+                if !IsHUDEnabled() { break }
+                SetHUDEnabled(false)
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.refreshFromProcess()
             }
@@ -224,6 +275,12 @@ final class LoaderState: ObservableObject {
             engaged = true
             startHeartbeat()
         } else {
+            // Пока идёт запуск (isStarting), engaged НЕ сбрасываем: кнопка
+            // уже показывает Exit, а PID-файл может просто ещё не появиться.
+            // Если же HUD мёртв и запуска нет — кнопка возвращается к Start.
+            if !isStarting {
+                engaged = false
+            }
             stopHeartbeat()
         }
         // Диагностику перечитываем всегда: она безопасна (никаких приватных
