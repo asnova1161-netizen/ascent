@@ -142,9 +142,12 @@ static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
 // СИНХРОННО, а HUDMenuAccent() спрашивают на каждом кадре раскладки (цвет
 // активной вкладки, полоска-индикатор, заголовок) — без кэша это было бы
 // чтение файла десятки раз в секунду.
-static CGFloat sMenuAccentH = 0.0;   // оттенок, 0..360 (0 — красный)
-static CGFloat sMenuAccentS = 0.9;   // насыщенность, 0..1 (как HUDAccent)
-static CGFloat sMenuAccentV = 1.0;   // яркость, 0..1
+// Дефолтный цвет (по заказу) — приглушённый красно-коралловый #b04033:
+// RGB (176, 64, 51) → HSV: H = 60·(13/125) = 6.24°, S = 125/176 = 0.7102,
+// V = 176/255 = 0.6902.
+static CGFloat sMenuAccentH = 6.24;    // оттенок, 0..360 (0 — красный)
+static CGFloat sMenuAccentS = 0.7102;  // насыщенность, 0..1
+static CGFloat sMenuAccentV = 0.6902;  // яркость, 0..1
 // Есть ли цвет, ещё НЕ записанный в файл: во время перетаскивания его не
 // пишем (см. HUDMenuAccentSetHSV), но закрытие пикера от этого не должно
 // подтормаживать — запись нужна, только если перенос успели прервать.
@@ -282,6 +285,9 @@ static const CGFloat kFlatSwitchW = 44.0;
 static const CGFloat kFlatSwitchH = 20.0;
 // Длительность анимации переключения (по заказу — быстрее прежних 0.35 с).
 static const NSTimeInterval kSwitchAnimDuration = 0.24;
+// Длительность анимаций самого меню (смена темы, переключение вкладки,
+// появление/исчезновение панели) — тот же порядок, что у тумблера.
+static const NSTimeInterval kMenuFadeDuration = 0.30;
 
 /// Тумблер вместо системного UISwitch. Закруглённая пилюля с круглым бегунком;
 /// включение/выключение ПЛАВНОЕ (~0.24 с): подложка перекрашивается и бегунок
@@ -509,6 +515,10 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
     // жест превращается в прокрутку. Без этого порога дрожь руки при нажатии
     // уводила бы содержимое, и кнопки «не нажимались».
     HUDRawDragControl,
+    // Ползунок (вкладка Aim): значение едет под пальцем СРАЗУ, без удержания —
+    // как маркеры пикера. Иначе протяжка по строке слайдера после kRawDragHold
+    // превращалась бы в перенос панели (ветка удержания Control → Panel).
+    HUDRawDragSlider,
     // Пикер accent color (всплывающая карточка поверх меню): прямое управление
     // значением пальцем — кружок в поле тянется, риска по радужной полосе
     // мотается вверх-вниз. Удержания не требуют, порог не нужен.
@@ -787,6 +797,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_themeLabel;
     UILabel *_themeDarkLabel;
     UILabel *_themeLightLabel;
+    // Строка target (вкладка Aim): цель аимбота — четыре пилюли head / neck /
+    // body / legs; выбранную красит updateTargetUI, значение лежит в plist
+    // (cheat.target).
+    UIView *_targetRow;
+    UILabel *_targetLabel;
+    NSMutableArray<UILabel *> *_targetPills;
     // Пикер — ВСПЛЫВАЮЩАЯ карточка поверх меню (не внутри панели и не в
     // отдельном окне): тёмная карточка с полем «насыщенность × яркость» и
     // вертикальной радужной полосой оттенка. Рисуется в том же HUD-слое
@@ -845,6 +861,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                                 // пересобралась посреди жеста (быстрый Start сразу
                                 // разворачивает игру), координаты событий приходят
                                 // уже в новом кадре — якорь тогда перебазируем
+    UISlider *_rawSlider;       // ползунок, который тянет палец (HUDRawDragSlider)
     BOOL _rawMoved;             // палец реально сдвинулся (а не просто тап)
     BOOL _rawArmed;             // удержание прошло — жест стал переносом
     BOOL _rawHoldable;          // удержание здесь вообще разрешено (см. ниже)
@@ -992,6 +1009,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     while (cursor != nil && cursor != _stage && cursor != _panel) {
         if ([cursor isKindOfClass:[UIControl class]]) { return YES; }
         if (cursor == _accentRow) { return YES; }
+        if (cursor == _targetRow) { return YES; }
         if ([_configRows indexOfObjectIdenticalTo:cursor] != NSNotFound) { return YES; }
         if ([self switchInRow:cursor] != nil) { return YES; }
         if ([self sliderInGroup:cursor] != nil) { return YES; }
@@ -1024,6 +1042,16 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // Квадрат: нажатие открывает меню, а перенос идёт только по УДЕРЖАНИЮ
     // (см. kRawDragHold). Дрожь руки при нажатии его не сдвинет.
     if (hit == _trigger || [hit isDescendantOfView:_trigger]) { return HUDRawDragTrigger; }
+    // Ползунок тянется пальцем СРАЗУ, без удержания (как маркеры пикера) —
+    // проверяем ДО общего «управляющего элемента»: иначе протяжка по строке
+    // слайдера после kRawDragHold превращалась бы в перенос панели.
+    {
+        UIView *cursor = hit;
+        while (cursor != nil && cursor != _stage && cursor != _panel) {
+            if ([self sliderInGroup:cursor] != nil) { return HUDRawDragSlider; }
+            cursor = cursor.superview;
+        }
+    }
     // Управляющие элементы проверяем ДО шапки и карточки: вкладки, переключатели
     // и слайдеры лежат в панели, и без этого порядка их нажатие превращалось бы
     // в перетаскивание панели.
@@ -1112,6 +1140,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawHoldFromScroll = insideScroll &&
                          (_rawTarget == HUDRawDragScroll ||
                           _rawTarget == HUDRawDragControl);
+    // Ползунок (вкладка Aim) ведётся пальцем с САМОГО начала, как маркеры
+    // пикера: значение сразу ставится под точкой нажатия, дальше палец едет.
+    _rawSlider = nil;
+    if (_rawTarget == HUDRawDragSlider) {
+        UIView *cursor = hit;
+        while (cursor != nil && cursor != _stage && cursor != _panel) {
+            UISlider *slider = [self sliderInGroup:cursor];
+            if (slider != nil) { _rawSlider = slider; break; }
+            cursor = cursor.superview;
+        }
+        if (_rawSlider != nil) {
+            _rawArmed = YES;
+            [self dragSlider:_rawSlider toStagePoint:stagePoint];
+        }
+    }
     _rawScrollTouched = NO;
     _rawTapFired = NO;
     _dragging = YES;
@@ -1320,6 +1363,15 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
             return;
         }
 
+        // ПОЛЗУНОК (вкладка Aim): значение едет под пальцем СРАЗУ, без
+        // удержания и порогов — точку события переводим в координаты слайдера
+        // (см. dragSlider:toStagePoint:). Файл не пишем — см. commitRawDrag.
+        if (_rawTarget == HUDRawDragSlider) {
+            _rawMoved = YES;
+            if (_rawSlider != nil) { [self dragSlider:_rawSlider toStagePoint:stagePoint]; }
+            return;
+        }
+
         // ПЕРЕНОС квадрата и панели — строго ЗА ПАЛЬЦЕМ, один к одному:
         // положение = положение на момент нажатия + весь путь пальца. Никаких
         // порогов, перебазирований и «догоняний» — именно из-за них перенос
@@ -1425,6 +1477,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 - (void)endRawGesture
 {
     _rawTarget = HUDRawDragNone;
+    _rawSlider = nil;
     _rawMoved = NO;
     _rawArmed = NO;
     _rawTapFired = NO;
@@ -1572,6 +1625,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
+    // Строка target (вкладка Aim): тап по ПИЛЮЛЕ head/neck/body/legs выбирает
+    // цель; надпись слева выбором не является (как в menu theme).
+    if (_targetRow != nil && [self pointIsOnScrollRow:point row:_targetRow]) {
+        CGPoint local = [_targetRow convertPoint:point fromView:self];
+        for (NSInteger i = 0; i < (NSInteger)_targetPills.count; i++) {
+            if (CGRectContainsPoint(_targetPills[i].frame, local)) {
+                HUDOverlaySetNumber(@"cheat.target", (double)i);
+                [self updateTargetUI];
+                AscentHUDLog(@"[gesture] cheat.target -> %ld", (long)i);
+                break;
+            }
+        }
+        return;
+    }
+
     for (UISlider *slider in _sliders) {
         UIView *group = slider.superview;
         if (![self pointIsOnScrollRow:point row:group]) { continue; }
@@ -1617,6 +1685,19 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     [self updateSliderLabel:slider.accessibilityIdentifier];
     [self sliderChanged:slider];
     AscentHUDLog(@"[gesture] %@ = %.2f (тап)", slider.accessibilityIdentifier, slider.value);
+}
+
+/// Протяжка слайдера пальцем: значение — прямо под точкой касания. Точку
+/// события переводим в координаты САМОГО слайдера, поэтому повороты экрана и
+/// перенос меню посреди жеста на расчёт не влияют. Файл при этом не пишем —
+/// значение живёт в памяти до отпускания (см. commitRawDrag).
+- (void)dragSlider:(UISlider *)slider toStagePoint:(CGPoint)stagePoint
+{
+    CGPoint local = [slider convertPoint:stagePoint fromView:_stage];
+    CGFloat width = MAX(slider.bounds.size.width, 1.0);
+    CGFloat ratio = MIN(MAX(local.x / width, 0.0), 1.0);
+    slider.value = slider.minimumValue + (float)(ratio * (slider.maximumValue - slider.minimumValue));
+    [self updateSliderLabel:slider.accessibilityIdentifier];
 }
 
 /// Ограничивает сдвиг за ОДНО событие: элемент идёт в направлении точки, куда
@@ -1698,6 +1779,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         HUDOverlayWrite(dict);
         AscentHUDLog(@"[gesture] пикер: перетаскивание закончилось, смещение=(%.0f, %.0f)",
                      offset.width, offset.height);
+        return;
+    }
+
+    // Ползунок: пока палец ездил, значение менялось только в памяти (см.
+    // dragSlider:toStagePoint:); файл пишем один раз — здесь, на отпускании.
+    if (_rawTarget == HUDRawDragSlider) {
+        if (_rawSlider != nil) {
+            AscentHUDLog(@"[gesture] %@ = %.2f (отпускание)", _rawSlider.accessibilityIdentifier, _rawSlider.value);
+            [self sliderChanged:_rawSlider];
+        }
+        _rawSlider = nil;
         return;
     }
 
@@ -1888,19 +1980,41 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (_panel == nil) { return; }   // панель ещё собирается — тап игнорируем
     _panelOpen = !_panelOpen;
     AscentHUDLog(@"HUD: панель %@", _panelOpen ? @"открыта" : @"закрыта");
+    // Любую текущую анимацию появления/исчезновения отменяем: без этого
+    // быстрое повторное нажатие подменяло кадры (completion от закрытия прятал
+    // только что открытую панель).
+    [_panel.layer removeAllAnimations];
     if (_panelOpen) {
         [self reloadCheatControls];
         [self selectTab:_tab];
         // _captureHidden: при записи экрана панель остаётся скрытой, даже если
         // квадрат «открылся» — иначе меню засветилось бы в записи.
         _panel.hidden = _captureHidden;
+        _panel.userInteractionEnabled = YES;
+        // Появление — с анимацией (по заказу): короткий фейд внутрь.
+        _panel.alpha = 0.0;
+        [UIView animateWithDuration:kMenuFadeDuration animations:^{
+            _panel.alpha = 1.0;
+        }];
     } else {
         // При закрытии гасим клавиатуру: она могла остаться от поля имени
         // конфига, и без этого висела бы поверх игры. Пикер тоже закрываем —
         // он открывался из меню и без меню смысла не имеет.
         [_configNameField resignFirstResponder];
         [self closePicker];
-        _panel.hidden = YES;
+        // Исчезновение — с анимацией; на время фейда панель не ловит тапы
+        // (иначе невидимые кнопки нажимались бы пальцем наугад).
+        _panel.userInteractionEnabled = NO;
+        [UIView animateWithDuration:kMenuFadeDuration animations:^{
+            _panel.alpha = 0.0;
+        } completion:^(BOOL finished) {
+            // finished == NO — анимацию отменили (меню снова открыли):
+            // прятать и трогать alpha в этом случае нельзя.
+            if (finished) {
+                _panel.hidden = YES;
+                _panel.alpha = 1.0;
+            }
+        }];
     }
     [self updateTriggerIcon];
     [self setNeedsLayout];
@@ -2022,16 +2136,19 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)buildContent
 {
     _switches = [NSMutableArray array];
-    // Три переключателя: esp, aimbot и overlay (вкладка Misc — прячет панель
-    // и квадрат от записи экрана). Под-опции ESP (боксы, здоровье, имена,
-    // дистанция, линии) из меню убраны. Порядок важен:
-    // layoutContentForTab: обращается к элементам по индексу.
+    // Четыре переключателя: esp, aimbot, overlay (вкладка Misc — прячет панель
+    // и квадрат от записи экрана) и draw fov (вкладка Aim, по заказу — рисует
+    // круг FOV в игре). Под-опции ESP (боксы, здоровье, имена, дистанция,
+    // линии) из меню убраны. Порядок важен: layoutContentForTab: обращается к
+    // элементам по индексу (0 esp, 1 aimbot, 2 overlay, 3 draw fov).
     NSArray<NSString *> *switchKeys = @[ @"cheat.esp",
                                          @"cheat.aimbot",
-                                         @"misc.overlay" ];
+                                         @"misc.overlay",
+                                         @"cheat.drawfov" ];
     NSArray<NSString *> *switchTitles = @[ @"Enable",
                                            @"Aimbot",
-                                           @"Overlay" ];
+                                           @"Overlay",
+                                           @"draw fov" ];
     for (NSInteger i = 0; i < (NSInteger)switchKeys.count; i++) {
         // Строка переключателя БЕЗ серо-белого фона (по заказу): подложка
         // alpha 0.07 на мелком шрифте выглядела как грязная плашка.
@@ -2121,17 +2238,64 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
     [_scroll addSubview:_themeRow];
 
+    // Строка target (вкладка Aim, по заказу): цель аимбота — четыре пилюли
+    // head | neck | body | legs, выбранную красит updateTargetUI. Как и в
+    // menu theme, НАДПИСЬ слева выбором не является — только пилюли.
+    _targetRow = [[UIView alloc] initWithFrame:CGRectZero];
+    _targetRow.backgroundColor = [UIColor clearColor];
+    _targetRow.autoresizingMask = UIViewAutoresizingNone;
+    _targetLabel = HUDLabel(@"target", 11, UIFontWeightMedium);
+    _targetLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
+    _targetLabel.adjustsFontSizeToFitWidth = YES;
+    _targetLabel.minimumScaleFactor = 0.65;
+    _targetLabel.lineBreakMode = NSLineBreakByClipping;
+    _targetLabel.autoresizingMask = UIViewAutoresizingNone;
+    [_targetRow addSubview:_targetLabel];
+    _targetPills = [NSMutableArray array];
+    for (NSString *name in @[ @"head", @"neck", @"body", @"legs" ]) {
+        UILabel *pill = HUDLabel(name, 10, UIFontWeightSemibold);
+        pill.textAlignment = NSTextAlignmentCenter;
+        pill.layer.cornerRadius = 8.0;
+        pill.clipsToBounds = YES;
+        pill.autoresizingMask = UIViewAutoresizingNone;
+        [_targetRow addSubview:pill];
+        [_targetPills addObject:pill];
+    }
+    [_scroll addSubview:_targetRow];
+
     // Поле, полоса и маркеры пикера собираются лениво — при первом открытии
     // (см. ensurePickerCard). Здесь только перекрашиваем акцентные элементы
     // панели по загруженному HSV.
     [self updateAccentUI];
 
-    // Слайдеры fov/smooth/delay из меню убраны по заказу: вкладка Config
-    // осталась с полем имени, кнопкой создания и списком конфигов. Массивы
-    // слайдеров оставляем пустыми — обходы по ним (снапшот конфига,
-    // перезагрузка элементов) просто ничего не делают.
+    // Ползунки вкладки Aim (по заказу вернули): fov — ОТ 10 ДО 100, значение
+    // крупно справа от названия — и smooth. Раскладку задаёт layoutSliderGroup:
+    // две подписи вверху (tag 1 — название, tag 2 — значение), сам ползунок
+    // под ними; тянется пальцем сразу (см. HUDRawDragSlider).
     _sliders = [NSMutableArray array];
     _sliderValueLabels = [NSMutableDictionary dictionary];
+    for (NSString *key in @[ @"cheat.fov", @"cheat.smooth" ]) {
+        UIView *group = [[UIView alloc] initWithFrame:CGRectZero];
+        group.autoresizingMask = UIViewAutoresizingNone;
+        UILabel *titleLabel = HUDLabel([key isEqualToString:@"cheat.fov"] ? @"fov" : @"smooth",
+                                       11, UIFontWeightMedium);
+        titleLabel.tag = 1;
+        titleLabel.autoresizingMask = UIViewAutoresizingNone;
+        [group addSubview:titleLabel];
+        UILabel *valueLabel = HUDLabel(@"", 11, UIFontWeightSemibold);
+        valueLabel.textAlignment = NSTextAlignmentRight;
+        valueLabel.tag = 2;
+        valueLabel.autoresizingMask = UIViewAutoresizingNone;
+        [group addSubview:valueLabel];
+        UISlider *slider = [[UISlider alloc] initWithFrame:CGRectZero];
+        slider.accessibilityIdentifier = key;
+        slider.minimumTrackTintColor = HUDMenuAccent();
+        slider.maximumTrackTintColor = HUDSoftFill();
+        [group addSubview:slider];
+        [_scroll addSubview:group];
+        [_sliders addObject:slider];
+        _sliderValueLabels[key] = valueLabel;
+    }
 
     _unloadButton = [self makeFlatButton:@"unload"];
     // Шрифт как у подписей вкладок (12 Semibold), а не 14 Heavy — по заказу.
@@ -2304,8 +2468,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat cardH = h - 2.0 * inset;
 
     _panelHeader.frame = CGRectMake(0, 0, w, h);   // зона переноса — вся панель
-    _panelTitle.frame = CGRectMake(sidebarX + 3.0, titleTop,
-                                   MAX(cardX - (sidebarX + 3.0) - 3.0, 40.0), titleH);
+    // По заказу надпись @ascentios ЧУТЬ ПРАВЕЕ прежнего отступа (8 вместо 3).
+    _panelTitle.frame = CGRectMake(sidebarX + 8.0, titleTop,
+                                   MAX(cardX - (sidebarX + 8.0) - 3.0, 40.0), titleH);
     _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
 
     // Колонка вкладок: строки кучно сверху, снизу остаётся пустой край —
@@ -2365,6 +2530,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _unloadButton.hidden = YES;
     _accentRow.hidden = YES;
     _themeRow.hidden = YES;
+    _targetRow.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
@@ -2374,8 +2540,30 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // здоровье, имена, дистанция, линии) из меню убраны.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
     } else if (tab == 1) {
-        // Вкладка Aim: только основной переключатель. Triggerbot убран.
+        // Вкладка Aim (по заказу расширена): aimbot, draw fov, ползунки fov и
+        // smooth и выбор цели target. Triggerbot убран.
         [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
+        [self layoutSwitchRow:_switches[3] x:x y:&y width:rowWidth];   // draw fov
+        [self layoutSliderGroup:_sliders[0] x:x y:&y width:rowWidth];  // fov
+        [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];  // smooth
+
+        // target: надпись слева, четыре пилюли head/neck/body/legs справа
+        // (раскладка как у menu theme).
+        _targetRow.hidden = NO;
+        CGFloat targetRowH = 28.0;
+        _targetRow.frame = CGRectMake(x, y, rowWidth, targetRowH);
+        CGFloat pillH = 22.0;
+        CGFloat pillGap = 4.0;
+        CGFloat pillW = floor((rowWidth - 60.0 - pillGap * 3.0) / 4.0);
+        CGFloat pillX = round(rowWidth - 12.0 - (pillW * 4.0 + pillGap * 3.0));
+        CGFloat pillY = round((targetRowH - pillH) / 2.0);
+        for (NSInteger i = 0; i < (NSInteger)_targetPills.count; i++) {
+            _targetPills[i].frame = CGRectMake(round(pillX + i * (pillW + pillGap)),
+                                               pillY, pillW, pillH);
+        }
+        _targetLabel.frame = CGRectMake(12.0, 0.0,
+                                        MAX(0.0, pillX - 12.0 - 6.0), targetRowH);
+        y += targetRowH + 4.0;
     } else if (tab == 2) {
         // Misc: переключатель overlay, строка accent color и кнопка unload.
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
@@ -2470,9 +2658,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // Тумблер СЛЕВА, подпись СПРАВА от него (по заказу). Тумблер закруглённый
     // (см. HUDFlatSwitch), никаких transform — кадр задаём напрямую, центрируя
     // по высоте строки.
-    // По заказу вся группа (тумблер + подпись) ещё ЛЕВЕЕ (отступ 3 вместо 8)
-    // и ВЫШЕ середины строки (на 6 pt вместо 2).
-    const CGFloat leftInset = 3.0;
+    // По заказу вся группа (тумблер + подпись) ещё ЛЕВЕЕ — вплотную к левому
+    // краю карточки (отступ 0 вместо 3) — и ВЫШЕ середины строки (на 6 pt).
+    const CGFloat leftInset = 0.0;
     const CGFloat liftUp = 6.0;
     toggle.frame = CGRectMake(leftInset,
                               round((kSwitchRowHeight - kFlatSwitchH) / 2.0) - liftUp,
@@ -2521,8 +2709,16 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)selectTab:(NSInteger)tab
 {
     _tab = tab;
-    [self setNeedsLayout];
-    [self layoutIfNeeded];
+    // Переключение вкладки — с анимацией (по заказу): старое содержимое
+    // перетекает в новое (кросс-фейд transitionWithView берёт «до» и «после»
+    // карточки целиком — номер вкладки и цвет индикатора тоже перетекают).
+    [UIView transitionWithView:_scroll
+                      duration:kMenuFadeDuration
+                       options:UIViewAnimationOptionTransitionCrossDissolve
+                    animations:^{
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    } completion:nil];
     _scroll.contentOffset = CGPointZero;
 }
 
@@ -2644,6 +2840,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         NSString *key = slider.accessibilityIdentifier;
         [self configureSlider:slider forKey:key];
         slider.value = (float)HUDOverlayNumber(key, slider.value);
+        // Старые файлы могли сохранить fov из прежнего диапазона 20..400 —
+        // такое значение вне новых рамок 10..100 клэмпим, иначе ползунок стоял
+        // бы «за краем».
+        if (slider.value < slider.minimumValue) { slider.value = slider.minimumValue; }
+        if (slider.value > slider.maximumValue) { slider.value = slider.maximumValue; }
         [self updateSliderLabel:key];
     }
 }
@@ -2651,7 +2852,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)configureSlider:(UISlider *)slider forKey:(NSString *)key
 {
     if ([key isEqualToString:@"cheat.fov"]) {
-        slider.minimumValue = 20; slider.maximumValue = 400; slider.value = 120;
+        // По заказу: fov выбирается ОТ 10 ДО 100, стартовое значение 45.
+        slider.minimumValue = 10; slider.maximumValue = 100; slider.value = 45;
     } else if ([key isEqualToString:@"cheat.smooth"]) {
         slider.minimumValue = 1; slider.maximumValue = 20; slider.value = 4;
     } else {
@@ -2661,7 +2863,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (NSString *)suffixForKey:(NSString *)key
 {
-    if ([key isEqualToString:@"cheat.fov"]) { return @"px"; }
+    if ([key isEqualToString:@"cheat.fov"]) { return @""; }   // просто число, по заказу
     if ([key isEqualToString:@"cheat.smooth"]) { return @"x"; }
     return @"мс";
 }
@@ -2808,7 +3010,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     NSMutableDictionary *dict = HUDOverlayDict();
     dict[@"hud.theme"] = @(light ? 1 : 0);
     HUDOverlayWrite(dict);
-    [self applyMenuTheme];
+    // Смена темы — ПЛАВНАЯ (по заказу), как появление меню: фоны, рамки и
+    // текст перетекают в новые цвета за kMenuFadeDuration. Цвета градиента
+    // триггера анимируются отдельно — CAGradientLayer не входит в UIView-блок.
+    [UIView animateWithDuration:kMenuFadeDuration animations:^{
+        [self applyMenuTheme];
+    }];
     AscentHUDLog(@"[theme] menu theme -> %@", light ? @"light" : @"dark");
 }
 
@@ -2827,6 +3034,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // а ползунки-иконки на нём ЧЁРНЫЕ; в тёмной — прежний серый градиент с
     // белой иконкой. В light градиент почти плоский (чуть темнее книзу), чтобы
     // квадрат не слипался с белой панелью меню.
+    NSArray *oldTriggerColors = _triggerGradient.colors;
     if (sMenuLight) {
         _triggerGradient.colors = @[ (id)[UIColor whiteColor].CGColor,
                                      (id)HUDColor(0.93, 0.93, 0.95).CGColor ];
@@ -2837,6 +3045,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                                      (id)HUDColor(0.29, 0.29, 0.33).CGColor ];
         _triggerIcon.tintColor = [UIColor whiteColor];
         _trigger.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+    }
+    // Градиент — «голый» слой и сам по себе НЕ входит в UIView-блок анимации:
+    // при смене темы переливаем colors явно (на сборке старых цветов ещё нет —
+    // анимация просто не добавляется).
+    if (oldTriggerColors.count > 0) {
+        CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"colors"];
+        anim.fromValue = (id)oldTriggerColors;
+        anim.toValue = (id)_triggerGradient.colors;
+        anim.duration = kMenuFadeDuration;
+        [_triggerGradient removeAllAnimations];
+        [_triggerGradient addAnimation:anim forKey:@"colors"];
     }
     _sectionTitle.textColor = HUDText();
     _unloadButton.backgroundColor = HUDGray();
@@ -2887,7 +3106,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                 fabs(r - g) < 0.03 && fabs(g - b) < 0.03 && a > 0.01) {
                 CGFloat w = r;
                 if ((sMenuLight && w > 0.5) || (!sMenuLight && w < 0.5)) {
-                    label.textColor = [UIColor colorWithWhite:1.0 - w alpha:a];
+                    [self setLabel:label
+                  textColorAnimated:[UIColor colorWithWhite:1.0 - w alpha:a]];
                 }
             }
         }
@@ -2909,9 +3129,43 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // тумблера) — акцент больше не участвует.
     UIColor *activeFill = HUDSwitchOn();
     _themeDarkLabel.backgroundColor = sMenuLight ? plainFill : activeFill;
-    _themeDarkLabel.textColor = sMenuLight ? plainText : [UIColor whiteColor];
+    [self setLabel:_themeDarkLabel textColorAnimated:(sMenuLight ? plainText : [UIColor whiteColor])];
     _themeLightLabel.backgroundColor = sMenuLight ? activeFill : plainFill;
-    _themeLightLabel.textColor = sMenuLight ? [UIColor whiteColor] : plainText;
+    [self setLabel:_themeLightLabel
+   textColorAnimated:(sMenuLight ? [UIColor whiteColor] : plainText)];
+}
+
+/// Пилюли head/neck/body/legs (вкладка Aim): выбранная — цветом акцента (как
+/// активная вкладка), остальные — полупрозрачная подложка текущей темы.
+/// Значение — индекс в plist (cheat.target), по умолчанию 0 (head).
+- (void)updateTargetUI
+{
+    NSInteger index = (NSInteger)HUDOverlayNumber(@"cheat.target", 0.0);
+    if (index < 0 || index >= (NSInteger)_targetPills.count) { index = 0; }
+    UIColor *plainFill = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.06];
+    UIColor *plainText = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.55];
+    UIColor *accent = HUDMenuAccent();
+    for (NSInteger i = 0; i < (NSInteger)_targetPills.count; i++) {
+        UILabel *pill = _targetPills[i];
+        pill.backgroundColor = (i == index) ? accent : plainFill;
+        pill.textColor = (i == index) ? [UIColor whiteColor] : plainText;
+    }
+}
+
+/// UILabel.textColor НЕ анимируется от UIView-блока, а смена темы должна идти
+/// ПЛАВНО — как фоны (см. setMenuLight). Поэтому цвет текста меняем с явной
+/// анимацией foregroundColor: старый цвет берём ДО присваивания. На сборке
+/// панели анимация безвредна — вью ещё не на экране.
+- (void)setLabel:(UILabel *)label textColorAnimated:(UIColor *)color
+{
+    if (label == nil || color == nil || [label.textColor isEqual:color]) { return; }
+    id from = (id)label.textColor.CGColor;
+    label.textColor = color;
+    CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"foregroundColor"];
+    anim.fromValue = from;
+    anim.toValue = (id)color.CGColor;
+    anim.duration = kMenuFadeDuration;
+    [label.layer addAnimation:anim forKey:@"foregroundColor"];
 }
 
 - (void)updateAccentUI
@@ -2935,6 +3189,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // (по заказу), но метод всё равно зовём — он держит их цвета в актуальной
     // теме.
     [self updateThemeSegmentUI];
+
+    // Пилюли target (вкладка Aim) — выбранная акцентом; обновляем здесь же,
+    // чтобы смена accent color сразу отражалась и на них.
+    [self updateTargetUI];
+
+    // Акцентная дорожка слайдеров и подложка — тем же текущим цветом (меню и
+    // тема меняют их через этот же метод).
+    for (UISlider *slider in _sliders) {
+        slider.minimumTrackTintColor = accent;
+        slider.maximumTrackTintColor = HUDSoftFill();
+    }
 
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
     // Поля ещё может не быть — пикер собирается лениво при первом открытии.
