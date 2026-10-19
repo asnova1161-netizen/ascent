@@ -1316,8 +1316,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     // саму прокрутку к мусорным координатам не применяем.
                     if (jumpLen >= kRawScrollDecide) {
                         BOOL vertical = fabs(jumpDelta.y) > fabs(jumpDelta.x);
-                        BOOL canScroll = (jumpDelta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
-                        if (vertical && canScroll) {
+                        BOOL scrollable = (_rawCanScrollUp || _rawCanScrollDown);
+                        if (vertical && scrollable) {
                             _rawScrollTouched = YES;
                         } else {
                             _rawTarget = HUDRawDragPanel;
@@ -1332,8 +1332,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     // этой ветки такой свайп заармливался бы сразу драгом и
                     // съедал листание — ровно та жалоба «не листается обратно».
                     BOOL vertical = fabs(jumpDelta.y) > fabs(jumpDelta.x);
-                    BOOL canScroll = (jumpDelta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
-                    if (vertical && canScroll) {
+                    BOOL scrollable = (_rawCanScrollUp || _rawCanScrollDown);
+                    if (vertical && scrollable) {
                         _rawTarget = HUDRawDragScroll;
                         _rawHoldable = YES;
                         _rawHoldFromScroll = NO;
@@ -1411,12 +1411,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     return;
                 }
                 BOOL vertical = fabs(delta.y) > fabs(delta.x);
-                BOOL canScroll = (delta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
-                if (vertical && canScroll) {
-                    // Вертикально и вкладке есть куда ехать — это листание:
-                    // цель меняется на прокрутку, дальше жест живёт её
-                    // правилами. Якорь прокрутки — точка нажатия, поэтому
-                    // содержимое едет ровно за пальцем, без «догоняний».
+                BOOL scrollable = (_rawCanScrollUp || _rawCanScrollDown);
+                if (vertical && scrollable) {
+                    // Вертикально — это листание: цель меняется на прокрутку,
+                    // дальше жест живёт её правилами. Якорь прокрутки — точка
+                    // нажатия, поэтому содержимое едет ровно за пальцем, без
+                    // «догоняний».
                     _rawTarget = HUDRawDragScroll;
                     _rawHoldable = YES;
                     _rawHoldFromScroll = NO;   // уже решено — без повторного decide
@@ -1462,8 +1462,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                         return;
                     }
                     BOOL vertical = fabs(delta.y) > fabs(delta.x);
-                    BOOL canScroll = (delta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
-                    if (vertical && canScroll) {
+                    BOOL scrollable = (_rawCanScrollUp || _rawCanScrollDown);
+                    if (vertical && scrollable) {
+                        // Вкладка листается — вертикальный свайп ВСЕГДА
+                        // листание, даже если в эту сторону ехать некуда: у
+                        // края список просто стоит, а меню НЕ уезжает (жалоба:
+                        // у низа Aim свайп таскал панель). Перенос панели с
+                        // карточки при этом жив: на вкладках без прокрутки
+                        // (Misc и т.п.) и на любом ГОРИЗОНТАЛЬНОМ свайпе.
                         // Листание — и до конца жеста переносом уже не станет.
                         _rawScrollTouched = YES;
                         AscentHUDLog(@"[gesture] поток: листаю содержимое вкладки");
