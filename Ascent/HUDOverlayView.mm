@@ -133,12 +133,12 @@ static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:0.35 alpha:1
 static UIColor *HUDSwitchOff(void) { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
                                                               alpha:(sMenuLight ? 0.30 : 0.10)]; }
 // Надпись «ascent» в левом верхнем углу панели: по заказу цвет ФИКСИРОВАННЫЙ
-// и за акцентом больше НЕ следует — в тёмной теме тёплый серый #8a8683
-// (по заказу чуть темнее прежнего #94908d), в светлой — чёрный.
+// и за акцентом больше НЕ следует — в тёмной теме тёплый серый #827e7b
+// (по заказу чуть темнее прежнего #8a8683), в светлой — чёрный.
 static UIColor *HUDPanelTitleColor(void)
 {
     if (sMenuLight) { return [UIColor blackColor]; }
-    return HUDColor(0.541176, 0.525490, 0.513725);   // #8a8683
+    return HUDColor(0.509804, 0.494118, 0.482353);   // #827e7b
 }
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
@@ -2280,7 +2280,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel addSubview:_panelHeader];
 
     _panelTitle = HUDLabel(@"ascent", 14, UIFontWeightHeavy);
-    // Цвет надписи — ФИКСИРОВАННЫЙ по теме (тёмная: #8a8683, светлая: чёрный) и
+    // Цвет надписи — ФИКСИРОВАННЫЙ по теме (тёмная: #827e7b, светлая: чёрный) и
     // от акцента больше не зависит; задаётся в applyPanelTitleTheme
     // (см. HUDPanelTitleColor). По заказу надпись оформлена тем же стилем, что
     // слово на экране загрузки: тяжёлый СКРУГЛЁННЫЙ шрифт с разрядкой.
@@ -2707,10 +2707,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
     _panelHeader.frame = CGRectMake(0, 0, w, h);   // зона переноса — вся панель
     // По заказу надпись «ascent» — по центру колонки вкладок, но ЧУТЬ ЛЕВЕЕ и
-    // ЧУТЬ НИЖЕ: кадр берём уже колонки (на 24 pt) и сдвигаем его на 8 pt влево
-    // (текст внутри центрируется — итого надпись уходит на 20 pt влево от центра
-    // колонки), а по вертикали опускаем на 4 pt от прежнего места (по заказу).
-    _panelTitle.frame = CGRectMake(sidebarX - 8.0, titleTop + 4.0,
+    // ЧУТЬ НИЖЕ центра колонки: кадр берём уже колонки (на 24 pt) и сдвигаем его
+    // на 8 pt влево (текст внутри центрируется — итого надпись уходит на 20 pt
+    // влево от центра колонки), по вертикали опускаем на 1 pt (по заказу —
+    // «чуть выше» прежних 4 pt).
+    _panelTitle.frame = CGRectMake(sidebarX - 8.0, titleTop + 1.0,
                                    MAX(sidebarW - 24.0, 40.0), titleH);
     _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
     // Метка сборки — в самый низ колонки, под столбиком вкладок (у вкладок
@@ -3314,7 +3315,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
     _sectionTitle.textColor = HUDText();
     _buildLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.32];
-    // Надпись «ascent»: свой цвет по теме (тёмная #8a8683, светлая чёрный).
+    // Надпись «ascent»: свой цвет по теме (тёмная #827e7b, светлая чёрный).
     [self applyPanelTitleTheme];
     _unloadButton.backgroundColor = HUDGray();
     [_unloadButton setTitleColor:HUDText() forState:UIControlStateNormal];
