@@ -359,6 +359,9 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
     // мотается вверх-вниз. Удержания не требуют, порог не нужен.
     HUDRawDragPickerSV,
     HUDRawDragPickerHue,
+    // Перенос самой карточки пикера — за чёрные поля вокруг поля и полосы,
+    // как меню за чёрные области. Тоже сразу, без удержания.
+    HUDRawDragPickerCard,
     // Остальное при открытом пикере: карточка перекрывает меню, поэтому
     // «пустой» жест — тап по нему закрывает пикер, а меню под ним не трогается.
     HUDRawDragPickerOutside,
@@ -814,12 +817,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 {
     // Пикер открыт (всплывающая карточка поверх меню) — проверяем ДО hitTest
     // по меню: кружок в поле и риска на полосе тянутся пальцем сразу, без
-    // удержания; всё остальное — «пустое» (тап закроет пикер, а меню под ним
-    // палец не тронет).
+    // удержания; за чёрные поля вокруг них таскается сама карточка (как меню
+    // за чёрные области); всё остальное — «пустое» (тап закроет пикер, а меню
+    // под ним палец не тронет).
     if (_pickerCard != nil && !_pickerCard.hidden) {
         CGPoint local = [_pickerCard convertPoint:point fromView:self];
         if (CGRectContainsPoint(_svSquare.frame, local)) { return HUDRawDragPickerSV; }
         if (CGRectContainsPoint(_hueStrip.frame, local)) { return HUDRawDragPickerHue; }
+        if (CGRectContainsPoint(_pickerCard.bounds, local)) { return HUDRawDragPickerCard; }
         return HUDRawDragPickerOutside;
     }
 
@@ -868,7 +873,15 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawStart = stagePoint;
     _rawLastPoint = stagePoint;
     _rawPressPoint = stagePoint;
-    _rawStartCenter = (_rawTarget == HUDRawDragTrigger) ? _trigger.center : _panel.center;
+    // Центр элемента переноса на момент нажатия: квадрат, карточка пикера
+    // или панель — от него и считается весь путь пальца (1:1).
+    if (_rawTarget == HUDRawDragTrigger) {
+        _rawStartCenter = _trigger.center;
+    } else if (_rawTarget == HUDRawDragPickerCard) {
+        _rawStartCenter = _pickerCard.center;
+    } else {
+        _rawStartCenter = _panel.center;
+    }
     _rawPressCenter = _rawStartCenter;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
@@ -1005,6 +1018,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         if (_rawTarget == HUDRawDragPickerSV || _rawTarget == HUDRawDragPickerHue) {
             _rawMoved = YES;
             [self applyPickerDragAtPoint:point];
+            return;
+        }
+
+        // ПЕРЕНОС карточки пикера — за чёрные поля вокруг поля и полосы, как
+        // меню за чёрные области: сразу, без удержания, строго за пальцем
+        // (1:1, от центра на момент нажатия). Скачок-мусор отсекается выше.
+        if (_rawTarget == HUDRawDragPickerCard) {
+            CGPoint center = CGPointMake(_rawStartCenter.x + delta.x,
+                                         _rawStartCenter.y + delta.y);
+            center = LimitStep(_pickerCard.center, center, kRawDragStepMax);
+            _pickerCard.center = [self clampPickerCenter:center];
+            _rawMoved = YES;
             return;
         }
 
@@ -1350,6 +1375,19 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         HUDMenuAccentSave();
         AscentHUDLog(@"[accent] перетаскивание закончено, цвет h=%.0f s=%.2f v=%.2f",
                      sMenuAccentH, sMenuAccentS, sMenuAccentV);
+        return;
+    }
+
+    if (_rawTarget == HUDRawDragPickerCard) {
+        // Палец отпущен после переноса карточки: позицию клампим и пишем один
+        // раз — как у панели, чтобы пикер встал туда же при следующем открытии.
+        CGPoint center = [self clampPickerCenter:_pickerCard.center];
+        _pickerCard.center = center;
+        CGSize offset = [self pickerOffsetForCenter:center];
+        HUDOverlaySetNumber(@"hud.picker.x", offset.width);
+        HUDOverlaySetNumber(@"hud.picker.y", offset.height);
+        AscentHUDLog(@"[gesture] пикер: перетаскивание закончилось, смещение=(%.0f, %.0f)",
+                     offset.width, offset.height);
         return;
     }
 
@@ -2510,11 +2548,45 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_pickerCard addSubview:_hueMarker];
 }
 
+/// Центр карточки пикера для сохранённого смещения (смещение — от центра
+/// сцены, как у панели: так позиция переживает поворот экрана).
+- (CGPoint)pickerCenterForOffset:(CGSize)offset
+{
+    CGRect stage = _stage.bounds;
+    return CGPointMake(stage.size.width / 2.0 + offset.width,
+                       stage.size.height / 2.0 + offset.height);
+}
+
+- (CGSize)pickerOffsetForCenter:(CGPoint)center
+{
+    CGRect stage = _stage.bounds;
+    return CGSizeMake(center.x - stage.size.width / 2.0,
+                      center.y - stage.size.height / 2.0);
+}
+
+/// Кламп: карточка целиком остаётся на сцене (как панель — по всем краям).
+- (CGPoint)clampPickerCenter:(CGPoint)center
+{
+    CGRect stage = _stage.bounds;
+    CGSize size = _pickerCard.bounds.size;
+    CGFloat halfW = size.width / 2.0;
+    CGFloat halfH = size.height / 2.0;
+    center.x = MIN(MAX(center.x, halfW), MAX(stage.size.width - halfW, halfW));
+    center.y = MIN(MAX(center.y, halfH), MAX(stage.size.height - halfH, halfH));
+    return center;
+}
+
 /// Раскладка карточки пикера: поле 150×150 слева, полоса оттенка справа,
-/// карточка — по центру сцены (то есть по центру экрана; сцена повёрнута
-/// вместе с игрой, поэтому в ландшафте карточка тоже стоит «правильно»).
+/// карточка — в сохранённой позиции (по умолчанию — по центру сцены, то есть
+/// по центру экрана; сцена повёрнута вместе с игрой, поэтому в ландшафте
+/// карточка тоже стоит «правильно»).
 - (void)layoutPicker
 {
+    // Во время переноса карточки позицией распоряжается сам жест —
+    // пересчитывать её на каждый кадр незачем (иначе карточка «прыгала» бы
+    // обратно к сохранённой точке). Раскладка вернётся сразу после отпускания.
+    if (_dragging && _rawMoved) { return; }
+
     CGRect stage = _stage.bounds;
     CGFloat inset = 14.0;
     CGFloat square = 150.0;
@@ -2522,9 +2594,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat gap = 10.0;
     CGFloat cardW = inset + square + gap + stripW + inset;
     CGFloat cardH = inset + square + inset;
-    _pickerCard.frame = CGRectMake((stage.size.width - cardW) / 2.0,
-                                   (stage.size.height - cardH) / 2.0 - 10.0,
-                                   cardW, cardH);
+    _pickerCard.frame = CGRectMake(0.0, 0.0, cardW, cardH);
+    CGSize offset = CGSizeMake(HUDOverlayNumber(@"hud.picker.x", 0.0),
+                               HUDOverlayNumber(@"hud.picker.y", 0.0));
+    _pickerCard.center = [self clampPickerCenter:[self pickerCenterForOffset:offset]];
     _svSquare.frame = CGRectMake(inset, inset, square, square);
     _svBase.frame = _svSquare.bounds;
     _svBase.cornerRadius = 6.0;
