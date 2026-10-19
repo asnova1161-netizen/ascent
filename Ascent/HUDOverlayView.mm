@@ -99,12 +99,30 @@ static UIColor *HUDColor(double r, double g, double b)
 // Палитра — как в меню-эталоне (MY IMGUI): окно #242424, панельки #1a1a1a,
 // красный акцент #ff1a1a (заголовок и активная вкладка берут цвет из
 // палитры акцентов — см. HUDMenuAccent()).
-static UIColor *HUDFill(void)      { return HUDColor(0.141176, 0.141176, 0.141176); }
-static UIColor *HUDCard(void)      { return HUDColor(0.1, 0.1, 0.1); }
+//
+// Тема меню (строка menu theme на вкладке Misc): dark по умолчанию, light —
+// белая панель. Кэш читается из plist ОДИН раз при создании оверлея (см.
+// init), дальше файл на кадрах раскладки не трогаем. Все хелперы ниже
+// учитывают тему, поэтому сборка с «запасом» светлой темы сразу красится
+// правильно, а смена темы просто перезовывает их поверх старых значений.
+static BOOL sMenuLight = NO;
+static UIColor *HUDFill(void)      { return sMenuLight ? [UIColor whiteColor]
+                                                      : HUDColor(0.141176, 0.141176, 0.141176); }
+static UIColor *HUDCard(void)      { return sMenuLight ? HUDColor(0.93, 0.93, 0.94)
+                                                      : HUDColor(0.1, 0.1, 0.1); }
 static UIColor *HUDAccent(void)    { return HUDColor(1.0, 0.1, 0.1); }
-static UIColor *HUDLine(void)      { return [UIColor colorWithWhite:1.0 alpha:0.12]; }
-static UIColor *HUDDim(void)       { return [UIColor colorWithWhite:1.0 alpha:0.55]; }
-static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
+static UIColor *HUDLine(void)      { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.12]; }
+static UIColor *HUDDim(void)       { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.55]; }
+static UIColor *HUDGray(void)      { return sMenuLight ? HUDColor(0.90, 0.90, 0.92)
+                                                      : HUDColor(0.36, 0.36, 0.40); }
+// Основной текст меню: белый на тёмной теме, почти-чёрный на светлой.
+static UIColor *HUDText(void)      { return [UIColor colorWithWhite:(sMenuLight ? 0.15 : 1.0) alpha:1.0]; }
+// Полупрозрачная заливка (поле имени конфига, строки списка): на белой
+// панели белый 0.07 не виден — берём чёрный 0.05.
+static UIColor *HUDSoftFill(void)  { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
+                                                              alpha:(sMenuLight ? 0.05 : 0.07)]; }
+// Фон включённого тумблера: светлый 0.85 на белой панели сливается с ней.
+static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:(sMenuLight ? 0.35 : 0.85) alpha:1.0]; }
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
@@ -222,7 +240,7 @@ static UILabel *HUDLabel(NSString *text, CGFloat size, UIFontWeight weight)
     UILabel *label = [[UILabel alloc] init];
     label.text = text;
     label.font = [UIFont systemFontOfSize:size weight:weight];
-    label.textColor = [UIColor whiteColor];
+    label.textColor = HUDText();
     label.backgroundColor = [UIColor clearColor];
     return label;
 }
@@ -649,6 +667,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *_accentRow;
     UIView *_accentSwatch;      // свотч текущего цвета — он же кнопка пикера
     UILabel *_accentLabel;
+    // Строка menu theme (вкладка Misc): выбор ТЕМЫ меню — не переключатель,
+    // а две пилюли dark | light справа от надписи (см. updateThemeSegmentUI).
+    UIView *_themeRow;
+    UILabel *_themeLabel;
+    UILabel *_themeDarkLabel;
+    UILabel *_themeLightLabel;
     // Пикер — ВСПЛЫВАЮЩАЯ карточка поверх меню (не внутри панели и не в
     // отдельном окне): тёмная карточка с полем «насыщенность × яркость» и
     // вертикальной радужной полосой оттенка. Рисуется в том же HUD-слое
@@ -785,6 +809,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // buildPanel/buildContent красят заголовок и полоску этим цветом.
     // Дальше работает только кэш (чтение файла на каждый кадр недопустимо).
     HUDMenuAccentLoad();
+    // Тема меню (dark/light) — тоже ДО сборки панели: buildContent красит
+    // фоны и подписи палитрой, зависящей от темы (см. HUDFill/HUDText).
+    sMenuLight = (HUDOverlayNumber(@"hud.theme", 0.0) > 0.5);
 
     [self buildTrigger];
     [self buildPanel];
@@ -886,6 +913,23 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         case HUDRawDragControl: return 48.0;
         default:                return 30.0;
     }
+}
+
+/// Съест ли прокрутка это смещение пальца: пока кламп contentOffset реально
+/// меняется, палец листает содержимое. Если содержимое УПЕРЛОСЬ (кламп вернул
+/// бы ту же точку), движение ничего не двигает — такой «мёртвый ход» нельзя
+/// копить до конца удержания: панель после захвата перебазируется от ТЕКУЩЕЙ
+/// точки и навсегда отстаёт от пальца на весь пройденный путь у края
+/// («таскается и отстаёт, если брать за нижнюю правую часть»). См.
+/// handleRawTouchPhase — там по этому признаку перенос включается сразу.
+- (BOOL)rawScrollConsumesDelta:(CGPoint)delta
+{
+    CGFloat minY = -_scroll.contentInset.top;
+    CGFloat maxY = MAX(_scroll.contentSize.height - _scroll.bounds.size.height +
+                       _scroll.contentInset.bottom, minY);
+    CGFloat y = _rawStartOffset.y - delta.y;
+    CGFloat clamped = MIN(MAX(y, minY), maxY);
+    return fabs(clamped - _scroll.contentOffset.y) > 0.5;
 }
 
 /// Начинает (или заново подхватывает после паузы) жест от указанной точки.
@@ -1086,10 +1130,21 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                 // прокрутка, и её не надо ломать. От шапки, колонки и квадрата
                 // перенос включается как раньше — почти сразу.
                 if (_rawHoldFromScroll) {
-                    if ((now - _rawStartTime) < kRawGrabHold) {
+                    // Палец вёл прокрутку, но содержимое УПЕРЛОСЬ в кламп —
+                    // мёртвый ход дальше копить нельзя: по истечении срока
+                    // удержания панель перебазируется от текущей точки и
+                    // навсегда отстаёт от пальца на всё, что тот прошёл у
+                    // края. На краю перенос включаем сразу, как только путь
+                    // стал заметен (>6 pt): дрожь руки при нажатии меньше
+                    // порога и по-прежнему считается нажатием (в конце жеста
+                    // панель всё равно возвращает на место kRawTapSlop).
+                    CGFloat armLen2 = delta.x * delta.x + delta.y * delta.y;
+                    BOOL atScrollEdge = ![self rawScrollConsumesDelta:delta];
+                    if ((now - _rawStartTime) < kRawGrabHold &&
+                        (!atScrollEdge || armLen2 < 36.0)) {
                         // Ещё не удержали: палец ведёт прокрутку содержимого —
                         // 1:1, от точки нажатия, как штатный скролл.
-                        if (delta.x * delta.x + delta.y * delta.y > 100.0 && !_rawScrollTouched) {
+                        if (armLen2 > 100.0 && !_rawScrollTouched) {
                             _rawScrollTouched = YES;
                             _rawMoved = YES;
                             AscentHUDLog(@"[gesture] поток: тяну содержимое вкладки");
@@ -1315,6 +1370,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // надписи (и по всей строке — чтобы легко попадать) открывает пикер.
     if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
         [self togglePicker];
+        return;
+    }
+
+    // Строка menu theme (вкладка Misc): тап выбирает тему ПО ПИЛЮЛЕ dark
+    // или light. Надпись слева выбором не является — она просто подпись.
+    if (_themeRow != nil && [self pointIsOnScrollRow:point row:_themeRow]) {
+        CGPoint local = [_themeRow convertPoint:point fromView:self];
+        if (CGRectContainsPoint(_themeDarkLabel.frame, local)) {
+            [self setMenuLight:NO];
+        } else if (CGRectContainsPoint(_themeLightLabel.frame, local)) {
+            [self setMenuLight:YES];
+        }
         return;
     }
 
@@ -1656,7 +1723,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [button setTitleColor:HUDText() forState:UIControlStateNormal];
     button.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
     return button;
 }
@@ -1732,7 +1799,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel addSubview:_contentCard];
 
     _sectionTitle = HUDLabel(@"", 13, UIFontWeightSemibold);
-    _sectionTitle.textColor = [UIColor whiteColor];
+    _sectionTitle.textColor = HUDText();
     [_contentCard addSubview:_sectionTitle];
 
     // Прокручиваемая область содержимого — вкладки разной длины.
@@ -1788,7 +1855,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [row addSubview:label];
 
         UISwitch *toggle = [[UISwitch alloc] init];
-        toggle.onTintColor = [UIColor colorWithWhite:0.85 alpha:1.0];
+        toggle.onTintColor = HUDSwitchOn();
         toggle.accessibilityIdentifier = switchKeys[i];
         [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
         // Переключатель сам касания не обрабатывает (иначе они воюют с жестом
@@ -1815,7 +1882,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentRow.layer.cornerRadius = 12.0;
     _accentRow.autoresizingMask = UIViewAutoresizingNone;
     _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
-    _accentLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    _accentLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
     _accentLabel.autoresizingMask = UIViewAutoresizingNone;
     [_accentRow addSubview:_accentLabel];
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
@@ -1829,6 +1896,30 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_accentRow addSubview:_accentSwatch];
 
     [_scroll addSubview:_accentRow];
+
+    // Строка menu theme (вкладка Misc): выбор ТЕМЫ — НЕ переключатель (по
+    // заказу), а две пилюли dark | light справа от надписи; активную
+    // подсвечивает updateThemeSegmentUI (цветом акцента, как вкладку).
+    // Значение лежит в plist (hud.theme) и применяется мгновенно: светлая
+    // тема красит фон панели в белый (см. setMenuLight).
+    _themeRow = [[UIView alloc] initWithFrame:CGRectZero];
+    _themeRow.backgroundColor = [UIColor clearColor];
+    _themeRow.autoresizingMask = UIViewAutoresizingNone;
+    _themeLabel = HUDLabel(@"menu theme", 11, UIFontWeightMedium);
+    _themeLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
+    _themeLabel.autoresizingMask = UIViewAutoresizingNone;
+    [_themeRow addSubview:_themeLabel];
+    _themeDarkLabel = HUDLabel(@"dark", 10, UIFontWeightSemibold);
+    _themeLightLabel = HUDLabel(@"light", 10, UIFontWeightSemibold);
+    for (UILabel *segment in @[ _themeDarkLabel, _themeLightLabel ]) {
+        segment.textAlignment = NSTextAlignmentCenter;
+        segment.layer.cornerRadius = 8.0;
+        segment.clipsToBounds = YES;
+        segment.autoresizingMask = UIViewAutoresizingNone;
+        [_themeRow addSubview:segment];
+    }
+    [_scroll addSubview:_themeRow];
+
     // Поле, полоса и маркеры пикера собираются лениво — при первом открытии
     // (см. ensurePickerCard). Здесь только перекрашиваем акцентные элементы
     // панели по загруженному HSV.
@@ -1854,11 +1945,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // СИСТЕМНУЮ клавиатуру iPhone — как обычное поле ввода в iOS.
     _configNameField = [[UITextField alloc] initWithFrame:CGRectZero];
     _configNameField.placeholder = @"имя конфига";
-    _configNameField.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+    _configNameField.backgroundColor = HUDSoftFill();
     _configNameField.layer.cornerRadius = 12.0;
     _configNameField.layer.borderWidth = 1.0;
     _configNameField.layer.borderColor = HUDLine().CGColor;
-    _configNameField.textColor = [UIColor whiteColor];
+    _configNameField.textColor = HUDText();
     _configNameField.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     _configNameField.tintColor = HUDAccent();
     _configNameField.returnKeyType = UIReturnKeyDone;
@@ -1884,6 +1975,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                             action:@selector(createConfigTapped)
                   forControlEvents:UIControlEventTouchUpInside];
     [_scroll addSubview:_configCreateButton];
+
+    // Перекрашиваем всё собранное под текущую тему (см. sMenuLight): при
+    // сборке это добивает цвета, которые палитра ещё не знала; при смене
+    // темы этот же метод вызывает setMenuLight.
+    [self applyMenuTheme];
 }
 
 /// Системная клавиатура: запоминаем её область, чтобы тапы ПО КЛАВИАТУРЕ не
@@ -2032,7 +2128,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         button.backgroundColor = [UIColor clearColor];
         // Неактивные вкладки белые, активная — цветом выбранного акцента
         // (как в эталоне, только цвет выбирается на вкладке Misc).
-        [button setTitleColor:(selected ? HUDMenuAccent() : [UIColor whiteColor]) forState:UIControlStateNormal];
+        [button setTitleColor:(selected ? HUDMenuAccent() : HUDText()) forState:UIControlStateNormal];
         if (selected) {
             _tabIndicator.hidden = NO;
             CGFloat indicatorH = MAX(tabRowH * 0.68, 8.0);
@@ -2065,6 +2161,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
     _accentRow.hidden = YES;
+    _themeRow.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
@@ -2097,6 +2194,25 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                                         _accentSwatch.frame.origin.x - 18.0 - 12.0,
                                         accentRowH);
         y += accentRowH + 10.0;
+
+        // menu theme: выбор ТЕМЫ — надпись слева, две пилюли dark | light
+        // СПРАВА (как у accent color — раскладка та же). Реагируют только
+        // пилюли (см. performTapAtPoint:), активную красит updateThemeSegmentUI.
+        _themeRow.hidden = NO;
+        CGFloat themeRowH = 30.0;
+        _themeRow.frame = CGRectMake(x, y, rowWidth, themeRowH);
+        CGFloat themeSegW = 52.0;
+        CGFloat themeSegH = 22.0;
+        // Целые координаты — как у свотча, чтобы рамки/заливки не «пикселили».
+        CGFloat themeSegY = round((themeRowH - themeSegH) / 2.0);
+        CGFloat themeLightX = round(rowWidth - 10.0 - themeSegW);
+        CGFloat themeDarkX = round(themeLightX - 6.0 - themeSegW);
+        _themeLightLabel.frame = CGRectMake(themeLightX, themeSegY, themeSegW, themeSegH);
+        _themeDarkLabel.frame = CGRectMake(themeDarkX, themeSegY, themeSegW, themeSegH);
+        _themeLabel.frame = CGRectMake(12.0, 0.0,
+                                       MAX(0.0, themeDarkX - 12.0 - 8.0),
+                                       themeRowH);
+        y += themeRowH + 10.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
         _unloadButton.hidden = NO;
@@ -2480,6 +2596,105 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 /// Перекраска всего, что зависит от текущего HSV: акцентные элементы панели,
 /// поле пикера (его горизонтальный градиент зависит от оттенка) и маркеры.
+#pragma mark - Тема меню (dark / light)
+
+/// Выбор темы в строке menu theme (вкладка Misc). Это НЕ переключатель, а
+/// ВЫБОР: dark — как всегда, light — белый фон панели. Значение пишем в
+/// plist парой «одно чтение + одна запись» (как акцент) и перекрашиваем
+/// меню мгновенно — раскладка и набор элементов не меняются.
+- (void)setMenuLight:(BOOL)light
+{
+    if (sMenuLight == light) { return; }
+    sMenuLight = light;
+    NSMutableDictionary *dict = HUDOverlayDict();
+    dict[@"hud.theme"] = @(light ? 1 : 0);
+    HUDOverlayWrite(dict);
+    [self applyMenuTheme];
+    AscentHUDLog(@"[theme] menu theme -> %@", light ? @"light" : @"dark");
+}
+
+/// Перекраска меню под текущую тему (см. sMenuLight). Фоны/рамки задаём
+/// ЯВНО — они выставляются при сборке панели и при rebuildConfigRows; весь
+/// текст меняем единым обходом — подписи собраны из HUDLabel и живут своей
+/// жизнью. Обход идемпотентен (меняет только цвет чужой темы), поэтому
+/// метод можно звать и при сборке, и при смене темы.
+- (void)applyMenuTheme
+{
+    _panel.backgroundColor = HUDFill();
+    _panel.layer.borderColor = HUDLine().CGColor;
+    _sidebarBg.backgroundColor = HUDCard();
+    _contentCard.backgroundColor = HUDCard();
+    _sectionTitle.textColor = HUDText();
+    _unloadButton.backgroundColor = HUDGray();
+    [_unloadButton setTitleColor:HUDText() forState:UIControlStateNormal];
+    _configCreateButton.backgroundColor = HUDGray();
+    [_configCreateButton setTitleColor:HUDText() forState:UIControlStateNormal];
+    _configNameField.backgroundColor = HUDSoftFill();
+    _configNameField.layer.borderColor = HUDLine().CGColor;
+    _configNameField.textColor = HUDText();
+    _accentLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.85];
+    _themeLabel.textColor = _accentLabel.textColor;
+    for (UISwitch *toggle in _switches) {
+        toggle.onTintColor = HUDSwitchOn();
+    }
+    for (UIView *row in _configRows) {
+        row.backgroundColor = HUDSoftFill();
+        row.layer.borderColor = HUDLine().CGColor;
+    }
+    [self themeFlipLabelsIn:_panel];
+    // Пикер собирается лениво и лежит в _stage ВНЕ панели — обходим отдельно,
+    // если карточку уже создавали.
+    if (_pickerCard != nil) {
+        _pickerCard.backgroundColor = HUDFill();
+        _pickerCard.layer.borderColor = HUDLine().CGColor;
+        [self themeFlipLabelsIn:_pickerCard];
+    }
+    // Акцентные элементы и пилюли темы — ПОСЛЕ обхода: их цвета задаются
+    // явно и от инверсии не должны зависеть.
+    [self updateAccentUI];
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+}
+
+/// Единый обход текста: серо-белые цвета инвертируем в сторону текущей темы
+/// (на светлой светлый текст становится тёмным — и наоборот, alpha
+/// сохраняется). Цветной текст (акцент заголовка, зелёный «▶») не трогаем.
+/// Правило «менять только цвет чужой темы» делает обход идемпотентным:
+/// повторный проход ничего не переворачивает обратно.
+- (void)themeFlipLabelsIn:(UIView *)view
+{
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            UILabel *label = (UILabel *)sub;
+            CGFloat r = 0, g = 0, b = 0, a = 0;
+            if ([label.textColor getRed:&r green:&g blue:&b alpha:&a] &&
+                fabs(r - g) < 0.03 && fabs(g - b) < 0.03 && a > 0.01) {
+                CGFloat w = r;
+                if ((sMenuLight && w > 0.5) || (!sMenuLight && w < 0.5)) {
+                    label.textColor = [UIColor colorWithWhite:1.0 - w alpha:a];
+                }
+            }
+        }
+        [self themeFlipLabelsIn:sub];
+    }
+}
+
+/// Пилюли dark | light в строке menu theme: активная — под фоном акцента
+/// (как активная вкладка), неактивная — полупрозрачная подложка текущей
+/// темы. Вызывается и после смены темы, и после смены акцента.
+- (void)updateThemeSegmentUI
+{
+    if (_themeDarkLabel == nil || _themeLightLabel == nil) { return; }
+    UIColor *accent = HUDMenuAccent();
+    UIColor *plainFill = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
+                                           alpha:(sMenuLight ? 0.06 : 0.10)];
+    UIColor *plainText = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.55];
+    _themeDarkLabel.backgroundColor = sMenuLight ? plainFill : accent;
+    _themeDarkLabel.textColor = sMenuLight ? plainText : [UIColor whiteColor];
+    _themeLightLabel.backgroundColor = sMenuLight ? accent : plainFill;
+    _themeLightLabel.textColor = sMenuLight ? [UIColor whiteColor] : plainText;
+}
+
 - (void)updateAccentUI
 {
     UIColor *accent = HUDMenuAccent();
@@ -2493,9 +2708,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // выбрал чёрный, а надпись misc оставалась старого цвета.
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
         UIButton *button = _tabButtons[i];
-        [button setTitleColor:(i == _tab ? accent : [UIColor whiteColor])
+        [button setTitleColor:(i == _tab ? accent : HUDText())
                      forState:UIControlStateNormal];
     }
+
+    // Пилюли dark/light в строке menu theme: активная под фоном того же
+    // акцента (как активная вкладка) — без этого смена акцента не
+    // перекрашивала бы их.
+    [self updateThemeSegmentUI];
 
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
     // Поля ещё может не быть — пикер собирается лениво при первом открытии.
@@ -2764,7 +2984,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     NSArray *sorted = [configs.allKeys sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
     for (NSString *name in sorted) {
         UIView *row = [[UIView alloc] initWithFrame:CGRectZero];
-        row.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+        row.backgroundColor = HUDSoftFill();
         row.layer.cornerRadius = 10.0;
         row.layer.borderWidth = 1.0;
         row.layer.borderColor = HUDLine().CGColor;
@@ -2783,7 +3003,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         UILabel *delLabel = HUDLabel(@"✕", 13, UIFontWeightBold);
         delLabel.tag = 3;
         delLabel.textAlignment = NSTextAlignmentCenter;
-        delLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+        delLabel.textColor = HUDDim();
         [row addSubview:delLabel];
 
         [_scroll addSubview:row];
