@@ -620,14 +620,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    // Вкладка Misc: строка accent color — свотч текущего цвета слева от
-    // надписи и кнопка-квадратик СПРАВА. По кнопке (и по всей строке — чтобы
-    // легко попадать) открывается HSV-пикер. См. togglePicker.
+    // Вкладка Misc: строка accent color — надпись слева, свотч текущего цвета
+    // СПРАВА от неё. Тап по свотчу (и по всей строке — чтобы легко попадать)
+    // открывает HSV-пикер. См. togglePicker.
     UIView *_accentRow;
-    UIView *_accentSwatch;      // свотч текущего цвета (показ выбранного цвета)
+    UIView *_accentSwatch;      // свотч текущего цвета — он же кнопка пикера
     UILabel *_accentLabel;
-    UIView *_accentButton;      // кнопка-квадратик справа: открывает пикер
-    UIImageView *_accentIcon;   // иконка палитры внутри кнопки
     // Пикер — ВСПЛЫВАЮЩАЯ карточка поверх меню (не внутри панели и не в
     // отдельном окне): тёмная карточка с полем «насыщенность × яркость» и
     // вертикальной радужной полосой оттенка. Рисуется в том же HUD-слое
@@ -885,7 +883,16 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _rawPressCenter = _rawStartCenter;
     _rawStartOffset = _scroll.contentOffset;
     _rawMoved = NO;
-    _rawArmed = NO;
+    // Пикер (кружок, полоса, перенос карточки) тянется с САМОГО начала —
+    // удержание ему не нужно, поэтому помечаем жест «начатым» сразу. Из-за
+    // этого он: (1) не «протухает» по кайфу длинного перетаскивания (см.
+    // kRawGestureLifetime) и не перебазируется на полпути; (2) при скачке
+    // попадает в ветку «перенос уже идёт» (пропуск мусора БЕЗ перебазации),
+    // а не в ветку мусора, которая берёт _rawStartCenter ОТ ПАНЕЛИ — для
+    // пикера это и было причиной «телепорта к меню и возврата к пальцу».
+    _rawArmed = (_rawTarget == HUDRawDragPickerSV ||
+                 _rawTarget == HUDRawDragPickerHue ||
+                 _rawTarget == HUDRawDragPickerCard);
     // Где удержание вообще разрешено. Квадрат, панель, кнопки вкладок — как
     // раньше, почти сразу. С ЧЁРНОЙ карточки (прокрутка и строки внутри) панель
     // берётся ДОЛГИМ удержанием (kRawGrabHold), а движение до срока уходит в
@@ -982,7 +989,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         _rawLastPoint = stagePoint;
         CGFloat stepLen = sqrt(stepX * stepX + stepY * stepY);
         if (stepLen > kRawJumpLimit) {
-            if (!_rawArmed || !_rawHoldable) {
+            // Ветка мусора — только для НЕначатого жеста (_rawArmed == NO).
+            // Все «обычные» цели здесь держимые, поэтому раньше условие
+            // читалось как !_rawArmed; с пикером (он не держимый, но начатый
+            // сразу — см. beginRawDragAtPoint) ветка «!_rawHoldable» стала бы
+            // ловить и его — а там _rawStartCenter перебазируется ОТ ПАНЕЛИ,
+            // и карточка «телепортировалась» к меню. Поэтому оставляем только
+            // !_rawArmed: для держимых целей поведение ровно прежнее.
+            if (!_rawArmed) {
                 // Перенос ещё не идёт: шаг вести нечем — считаем событие
                 // мусорным и просто перебазируемся. Нажатие при этом не
                 // теряется — точку нажатия помним отдельно (_rawPressPoint).
@@ -1745,14 +1759,18 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [_switches addObject:toggle];
     }
 
-    // Строка accent color (вкладка Misc): свотч текущего цвета слева от
-    // надписи (показывает выбранный цвет) и кнопка-квадратик СПРАВА — по ней
-    // открывается HSV-пикер всплывающей карточкой поверх меню (см.
-    // togglePicker). Сам пикер в строке не показывается.
+    // Строка accent color (вкладка Misc): надпись слева, свотч текущего
+    // цвета СПРАВА от неё (по заказу) — он же кнопка: тап по свотчу и по
+    // всей строке открывает HSV-пикер всплывающей карточкой поверх меню
+    // (см. togglePicker). Иконки-палитры больше нет — убрана по заказу.
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
     _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     _accentRow.layer.cornerRadius = 12.0;
     _accentRow.autoresizingMask = UIViewAutoresizingNone;
+    _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
+    _accentLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    _accentLabel.autoresizingMask = UIViewAutoresizingNone;
+    [_accentRow addSubview:_accentLabel];
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
     _accentSwatch.layer.cornerRadius = 6.0;
@@ -1760,29 +1778,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentSwatch.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
     _accentSwatch.userInteractionEnabled = NO;
     [_accentRow addSubview:_accentSwatch];
-    _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
-    _accentLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
-    _accentLabel.autoresizingMask = UIViewAutoresizingNone;
-    [_accentRow addSubview:_accentLabel];
-
-    // Кнопка-квадратик справа: иконка палитры. Жесты меню идут через свой
-    // разбор потока касаний, а не через hitTest, поэтому кнопка — обычный
-    // UIView, а тап по ней ловится геометрически (см. performTapAtPoint:).
-    _accentButton = [[UIView alloc] initWithFrame:CGRectZero];
-    _accentButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
-    _accentButton.layer.cornerRadius = 7.0;
-    _accentButton.layer.borderWidth = 1.0;
-    _accentButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
-    _accentButton.userInteractionEnabled = NO;
-    _accentIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
-    UIImage *pickerGlyph = [UIImage systemImageNamed:@"paintpalette.fill"];
-    _accentIcon.image = [pickerGlyph imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    _accentIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:0.85];
-    _accentIcon.contentMode = UIViewContentModeScaleAspectFit;
-    _accentIcon.autoresizingMask = UIViewAutoresizingNone;
-    _accentIcon.userInteractionEnabled = NO;
-    [_accentButton addSubview:_accentIcon];
-    [_accentRow addSubview:_accentButton];
 
     [_scroll addSubview:_accentRow];
     // Поле, полоса и маркеры пикера собираются лениво — при первом открытии
@@ -2037,20 +2032,18 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: свотч текущего цвета слева от надписи и
-        // кнопка-квадратик СПРАВА — по ней (и по всей строке, чтобы легко
-        // попадать) открывается пикер всплывающей карточкой поверх меню.
+        // Строка accent color: надпись слева, свотч текущего цвета СПРАВА от
+        // неё (по заказу). Тап по свотчу и по всей строке открывает пикер
+        // всплывающей карточкой поверх меню. Иконки-палитры больше нет.
         _accentRow.hidden = NO;
         CGFloat accentRowH = 30.0;
         _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
-        _accentSwatch.frame = CGRectMake(10.0, (accentRowH - 22.0) / 2.0, 22.0, 22.0);
-        CGFloat accentButtonSize = 24.0;
-        _accentButton.frame = CGRectMake(rowWidth - 10.0 - accentButtonSize,
-                                         (accentRowH - accentButtonSize) / 2.0,
-                                         accentButtonSize, accentButtonSize);
-        _accentIcon.frame = CGRectInset(_accentButton.bounds, 5.0, 5.0);
-        _accentLabel.frame = CGRectMake(40.0, 0.0,
-                                        _accentButton.frame.origin.x - 46.0,
+        CGFloat accentSwatchSize = 24.0;
+        _accentSwatch.frame = CGRectMake(rowWidth - 10.0 - accentSwatchSize,
+                                         (accentRowH - accentSwatchSize) / 2.0,
+                                         accentSwatchSize, accentSwatchSize);
+        _accentLabel.frame = CGRectMake(12.0, 0.0,
+                                        _accentSwatch.frame.origin.x - 18.0 - 12.0,
                                         accentRowH);
         y += accentRowH + 10.0;
 
@@ -2424,6 +2417,16 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentSwatch.backgroundColor = accent;
     _panelTitle.textColor = accent;
     _tabIndicator.backgroundColor = accent;
+
+    // Активная вкладка — цветом акцента. Раскладка ставит этот цвет только
+    // при ПЕРЕКЛЮЧЕНИИ вкладки (layoutPanel), поэтому без этой строки надпись
+    // меняла бы цвет лишь после ухода на другую вкладку — именно тот баг:
+    // выбрал чёрный, а надпись misc оставалась старого цвета.
+    for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
+        UIButton *button = _tabButtons[i];
+        [button setTitleColor:(i == _tab ? accent : [UIColor whiteColor])
+                     forState:UIControlStateNormal];
+    }
 
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
     // Поля ещё может не быть — пикер собирается лениво при первом открытии.
