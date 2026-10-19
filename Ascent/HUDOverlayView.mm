@@ -498,14 +498,20 @@ static const CGFloat kControlScrollDecide = 22.0;
 //     значит тянем значение;
 //   • листание — только длинный И чистый вертикальный ход (и по абсолюту,
 //     и по преобладанию), чтобы палец, дрогнув вниз, не отбирал протяжку.
-static const CGFloat kSliderDragDecide   = 8.0;   // заметное горизонтальное движение
+static const CGFloat kSliderDragDecide   = 16.0;  // заметное движение ВБОК
+// ... и это движение должно ЕЩЁ И ЯВНО преобладать над вертикалью (см.
+// kSliderAxisSlope). Порог поднят с 8 pt: палец, который начинает ЛИСТАТЬ
+// вкладку, первую дрожь обычно даёт именно вбок, и при 8 pt ползунок забирал
+// жест — снаружи это выглядело как «листаю вкладку, а значение ползёт»
+// (вкладка Aim: строки ползунков занимают почти её половину, поэтому нажатие
+// попадало в них постоянно).
 static const CGFloat kSliderScrollDecide = 22.0;  // листание — только длинный вертикальный ход
 static const CGFloat kSliderAxisSlope    = 1.4;   // во сколько раз ось должна преобладать
 // Страховка на «неудачный старт»: жест уже начал листать вкладку (палец дрогнул
 // вниз), но затем ЯВНО пошёл вбок — ползунок забирает жест назад и тянется за
 // пальцем. Вбок содержимое вкладки всё равно не едет, терять тут нечего.
-static const CGFloat kSliderReclaimDecide = 18.0; // насколько явно вбок для отбора
-static const CGFloat kSliderReclaimSlope  = 1.25; // и во сколько раз больше вертикали
+static const CGFloat kSliderReclaimDecide = 26.0; // насколько явно вбок для отбора
+static const CGFloat kSliderReclaimSlope  = 1.6;  // и во сколько раз больше вертикали
 // Если палец идёт «по косой» и ни одна ось не преобладает, решаем простым
 // сравнением — но только когда палец ушёл уже заметно: короткая дрожь на месте
 // решением не считается, иначе жест ползунка снова начал бы «прыгать».
@@ -1516,8 +1522,10 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                 // «переставали работать» вовсе).
                 CGFloat adx = fabs(delta.x);
                 CGFloat ady = fabs(delta.y);
-                // Вбок — простое преобладание (перевес в сторону ползунка).
-                BOOL clearlyHorizontal = (adx >= kSliderDragDecide) && (adx >= ady);
+                // Вбок — преобладание ВБОК: простое равенство не годится, при
+                // листании вкладки палец уводит вбок почти так же сильно.
+                BOOL clearlyHorizontal = (adx >= kSliderDragDecide) &&
+                                         (adx >= ady * kSliderAxisSlope);
                 // Листание — только длинный и чистый вертикальный ход.
                 BOOL clearlyVertical = (ady >= kSliderScrollDecide) &&
                                        (ady >= adx * kSliderAxisSlope);
@@ -1527,7 +1535,11 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                     // решаем простым сравнением осей.
                     CGFloat len = sqrt(delta.x * delta.x + delta.y * delta.y);
                     if (len < kSliderDiagonalDecide) { return; }
-                    clearlyVertical = (ady > adx);
+                    // Косой ход: значение тянем, только если палец ушёл ВБОК
+                    // явно (тот же перевес). Всё остальное — листание: во время
+                    // прокрутки палец регулярно уводит вбок, и раньше этого
+                    // хватало, чтобы ползунок забрал жест и переписал значение.
+                    clearlyVertical = (adx < ady * kSliderAxisSlope);
                 }
                 BOOL scrollable = (_rawCanScrollUp || _rawCanScrollDown);
                 if (clearlyVertical && scrollable) {
@@ -2254,6 +2266,18 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 }
 
+/// Появление меню «из ничего» — короткий фейд панели (по заказу). ЭТОЙ ЖЕ
+/// анимацией показывается и НОВАЯ ВКЛАДКА: по заказу переключение вкладки
+/// должно выглядеть ровно так, как появление меню по нажатию на триггер,
+/// поэтому анимация одна и та же (см. selectTab:).
+- (void)animatePanelAppear
+{
+    _panel.alpha = 0.0;
+    [UIView animateWithDuration:kMenuFadeDuration animations:^{
+        _panel.alpha = 1.0;
+    }];
+}
+
 - (void)updateTriggerIcon
 {
     _triggerIcon.image = HUDTriggerImage(_panelOpen);
@@ -2286,10 +2310,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _panel.hidden = _captureHidden;
         _panel.userInteractionEnabled = YES;
         // Появление — с анимацией (по заказу): короткий фейд внутрь.
-        _panel.alpha = 0.0;
-        [UIView animateWithDuration:kMenuFadeDuration animations:^{
-            _panel.alpha = 1.0;
-        }];
+        [self animatePanelAppear];
     } else {
         // При закрытии гасим клавиатуру: она могла остаться от поля имени
         // конфига, и без этого висела бы поверх игры. Пикер тоже закрываем —
@@ -3081,15 +3102,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (tab == _tab) { return; }
     _tab = tab;
     _scroll.contentOffset = CGPointZero;   // по заказу: прокрутка всегда с верха
-    // Раскладку новой вкладки делаем СРАЗУ (без анимации), а само содержимое
-    // ПРОЯВЛЯЕМ из прозрачности: по заказу вкладки должны появляться постепенно
-    // и плавно.
+    // Раскладку новой вкладки делаем СРАЗУ (без анимации), а ПОЯВЛЕНИЕ —
+    // ровно той же анимацией, что и появление меню по нажатию на триггер
+    // (по заказу): короткий фейд панели «из ничего» (см. animatePanelAppear).
     [self setNeedsLayout];
     [self layoutIfNeeded];
-    _contentCard.alpha = 0.0;
-    [UIView animateWithDuration:kMenuFadeDuration animations:^{
-        _contentCard.alpha = 1.0;
-    }];
+    _contentCard.alpha = 1.0;   // гасится/проявляется вся панель, а не карточка
+    [self animatePanelAppear];
 }
 
 /// Распознаватели жестов больше НЕ вешаем — и это важно.
