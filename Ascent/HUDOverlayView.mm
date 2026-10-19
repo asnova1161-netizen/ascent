@@ -2263,9 +2263,12 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _panelHeader.backgroundColor = [UIColor clearColor];
     [_panel addSubview:_panelHeader];
 
-    _panelTitle = HUDLabel(@"@ascentios", 14, UIFontWeightHeavy);
+    _panelTitle = HUDLabel(@"ascent", 14, UIFontWeightHeavy);
     // Цвет заголовка управляется выбранным акцентом (вкладка Misc).
-    _panelTitle.textColor = HUDMenuAccent();
+    // По заказу надпись — просто «ascent» (было @ascentios) и тем же стилем,
+    // что слово на экране загрузки: тяжёлый СКРУГЛЁННЫЙ шрифт с разрядкой
+    // (см. applyPanelTitleColor:).
+    [self applyPanelTitleColor:HUDMenuAccent()];
     // Колонка узкая (как у эталона), поэтому при нехватке ширины заголовок
     // ужимается, а не обрезается многоточием.
     _panelTitle.adjustsFontSizeToFitWidth = YES;
@@ -2685,7 +2688,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     CGFloat cardH = h - 2.0 * inset;
 
     _panelHeader.frame = CGRectMake(0, 0, w, h);   // зона переноса — вся панель
-    // По заказу надпись @ascentios ЧУТЬ ПРАВЕЕ прежнего отступа (8 вместо 3).
+    // По заказу надпись «ascent» ЧУТЬ ПРАВЕЕ прежнего отступа (8 вместо 3).
     _panelTitle.frame = CGRectMake(sidebarX + 8.0, titleTop,
                                    MAX(cardX - (sidebarX + 8.0) - 3.0, 40.0), titleH);
     _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
@@ -3399,11 +3402,31 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [label.layer addAnimation:anim forKey:@"foregroundColor"];
 }
 
+/// Надпись в левом верхнем углу панели — «ascent» тем же стилем, что и слово на
+/// экране загрузки (LoaderView.swift): тяжёлый СКРУГЛЁННЫЙ шрифт с положительной
+/// разрядкой букв. Кернинг живёт только в attributed-строке, поэтому и шрифт, и
+/// цвет ставим ею же — иначе UILabel перерисовал бы текст своим шрифтом, и
+/// разрядка пропала бы (а выбранный акцент на надпись не влиял бы).
+- (void)applyPanelTitleColor:(UIColor *)color
+{
+    if (_panelTitle == nil) { return; }
+    UIFont *font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightHeavy];
+    UIFontDescriptor *rounded =
+        [font.fontDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
+    if (rounded != nil) { font = [UIFont fontWithDescriptor:rounded size:14.0]; }
+    _panelTitle.attributedText =
+        [[NSAttributedString alloc] initWithString:@"ascent"
+                                        attributes:@{ NSFontAttributeName: font,
+                                                      NSKernAttributeName: @(1.0),
+                                                      NSForegroundColorAttributeName:
+                                                          (color ?: HUDMenuAccent()) }];
+}
+
 - (void)updateAccentUI
 {
     UIColor *accent = HUDMenuAccent();
     _accentSwatch.backgroundColor = accent;
-    _panelTitle.textColor = accent;
+    [self applyPanelTitleColor:accent];
     _tabIndicator.backgroundColor = accent;
 
     // Активная вкладка — цветом акцента. Раскладка ставит этот цвет только
