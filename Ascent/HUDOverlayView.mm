@@ -109,45 +109,85 @@ static UIColor *HUDGray(void)      { return HUDColor(0.36, 0.36, 0.40); }
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
 
-// Палитра акцентных цветов меню (вкладка Misc, строка accent color). Индекс
-// хранится в plist (hud.accent), а сам выбранный цвет кэшируется в static:
-// HUDOverlayNumber читает файл СИНХРОННО, а HUDMenuAccent() спрашивают на
-// каждом кадре раскладки (цвет активной вкладки, полоска-индикатор, заголовок)
-// — без кэша это было бы чтение файла десятки раз в секунду.
-static const CGFloat kMenuAccentPalette[][3] = {
-    { 1.000, 0.100, 0.100 },  // 0 — красный (по умолчанию, как HUDAccent)
-    { 1.000, 0.584, 0.000 },  // 1 — оранжевый
-    { 0.188, 0.827, 0.345 },  // 2 — зелёный
-    { 0.039, 0.518, 1.000 },  // 3 — синий
-    { 0.686, 0.322, 0.871 },  // 4 — фиолетовый
-};
-static const NSInteger kMenuAccentCount = sizeof(kMenuAccentPalette) / sizeof(kMenuAccentPalette[0]);
-static NSInteger sMenuAccentIndex = 0;
+// Акцентный цвет меню (вкладка Misc): хранится как СОСТАВЛЯЮЩИЕ HSV (оттенок,
+// насыщенность, яркость) в plist — так выбирается ЛЮБОЙ цвет, а не только из
+// списка. Компоненты кэшируются в static: HUDOverlayNumber читает файл
+// СИНХРОННО, а HUDMenuAccent() спрашивают на каждом кадре раскладки (цвет
+// активной вкладки, полоска-индикатор, заголовок) — без кэша это было бы
+// чтение файла десятки раз в секунду.
+static CGFloat sMenuAccentH = 0.0;   // оттенок, 0..360 (0 — красный)
+static CGFloat sMenuAccentS = 0.9;   // насыщенность, 0..1 (как HUDAccent)
+static CGFloat sMenuAccentV = 1.0;   // яркость, 0..1
 
-/// Читаем сохранённый индекс ровно ОДИН раз — при создании оверлея
+/// Читаем сохранённый цвет ровно ОДИН раз — при создании оверлея
 /// (см. initWithFrame:). Дальше работает только кэш.
 static void HUDMenuAccentLoad(void)
 {
     static BOOL loaded = NO;
     if (loaded) { return; }
     loaded = YES;
+    double h = HUDOverlayNumber(@"hud.accent.h", -1.0);
+    double s = HUDOverlayNumber(@"hud.accent.s", -1.0);
+    double v = HUDOverlayNumber(@"hud.accent.v", -1.0);
+    if (h >= 0.0 && s >= 0.0 && v >= 0.0 && s <= 1.0 && v <= 1.0) {
+        sMenuAccentH = fmod(h, 360.0);
+        if (sMenuAccentH < 0.0) { sMenuAccentH += 360.0; }
+        sMenuAccentS = (CGFloat)s;
+        sMenuAccentV = (CGFloat)v;
+        return;
+    }
+    // Старый формат: индекс фиксированной палитры (ключ hud.accent) —
+    // переводим его цвет в HSV, чтобы чей-то выбор не слетал при обновлении.
+    static const CGFloat kOldPalette[][3] = {
+        { 1.000, 0.100, 0.100 },  // 0 — красный
+        { 1.000, 0.584, 0.000 },  // 1 — оранжевый
+        { 0.188, 0.827, 0.345 },  // 2 — зелёный
+        { 0.039, 0.518, 1.000 },  // 3 — синий
+        { 0.686, 0.322, 0.871 },  // 4 — фиолетовый
+    };
     NSInteger index = (NSInteger)HUDOverlayNumber(@"hud.accent", 0);
-    if (index < 0 || index >= kMenuAccentCount) { index = 0; }
-    sMenuAccentIndex = index;
+    if (index < 0 || index >= (NSInteger)(sizeof(kOldPalette) / sizeof(kOldPalette[0]))) {
+        index = 0;
+    }
+    CGFloat hh = 0, ss = 0, vv = 0, aa = 0;
+    UIColor *old = HUDColor(kOldPalette[index][0], kOldPalette[index][1], kOldPalette[index][2]);
+    if ([old getHue:&hh saturation:&ss brightness:&vv alpha:&aa]) {
+        sMenuAccentH = hh * 360.0;
+        sMenuAccentS = ss;
+        sMenuAccentV = vv;
+    }
 }
 
 static UIColor *HUDMenuAccent(void)
 {
-    return HUDColor(kMenuAccentPalette[sMenuAccentIndex][0],
-                    kMenuAccentPalette[sMenuAccentIndex][1],
-                    kMenuAccentPalette[sMenuAccentIndex][2]);
+    return [UIColor colorWithHue:sMenuAccentH / 360.0
+                      saturation:sMenuAccentS
+                      brightness:sMenuAccentV
+                           alpha:1.0];
 }
 
-static void HUDMenuAccentSet(NSInteger index)
+static void HUDMenuAccentSetHSV(double h, double s, double v)
 {
-    if (index < 0 || index >= kMenuAccentCount) { return; }
-    sMenuAccentIndex = index;
-    HUDOverlaySetNumber(@"hud.accent", index);
+    h = fmod(h, 360.0);
+    if (h < 0.0) { h += 360.0; }
+    s = MIN(MAX(s, 0.0), 1.0);
+    v = MIN(MAX(v, 0.0), 1.0);
+    sMenuAccentH = (CGFloat)h;
+    sMenuAccentS = (CGFloat)s;
+    sMenuAccentV = (CGFloat)v;
+    HUDOverlaySetNumber(@"hud.accent.h", h);
+    HUDOverlaySetNumber(@"hud.accent.s", s);
+    HUDOverlaySetNumber(@"hud.accent.v", v);
+}
+
+/// Во сколько превращается позиция тапа на полосе accent color (0..1):
+/// маркер 3 pt шириной стоит по центру значения — читаем от его середины.
+static CGFloat HUDAccentRatioAtX(CGPoint local, UIView *strip)
+{
+    CGFloat usable = strip.bounds.size.width - 3.0;
+    if (usable <= 0.0) { return 0.0; }
+    CGFloat value = (local.x - strip.frame.origin.x - 1.5) / usable;
+    return MIN(MAX(value, 0.0), 1.0);
 }
 
 static UILabel *HUDLabel(NSString *text, CGFloat size, UIFontWeight weight)
@@ -560,12 +600,22 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    // Вкладка Misc: строка accent color — свотч слева от надписи, палитра
-    // чипов справа (тап по чипу меняет акцент, см. applyMenuAccentIndex:).
+    // Вкладка Misc: строка accent color — свотч слева от надписи, под ними
+    // три полосы-градиента (оттенок / насыщенность / яркость). Тап по полосе
+    // ставит составляющую по позиции пальца — выбирается любой цвет, а не
+    // только из списка (см. performTapAtPoint:).
     UIView *_accentRow;
     UIView *_accentSwatch;
     UILabel *_accentLabel;
-    NSMutableArray<UIView *> *_accentChips;
+    UIView *_hueStrip;       // полоса оттенков (градиент статичный)
+    UIView *_satStrip;       // полоса насыщенности (зависит от H и V)
+    UIView *_valStrip;       // полоса яркости (зависит от H и S)
+    CAGradientLayer *_hueGradient;
+    CAGradientLayer *_satGradient;
+    CAGradientLayer *_valGradient;
+    UIView *_hueMarker;      // белая риска текущего положения на полосе
+    UIView *_satMarker;
+    UIView *_valMarker;
     // Запись экрана/AirPlay: панель и квадрат скрыты, пока UIScreen.isCaptured
     // (вкладка Misc, переключатель overlay).
     BOOL _captureHidden;
@@ -677,7 +727,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _configRowsDirty = YES;
     _keyboardFrame = CGRectZero;
 
-    // Акцентный цвет меню: читаем сохранённый индекс ДО сборки панели —
+    // Акцентный цвет меню (HSV): читаем из plist ДО сборки панели —
     // buildPanel/buildContent красят заголовок и полоску этим цветом.
     // Дальше работает только кэш (чтение файла на каждый кадр недопустимо).
     HUDMenuAccentLoad();
@@ -1118,17 +1168,28 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Строка accent color (вкладка Misc): тап по чипу палитры меняет акцент
-    // меню (цвет активной вкладки, полоски-индикатора и @ascentios).
+    // Строка accent color (вкладка Misc): три полосы-градиента. Тап по полосе
+    // ставит оттенок/насыщенность/яркость по позиции пальца — так выбирается
+    // любой цвет (темнее, светлее, другой оттенок), а не только из списка.
     if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
         CGPoint local = [_accentRow convertPoint:point fromView:self];
-        for (NSInteger i = 0; i < (NSInteger)_accentChips.count; i++) {
-            if (CGRectContainsPoint(_accentChips[i].frame, local)) {
-                [self applyMenuAccentIndex:i];
-                return;
-            }
+        if (CGRectContainsPoint(_hueStrip.frame, local)) {
+            CGFloat ratio = HUDAccentRatioAtX(local, _hueStrip);
+            [self applyMenuAccentHue:ratio * 360.0
+                          saturation:sMenuAccentS
+                          brightness:sMenuAccentV];
+        } else if (CGRectContainsPoint(_satStrip.frame, local)) {
+            CGFloat ratio = HUDAccentRatioAtX(local, _satStrip);
+            [self applyMenuAccentHue:sMenuAccentH
+                          saturation:ratio
+                          brightness:sMenuAccentV];
+        } else if (CGRectContainsPoint(_valStrip.frame, local)) {
+            CGFloat ratio = HUDAccentRatioAtX(local, _valStrip);
+            [self applyMenuAccentHue:sMenuAccentH
+                          saturation:sMenuAccentS
+                          brightness:ratio];
         }
-        return;   // тап по строке, но не по чипу — ничего не делаем
+        return;   // тап по строке, но не по полосе — ничего не делаем
     }
 
     for (UISlider *slider in _sliders) {
@@ -1577,8 +1638,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     // Строка accent color (вкладка Misc): свотч текущего цвета слева от
-    // надписи, палитра чипов справа — как в меню-эталоне MY IMGUI. Тап по
-    // чипу меняет акцент (см. performTapAtPoint:), выбранный чип обведён.
+    // надписи, под ними три полосы-градиента — оттенок, насыщенность, яркость.
+    // Тап по полосе ставит составляющую по позиции пальца, поэтому цвет
+    // выбирается ЛЮБОЙ (темнее/светлее/другой оттенок), а не из списка.
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
     _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     _accentRow.layer.cornerRadius = 12.0;
@@ -1586,28 +1648,64 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
     _accentSwatch.layer.cornerRadius = 5.0;
+    _accentSwatch.layer.borderWidth = 1.0;
+    _accentSwatch.layer.borderColor = HUDLine().CGColor;
     [_accentRow addSubview:_accentSwatch];
     _accentLabel = HUDLabel(@"accent color", 11, UIFontWeightMedium);
     _accentLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
     _accentLabel.autoresizingMask = UIViewAutoresizingNone;
-    // Длинную подпись ужимаем, а не обрезаем: палитра чипов должна стоять
-    // справа даже на узкой карточке.
-    _accentLabel.adjustsFontSizeToFitWidth = YES;
-    _accentLabel.minimumScaleFactor = 0.8;
     [_accentRow addSubview:_accentLabel];
-    _accentChips = [NSMutableArray array];
-    for (NSInteger i = 0; i < kMenuAccentCount; i++) {
-        UIView *chip = [[UIView alloc] initWithFrame:CGRectZero];
-        chip.backgroundColor = HUDColor(kMenuAccentPalette[i][0],
-                                        kMenuAccentPalette[i][1],
-                                        kMenuAccentPalette[i][2]);
-        chip.layer.cornerRadius = 4.0;
-        [_accentRow addSubview:chip];
-        [_accentChips addObject:chip];
-    }
+
+    // Оттенки: полный спектр радуги, градиент статичный — собираем один раз.
+    _hueStrip = [[UIView alloc] initWithFrame:CGRectZero];
+    _hueStrip.layer.cornerRadius = 4.0;
+    _hueStrip.clipsToBounds = YES;
+    _hueStrip.userInteractionEnabled = NO;
+    _hueGradient = [CAGradientLayer layer];
+    _hueGradient.colors = @[
+        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // красный
+        (id)HUDColor(1.000, 0.800, 0.000).CGColor,   // жёлтый
+        (id)HUDColor(0.000, 1.000, 0.200).CGColor,   // зелёный
+        (id)HUDColor(0.000, 0.900, 1.000).CGColor,   // голубой
+        (id)HUDColor(0.100, 0.200, 1.000).CGColor,   // синий
+        (id)HUDColor(0.800, 0.100, 1.000).CGColor,   // фиолетовый
+        (id)HUDColor(1.000, 0.000, 0.500).CGColor,   // розовый
+        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // снова красный
+    ];
+    _hueGradient.locations = @[ @0.0, @(1.0/7.0), @(2.0/7.0), @(3.0/7.0),
+                                @(4.0/7.0), @(5.0/7.0), @(6.0/7.0), @1.0 ];
+    [_hueStrip.layer addSublayer:_hueGradient];
+    _hueMarker = [self makeAccentMarker];
+    [_hueStrip addSubview:_hueMarker];
+    [_accentRow addSubview:_hueStrip];
+
+    // Насыщенность: от серого (текущая яркость) до чистого цвета текущего
+    // оттенка — градиент пересобираем при смене H/V (см. updateAccentUI).
+    _satStrip = [[UIView alloc] initWithFrame:CGRectZero];
+    _satStrip.layer.cornerRadius = 4.0;
+    _satStrip.clipsToBounds = YES;
+    _satStrip.userInteractionEnabled = NO;
+    _satGradient = [CAGradientLayer layer];
+    [_satStrip.layer addSublayer:_satGradient];
+    _satMarker = [self makeAccentMarker];
+    [_satStrip addSubview:_satMarker];
+    [_accentRow addSubview:_satStrip];
+
+    // Яркость: от чёрного до цвета текущего оттенка в полной яркости.
+    _valStrip = [[UIView alloc] initWithFrame:CGRectZero];
+    _valStrip.layer.cornerRadius = 4.0;
+    _valStrip.clipsToBounds = YES;
+    _valStrip.userInteractionEnabled = NO;
+    _valGradient = [CAGradientLayer layer];
+    [_valStrip.layer addSublayer:_valGradient];
+    _valMarker = [self makeAccentMarker];
+    [_valStrip addSubview:_valMarker];
+    [_accentRow addSubview:_valStrip];
+
     [_scroll addSubview:_accentRow];
-    // Обводка выбранного чипа — сразу при сборке (индекс уже загружен в init).
-    [self refreshAccentChips];
+    // Красим полосы, ставим маркеры и акцентные элементы — сразу при сборке
+    // (HSV уже загружен в init).
+    [self updateAccentUI];
 
     // Слайдеры fov/smooth/delay из меню убраны по заказу: вкладка Config
     // осталась с полем имени, кнопкой создания и списком конфигов. Массивы
@@ -1856,21 +1954,27 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: свотч слева от надписи, палитра чипов справа.
+        // Строка accent color: свотч слева от надписи, под ними три полосы —
+        // оттенок, насыщенность, яркость (выбор любого цвета тапом).
         _accentRow.hidden = NO;
-        _accentRow.frame = CGRectMake(x, y, rowWidth, 34.0);
-        _accentSwatch.frame = CGRectMake(10.0, (34.0 - 16.0) / 2.0, 16.0, 16.0);
-        // Надпись между свотчем и палитрой; при нехватке ширины ужимается.
-        CGFloat paletteW = (CGFloat)_accentChips.count * 16.0
-                         + MAX((CGFloat)_accentChips.count - 1, 0.0) * 4.0;
-        _accentLabel.frame = CGRectMake(32.0, 0.0,
-                                        MAX(rowWidth - 32.0 - paletteW - 12.0, 40.0), 34.0);
-        CGFloat chipX = rowWidth - 10.0 - paletteW;
-        for (UIView *chip in _accentChips) {
-            chip.frame = CGRectMake(chipX, (34.0 - 16.0) / 2.0, 16.0, 16.0);
-            chipX += 20.0;   // 16 чип + 4 зазор
-        }
-        y += 34.0 + 10.0;
+        CGFloat accentH = 80.0;   // строка подписи 22 + три полосы 14 с зазорами
+        _accentRow.frame = CGRectMake(x, y, rowWidth, accentH);
+        _accentSwatch.frame = CGRectMake(10.0, 3.0, 16.0, 16.0);
+        _accentLabel.frame = CGRectMake(32.0, 0.0, rowWidth - 42.0, 22.0);
+        CGFloat stripX = 10.0;
+        CGFloat stripW = rowWidth - 20.0;
+        _hueStrip.frame = CGRectMake(stripX, 22.0, stripW, 14.0);
+        _satStrip.frame = CGRectMake(stripX, 40.0, stripW, 14.0);
+        _valStrip.frame = CGRectMake(stripX, 58.0, stripW, 14.0);
+        // Размеры полос заданы — растягиваем их градиенты и переставляем
+        // маркеры (цвета градиентов остаются как их собрал buildContent).
+        _hueGradient.frame = _hueStrip.bounds;
+        _satGradient.frame = _satStrip.bounds;
+        _valGradient.frame = _valStrip.bounds;
+        [self placeAccentMarker:_hueMarker value:sMenuAccentH / 360.0];
+        [self placeAccentMarker:_satMarker value:sMenuAccentS];
+        [self placeAccentMarker:_valMarker value:sMenuAccentV];
+        y += accentH + 10.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
         _unloadButton.hidden = NO;
@@ -2195,27 +2299,66 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 #pragma mark - Accent color (вкладка Misc)
 
-/// Тап по чипу палитры: сохраняем индекс, перекрашиваем акцентные элементы.
-- (void)applyMenuAccentIndex:(NSInteger)index
+/// Белая риска текущего положения на полосе (с тенью — видна на любом фоне).
+- (UIView *)makeAccentMarker
 {
-    HUDMenuAccentSet(index);
-    _accentSwatch.backgroundColor = HUDMenuAccent();
-    _panelTitle.textColor = HUDMenuAccent();
-    _tabIndicator.backgroundColor = HUDMenuAccent();
-    [self refreshAccentChips];
-    [self setNeedsLayout];
-    [self layoutIfNeeded];
-    AscentHUDLog(@"[accent] выбран цвет №%ld", (long)index);
+    UIView *marker = [[UIView alloc] initWithFrame:CGRectZero];
+    marker.backgroundColor = [UIColor whiteColor];
+    marker.layer.cornerRadius = 1.5;
+    marker.layer.shadowColor = [UIColor blackColor].CGColor;
+    marker.layer.shadowOpacity = 0.7;
+    marker.layer.shadowRadius = 2.0;
+    marker.layer.shadowOffset = CGSizeZero;
+    marker.userInteractionEnabled = NO;
+    return marker;
 }
 
-/// Обводка выбранного чипа палитры (белая рамка — выделение).
-- (void)refreshAccentChips
+/// Тап по полосе: ставим соответствующую составляющую HSV и перекрашиваем
+/// всё, что зависит от акцента (свотч, заголовок, активная вкладка, полоски).
+- (void)applyMenuAccentHue:(CGFloat)h saturation:(CGFloat)s brightness:(CGFloat)v
 {
-    for (NSInteger i = 0; i < (NSInteger)_accentChips.count; i++) {
-        UIView *chip = _accentChips[i];
-        chip.layer.borderWidth = (i == sMenuAccentIndex) ? 2.0 : 0.0;
-        chip.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
-    }
+    HUDMenuAccentSetHSV(h, s, v);
+    [self updateAccentUI];
+    AscentHUDLog(@"[accent] цвет h=%.0f s=%.2f v=%.2f", sMenuAccentH, sMenuAccentS, sMenuAccentV);
+}
+
+/// Перекраска всего, что зависит от текущего HSV: акцентные элементы, градиенты
+/// полос насыщенности/яркости (они зависят от H и V) и маркеры положения.
+- (void)updateAccentUI
+{
+    UIColor *accent = HUDMenuAccent();
+    _accentSwatch.backgroundColor = accent;
+    _panelTitle.textColor = accent;
+    _tabIndicator.backgroundColor = accent;
+
+    // Насыщенность: от серого при текущей яркости до чистого цвета.
+    _satGradient.colors = @[
+        (id)[UIColor colorWithHue:sMenuAccentH / 360.0
+                       saturation:0.0
+                       brightness:sMenuAccentV
+                            alpha:1.0].CGColor,
+        (id)accent.CGColor,
+    ];
+    // Яркость: от чёрного до цвета текущего оттенка в полной яркости.
+    _valGradient.colors = @[
+        (id)[UIColor blackColor].CGColor,
+        (id)[UIColor colorWithHue:sMenuAccentH / 360.0
+                       saturation:MIN(sMenuAccentS, 1.0)
+                       brightness:1.0
+                            alpha:1.0].CGColor,
+    ];
+
+    [self placeAccentMarker:_hueMarker value:sMenuAccentH / 360.0];
+    [self placeAccentMarker:_satMarker value:sMenuAccentS];
+    [self placeAccentMarker:_valMarker value:sMenuAccentV];
+}
+
+/// Ставим маркер на значение 0..1 по ширине своей полосы.
+- (void)placeAccentMarker:(UIView *)marker value:(CGFloat)value
+{
+    CGFloat w = marker.superview.bounds.size.width;
+    if (w <= 0.0) { return; }
+    marker.frame = CGRectMake(value * (w - 3.0) + 1.0, 0.0, 3.0, marker.superview.bounds.size.height);
 }
 
 - (void)sliderChanged:(UISlider *)sender
@@ -2321,6 +2464,9 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         toggle.on = on;
         HUDOverlaySetFlag(toggle.accessibilityIdentifier, on);
     }
+    // misc.overlay мог измениться через конфиг — применяем видимость сразу,
+    // иначе при уже идущей записи панель останется на экране до события.
+    [self applyCaptureVisibility];
     for (UISlider *slider in _sliders) {
         NSNumber *value = values[slider.accessibilityIdentifier];
         if (value == nil) { continue; }
