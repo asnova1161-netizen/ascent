@@ -781,6 +781,9 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *_panel;
     UIView *_panelHeader;
     UILabel *_panelTitle;
+    UILabel *_buildLabel;       // мелкая метка времени сборки в колонке вкладок —
+                                // чтобы сразу видеть, какая сборка стоит на
+                                // телефоне (проверка жалоб «ничего не изменилось»)
     NSMutableArray<UIButton *> *_tabButtons;
     UIView *_tabIndicator;        // красная полоска у выбранной вкладки
     UIView *_contentCard;         // тёмная карточка справа
@@ -1098,7 +1101,13 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // края действовал порог панели, а не прокрутки.
     if (_rawTarget == HUDRawDragScroll || _rawTarget == HUDRawDragControl) {
         CGPoint local = [_panel convertPoint:point fromView:self];
-        CGRect grabZone = CGRectInset(_panel.bounds, kPanelGrabRim, kPanelGrabRim);
+        // Обод переноса панели НЕ шире самой карточки (kCardInset = 8): обод
+        // в 14 pt «съедал» нижнюю полосу карточки — свайп, начатый у НИЗА
+        // вкладки, шёл в перенос панели, а не в листание (жалоба: долистанный
+        // до низа Aim не листался обратно). Край панели (в т.ч. нижний правый
+        // угол) по-прежнему тащит панель — просто на 6 pt уже.
+        CGFloat rim = MIN(kPanelGrabRim, kCardInset);
+        CGRect grabZone = CGRectInset(_panel.bounds, rim, rim);
         if (CGRectContainsPoint(_panel.bounds, local) && !CGRectContainsPoint(grabZone, local)) {
             _rawTarget = HUDRawDragPanel;
         }
@@ -1315,6 +1324,27 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
                         }
                         _rawArmed = YES;
                     }
+                } else if (_rawTarget == HUDRawDragSlider && jumpLen >= kRawScrollDecide) {
+                    // Быстрый свайп с ползунка приехал одним «скачком» (поток
+                    // касаний на живой игре регулярно склеивается). Те же правила
+                    // решения, что и на обычном движении: вертикально и вкладке
+                    // есть куда ехать → листание; иначе → драг ползунка. Без
+                    // этой ветки такой свайп заармливался бы сразу драгом и
+                    // съедал листание — ровно та жалоба «не листается обратно».
+                    BOOL vertical = fabs(jumpDelta.y) > fabs(jumpDelta.x);
+                    BOOL canScroll = (jumpDelta.y < 0.0) ? _rawCanScrollDown : _rawCanScrollUp;
+                    if (vertical && canScroll) {
+                        _rawTarget = HUDRawDragScroll;
+                        _rawHoldable = YES;
+                        _rawHoldFromScroll = NO;
+                        _rawScrollTouched = YES;
+                        _rawSlider = nil;
+                        // Жест считается начатым: на отпускании не долетит
+                        // «тап» и не перезапишет значение ползунка.
+                        _rawMoved = YES;
+                        AscentHUDLog(@"[gesture] ползунок -> листание вкладки (скачок)");
+                    }
+                    _rawArmed = YES;
                 } else if ((now - _rawStartTime) >= kRawDragHold ||
                            jumpLen >= kRawDragArmMove) {
                     // Держание уже вышло (или палец ушёл далеко) — считаем жест
@@ -2102,6 +2132,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _panelTitle.minimumScaleFactor = 0.85;
     [_panelHeader addSubview:_panelTitle];
 
+    // Метка времени СБОРКИ (компиляция — на CI, время UTC): мелко и внизу
+    // колонки вкладок. Если на телефоне стоит старый .tipa, метка сразу
+    // покажет «другое» время — без догадок, та ли установка.
+    _buildLabel = HUDLabel([NSString stringWithFormat:@"build %.5s", __TIME__],
+                           8, UIFontWeightMedium);
+    _buildLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.32];
+    _buildLabel.textAlignment = NSTextAlignmentCenter;
+    _buildLabel.adjustsFontSizeToFitWidth = YES;
+    _buildLabel.minimumScaleFactor = 0.6;
+    [_panelHeader addSubview:_buildLabel];
+
     // Фон колонки вкладок: тёмный #1a1a1a со скруглением 10 (левая панель
     // эталона). Лежит внутри _panelHeader → удержание на пустом месте колонки
     // тащит панель, как перетаскивание окна за фон.
@@ -2508,6 +2549,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _panelTitle.frame = CGRectMake(sidebarX + 8.0, titleTop,
                                    MAX(cardX - (sidebarX + 8.0) - 3.0, 40.0), titleH);
     _sidebarBg.frame = CGRectMake(sidebarX, sidebarTop, sidebarW, sidebarH);
+    // Метка сборки — в самый низ колонки, под столбиком вкладок (у вкладок
+    // «кучно сверху», снизу колонки всегда пусто).
+    _buildLabel.frame = CGRectMake(sidebarX + 4.0,
+                                   sidebarTop + sidebarH - 18.0,
+                                   sidebarW - 8.0, 14.0);
 
     // Колонка вкладок: строки кучно сверху, снизу остаётся пустой край —
     // как в эталоне. Высоту ограничиваем и запасом снизу: иначе последняя
@@ -3102,6 +3148,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         [_triggerGradient addAnimation:anim forKey:@"colors"];
     }
     _sectionTitle.textColor = HUDText();
+    _buildLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.32];
     _unloadButton.backgroundColor = HUDGray();
     [_unloadButton setTitleColor:HUDText() forState:UIControlStateNormal];
     _configCreateButton.backgroundColor = HUDGray();
