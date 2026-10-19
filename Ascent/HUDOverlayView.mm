@@ -132,6 +132,14 @@ static UIColor *HUDSwitchOn(void)  { return [UIColor colorWithWhite:0.35 alpha:1
 // фона, теперь 0.30).
 static UIColor *HUDSwitchOff(void) { return [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0)
                                                               alpha:(sMenuLight ? 0.30 : 0.10)]; }
+// Надпись «ascent» в левом верхнем углу панели: по заказу цвет ФИКСИРОВАННЫЙ
+// и за акцентом больше НЕ следует — в тёмной теме тёплый серый #94908d,
+// в светлой — чёрный.
+static UIColor *HUDPanelTitleColor(void)
+{
+    if (sMenuLight) { return [UIColor blackColor]; }
+    return HUDColor(0.580392, 0.564706, 0.552941);   // #94908d
+}
 
 // Зелёный для «своих» в ESP и для полоски здоровья.
 static UIColor *HUDGreen(void)     { return HUDColor(0.22, 0.78, 0.36); }
@@ -2264,11 +2272,11 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel addSubview:_panelHeader];
 
     _panelTitle = HUDLabel(@"ascent", 14, UIFontWeightHeavy);
-    // Цвет заголовка управляется выбранным акцентом (вкладка Misc).
-    // По заказу надпись — просто «ascent» (было @ascentios) и тем же стилем,
-    // что слово на экране загрузки: тяжёлый СКРУГЛЁННЫЙ шрифт с разрядкой
-    // (см. applyPanelTitleColor:).
-    [self applyPanelTitleColor:HUDMenuAccent()];
+    // Цвет надписи — ФИКСИРОВАННЫЙ по теме (тёмная: #94908d, светлая: чёрный) и
+    // от акцента больше не зависит; задаётся в applyPanelTitleTheme
+    // (см. HUDPanelTitleColor). По заказу надпись оформлена тем же стилем, что
+    // слово на экране загрузки: тяжёлый СКРУГЛЁННЫЙ шрифт с разрядкой.
+    [self applyPanelTitleTheme];
     // Колонка узкая (как у эталона), поэтому при нехватке ширины заголовок
     // ужимается, а не обрезается многоточием.
     _panelTitle.adjustsFontSizeToFitWidth = YES;
@@ -3295,6 +3303,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
     _sectionTitle.textColor = HUDText();
     _buildLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.32];
+    // Надпись «ascent»: свой цвет по теме (тёмная #94908d, светлая чёрный).
+    [self applyPanelTitleTheme];
     _unloadButton.backgroundColor = HUDGray();
     [_unloadButton setTitleColor:HUDText() forState:UIControlStateNormal];
     _configCreateButton.backgroundColor = HUDGray();
@@ -3407,10 +3417,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 /// Надпись в левом верхнем углу панели — «ascent» тем же стилем, что и слово на
 /// экране загрузки (LoaderView.swift): тяжёлый СКРУГЛЁННЫЙ шрифт с положительной
-/// разрядкой букв. Кернинг живёт только в attributed-строке, поэтому и шрифт, и
-/// цвет ставим ею же — иначе UILabel перерисовал бы текст своим шрифтом, и
-/// разрядка пропала бы (а выбранный акцент на надпись не влиял бы).
-- (void)applyPanelTitleColor:(UIColor *)color
+/// разрядкой букв. Кернинг живёт только в attributed-строке, поэтому шрифт,
+/// абзац и цвет ставим ею же — иначе UILabel перерисовал бы текст своим шрифтом
+/// и разрядка пропала бы.
+///
+/// Цвет — ФИКСИРОВАННЫЙ по теме (см. HUDPanelTitleColor): акцент на надпись
+/// больше не влияет, поэтому метод зовётся из applyMenuTheme (сборка панели и
+/// смена темы), а не из updateAccentUI.
+- (void)applyPanelTitleTheme
 {
     if (_panelTitle == nil) { return; }
     UIFont *font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightHeavy];
@@ -3427,14 +3441,15 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                                                       NSKernAttributeName: @(1.0),
                                                       NSParagraphStyleAttributeName: para,
                                                       NSForegroundColorAttributeName:
-                                                          (color ?: HUDMenuAccent()) }];
+                                                          HUDPanelTitleColor() }];
 }
 
 - (void)updateAccentUI
 {
     UIColor *accent = HUDMenuAccent();
     _accentSwatch.backgroundColor = accent;
-    [self applyPanelTitleColor:accent];
+    // Надпись «ascent» в левом верхнем углу акцент НЕ берёт (по заказу): у неё
+    // свой цвет по теме — см. applyPanelTitleTheme/HUDPanelTitleColor.
     _tabIndicator.backgroundColor = accent;
 
     // Активная вкладка — цветом акцента. Раскладка ставит этот цвет только
