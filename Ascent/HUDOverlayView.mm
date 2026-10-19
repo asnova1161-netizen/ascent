@@ -1212,6 +1212,35 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     // строку под собой, а мы ещё и гасили бы клавиатуру при наборе.
     if (!CGRectIsEmpty(_keyboardFrame) && CGRectContainsPoint(_keyboardFrame, point)) { return; }
 
+    // Пикер accent color открыт (всплывающая карточка поверх меню) — он
+    // МОДАЛЬНЫЙ, поэтому проверяем ДО ВСЕГО меню. Тап по полю задаёт
+    // насыщенность/яркость, по радужной полосе — оттенок; тап по чёрным полям
+    // карточки глотается (под карточкой может лежать строка меню — до неё
+    // нажатие не должно дойти); тап ПО МЕНЮ или пустому экрану закрывает
+    // пикер. Раньше этот блок стоял ПОСЛЕ кнопок меню: нажатие срабатывало,
+    // а пикер оставался открытым.
+    if (_pickerCard != nil && !_pickerCard.hidden) {
+        CGPoint local = [_pickerCard convertPoint:point fromView:self];
+        CGRect square = _svSquare.frame;
+        if (CGRectContainsPoint(square, local) && square.size.width > 0.0) {
+            CGFloat sx = (local.x - square.origin.x) / square.size.width;
+            CGFloat sy = (local.y - square.origin.y) / square.size.height;
+            [self applyMenuAccentHue:sMenuAccentH
+                          saturation:MIN(MAX(sx, 0.0), 1.0)
+                          brightness:1.0 - MIN(MAX(sy, 0.0), 1.0)
+                                save:YES];
+        } else if (CGRectContainsPoint(_hueStrip.frame, local)) {
+            CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
+            [self applyMenuAccentHue:ratio * 360.0
+                          saturation:sMenuAccentS
+                          brightness:sMenuAccentV
+                                save:YES];
+        } else if (!CGRectContainsPoint(_pickerCard.bounds, local)) {
+            [self closePicker];   // тап по меню/пустому месту — закрываем
+        }
+        return;
+    }
+
     UIView *hit = [self hitTest:point withEvent:nil];
 
     // Клавиатура открыта — тап МИМО поля гасит её (привычное iOS-«вне поля»,
@@ -1252,31 +1281,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         toggle.on = !toggle.on;
         AscentHUDLog(@"[gesture] %@ -> %d", toggle.accessibilityIdentifier, (int)toggle.on);
         [self switchChanged:toggle];
-        return;
-    }
-
-    // Пикер accent color открыт (всплывающая карточка поверх меню): тап по
-    // полю задаёт насыщенность/яркость, по радужной полосе — оттенок, а тап
-    // МИМО карточки закрывает пикер. Проверяем ДО всего меню.
-    if (_pickerCard != nil && !_pickerCard.hidden) {
-        CGPoint local = [_pickerCard convertPoint:point fromView:self];
-        CGRect square = _svSquare.frame;
-        if (CGRectContainsPoint(square, local) && square.size.width > 0.0) {
-            CGFloat sx = (local.x - square.origin.x) / square.size.width;
-            CGFloat sy = (local.y - square.origin.y) / square.size.height;
-            [self applyMenuAccentHue:sMenuAccentH
-                          saturation:MIN(MAX(sx, 0.0), 1.0)
-                          brightness:1.0 - MIN(MAX(sy, 0.0), 1.0)
-                                save:YES];
-        } else if (CGRectContainsPoint(_hueStrip.frame, local)) {
-            CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
-            [self applyMenuAccentHue:ratio * 360.0
-                          saturation:sMenuAccentS
-                          brightness:sMenuAccentV
-                                save:YES];
-        } else if (!CGRectContainsPoint(_pickerCard.bounds, local)) {
-            [self closePicker];   // тап мимо карточки — закрываем пикер
-        }
         return;
     }
 
