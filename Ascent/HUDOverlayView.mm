@@ -166,6 +166,10 @@ static UIColor *HUDMenuAccent(void)
                            alpha:1.0];
 }
 
+/// Ставит цвет в КЭШ, без записи файла: палец во время перетаскивания меняет
+/// цвет десятки раз в секунду, а HUDOverlaySetNumber пишет plist СИНХРОННО —
+/// писать его под пальцем нельзя. Файл пишем один раз: при тапе или при
+/// отпускании пальца (см. HUDMenuAccentSave, commitRawDrag).
 static void HUDMenuAccentSetHSV(double h, double s, double v)
 {
     h = fmod(h, 360.0);
@@ -175,9 +179,14 @@ static void HUDMenuAccentSetHSV(double h, double s, double v)
     sMenuAccentH = (CGFloat)h;
     sMenuAccentS = (CGFloat)s;
     sMenuAccentV = (CGFloat)v;
-    HUDOverlaySetNumber(@"hud.accent.h", h);
-    HUDOverlaySetNumber(@"hud.accent.s", s);
-    HUDOverlaySetNumber(@"hud.accent.v", v);
+}
+
+/// Разовая запись текущего цвета в plist.
+static void HUDMenuAccentSave(void)
+{
+    HUDOverlaySetNumber(@"hud.accent.h", sMenuAccentH);
+    HUDOverlaySetNumber(@"hud.accent.s", sMenuAccentS);
+    HUDOverlaySetNumber(@"hud.accent.v", sMenuAccentV);
 }
 
 /// Позиция тапа на вертикальной полосе оттенка — 0..1 по высоте
@@ -345,6 +354,14 @@ typedef NS_ENUM(NSInteger, HUDRawDragTarget) {
     // жест превращается в прокрутку. Без этого порога дрожь руки при нажатии
     // уводила бы содержимое, и кнопки «не нажимались».
     HUDRawDragControl,
+    // Пикер accent color в ОТДЕЛЬНОМ окне (не в меню): прямое управление
+    // значением пальцем — кружок в поле тянется, риска по радужной полосе
+    // мотается вверх-вниз. Удержания не требуют, порог не нужен.
+    HUDRawDragPickerSV,
+    HUDRawDragPickerHue,
+    // Остальное при открытом пикере: окно пикера перекрывает экран, поэтому
+    // «пустой» жест — тап по нему закрывает пикер, а меню под ним не трогается.
+    HUDRawDragPickerOutside,
 };
 
 // Единственный живой оверлей процесса (см. +currentOverlay). Ссылку держим
@@ -600,14 +617,20 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    // Вкладка Misc: строка accent color — свотч слева от надписи, под ними
-    // HSV-пикер как в системном выборе цвета: поле «насыщенность × яркость»
-    // и вертикальная радужная полоса оттенка справа от него. Тап по полю
-    // задаёт насыщенность/яркость, тап по полосе — оттенок (см.
-    // performTapAtPoint:).
+    // Вкладка Misc: строка accent color — свотч текущего цвета слева от
+    // надписи и кнопка-квадратик справа. По кнопке открывается HSV-пикер в
+    // ОТДЕЛЬНОМ окне (не в меню) — см. togglePicker.
     UIView *_accentRow;
     UIView *_accentSwatch;
     UILabel *_accentLabel;
+    UIView *_accentButton;      // кнопка-квадратик: открывает пикер
+    UIImageView *_accentIcon;   // иконка палитры внутри кнопки
+    // Окно пикера (выше панели HUD): тёмная карточка с полем «насыщенность ×
+    // яркость» и вертикальной радужной полосой оттенка. Касания идут не в
+    // это окно, а в HUD по потоку HID — окно только рисует (см.
+    // rawDragTargetAtPoint и handleRawTouchPhase:).
+    UIWindow *_pickerWindow;
+    UIView *_pickerCard;
     UIView *_svSquare;          // поле: слева белое → справа чистый цвет
     CAGradientLayer *_svBase;   // горизонталь: белый → цвет текущего оттенка
     CAGradientLayer *_svShade;  // вертикаль: прозрачный сверху → чёрный снизу
@@ -785,6 +808,17 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 /// же вью работает всегда.
 - (HUDRawDragTarget)rawDragTargetAtPoint:(CGPoint)point
 {
+    // Пикер в отдельном окне открыт — его окно ВЫШЕ панели HUD, поэтому цели
+    // жеста решаем ДО hitTest по меню: кружок в поле и риска на полосе
+    // тянутся пальцем сразу, без удержания; всё остальное — «пустое» (тап
+    // закроет пикер, а меню под ним палец не тронет).
+    if (_pickerWindow != nil && !_pickerWindow.hidden) {
+        CGPoint local = [_pickerCard convertPoint:point fromView:self];
+        if (CGRectContainsPoint(_svSquare.frame, local)) { return HUDRawDragPickerSV; }
+        if (CGRectContainsPoint(_hueStrip.frame, local)) { return HUDRawDragPickerHue; }
+        return HUDRawDragPickerOutside;
+    }
+
     UIView *hit = [self hitTest:point withEvent:nil];
     if (hit == nil) { return HUDRawDragNone; }
 
@@ -958,6 +992,17 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         }
 
         CGPoint delta = CGPointMake(stagePoint.x - _rawStart.x, stagePoint.y - _rawStart.y);
+
+        // ПИКЕР: кружок в поле и риска на полосе ведутся пальцем СРАЗУ, без
+        // удержания и порогов — прямое управление значением, как в системном
+        // выборе цвета. Значение ставится от ТЕКУЩЕЙ точки пальца, поэтому и
+        // отсев скачков выше работает как надо: мусорное событие просто
+        // пропускается, следующее нормальное ставит цвет на истинный путь.
+        if (_rawTarget == HUDRawDragPickerSV || _rawTarget == HUDRawDragPickerHue) {
+            _rawMoved = YES;
+            [self applyPickerDragAtPoint:point];
+            return;
+        }
 
         // ПЕРЕНОС квадрата и панели — строго ЗА ПАЛЬЦЕМ, один к одному:
         // положение = положение на момент нажатия + весь путь пальца. Никаких
@@ -1167,24 +1212,39 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         return;
     }
 
-    // Строка accent color (вкладка Misc): HSV-пикер. Тап по полю задаёт
-    // насыщенность/яркость, тап по радужной полосе — оттенок.
-    if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
-        CGPoint local = [_accentRow convertPoint:point fromView:self];
+    // Пикер accent color в отдельном окне открыт: окно его выше панели, так
+    // что проверяем ДО всего меню. Тап по полю задаёт насыщенность/яркость,
+    // по радужной полосе — оттенок, а тап МИМО карточки закрывает пикер.
+    if (_pickerWindow != nil && !_pickerWindow.hidden) {
+        CGPoint local = [_pickerCard convertPoint:point fromView:self];
         CGRect square = _svSquare.frame;
         if (CGRectContainsPoint(square, local) && square.size.width > 0.0) {
             CGFloat sx = (local.x - square.origin.x) / square.size.width;
             CGFloat sy = (local.y - square.origin.y) / square.size.height;
             [self applyMenuAccentHue:sMenuAccentH
                           saturation:MIN(MAX(sx, 0.0), 1.0)
-                          brightness:1.0 - MIN(MAX(sy, 0.0), 1.0)];
+                          brightness:1.0 - MIN(MAX(sy, 0.0), 1.0)
+                                save:YES];
         } else if (CGRectContainsPoint(_hueStrip.frame, local)) {
             CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
             [self applyMenuAccentHue:ratio * 360.0
                           saturation:sMenuAccentS
-                          brightness:sMenuAccentV];
+                          brightness:sMenuAccentV
+                                save:YES];
+        } else if (!CGRectContainsPoint(_pickerCard.bounds, local)) {
+            [self closePicker];   // тап мимо карточки — закрываем пикер
         }
-        return;   // тап по строке, но не по пикеру — ничего не делаем
+        return;
+    }
+
+    // Строка accent color (вкладка Misc): кнопка-квадратик справа от
+    // надписи открывает пикер цвета в отдельном окне.
+    if (_accentRow != nil && [self pointIsOnScrollRow:point row:_accentRow]) {
+        CGPoint local = [_accentRow convertPoint:point fromView:self];
+        if (CGRectContainsPoint(_accentButton.frame, local)) {
+            [self togglePicker];
+        }
+        return;   // тап по строке, но не по кнопке — ничего не делаем
     }
 
     for (UISlider *slider in _sliders) {
@@ -1283,6 +1343,15 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
 - (void)commitRawDrag
 {
+    if (_rawTarget == HUDRawDragPickerSV || _rawTarget == HUDRawDragPickerHue) {
+        // Палец отпущен после перетаскивания: цвет уже применён кэшем, файл
+        // пишем разово (во время движения пальца plist не трогали).
+        HUDMenuAccentSave();
+        AscentHUDLog(@"[accent] перетаскивание закончено, цвет h=%.0f s=%.2f v=%.2f",
+                     sMenuAccentH, sMenuAccentS, sMenuAccentV);
+        return;
+    }
+
     if (_rawTarget == HUDRawDragTrigger) {
         CGPoint base = [self triggerBaseCenter];
         CGPoint center = [self clampTriggerCenter:_trigger.center];
@@ -1472,8 +1541,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _panel.hidden = _captureHidden;
     } else {
         // При закрытии гасим клавиатуру: она могла остаться от поля имени
-        // конфига, и без этого висела бы поверх игры.
+        // конфига, и без этого висела бы поверх игры. Пикер тоже закрываем —
+        // он открывался из меню и без меню смысла не имеет.
         [_configNameField resignFirstResponder];
+        [self closePicker];
         _panel.hidden = YES;
     }
     [self updateTriggerIcon];
@@ -1633,16 +1704,15 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 
     // Строка accent color (вкладка Misc): свотч текущего цвета слева от
-    // надписи, под ними HSV-пикер как в системном выборе цвета — поле
-    // «насыщенность × яркость» и вертикальная радужная полоса оттенка.
-    // Тап по полю/полосе задаёт цвет (см. performTapAtPoint:).
+    // надписи и кнопка-квадратик справа — тап по ней открывает HSV-пикер в
+    // ОТДЕЛЬНОМ окне (см. togglePicker). Сам пикер в меню не показывается.
     _accentRow = [[UIView alloc] initWithFrame:CGRectZero];
     _accentRow.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     _accentRow.layer.cornerRadius = 12.0;
     _accentRow.autoresizingMask = UIViewAutoresizingNone;
     _accentSwatch = [[UIView alloc] initWithFrame:CGRectZero];
     _accentSwatch.backgroundColor = HUDMenuAccent();
-    _accentSwatch.layer.cornerRadius = 5.0;
+    _accentSwatch.layer.cornerRadius = 6.0;
     _accentSwatch.layer.borderWidth = 1.0;
     _accentSwatch.layer.borderColor = HUDLine().CGColor;
     [_accentRow addSubview:_accentSwatch];
@@ -1651,66 +1721,29 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _accentLabel.autoresizingMask = UIViewAutoresizingNone;
     [_accentRow addSubview:_accentLabel];
 
-    // Поле: слева белое (насыщенность 0) → справа чистый цвет (1), сверху
-    // яркое (v=1) → снизу чёрное (v=0). Скругление ставим на сами слои
-    // градиентов — контейнер НЕ режет подложки, чтобы круг-маркер мог
-    // вылезать за край.
-    _svSquare = [[UIView alloc] initWithFrame:CGRectZero];
-    _svBase = [CAGradientLayer layer];
-    _svBase.startPoint = CGPointMake(0.0, 0.5);
-    _svBase.endPoint = CGPointMake(1.0, 0.5);
-    [_svSquare.layer addSublayer:_svBase];
-    _svShade = [CAGradientLayer layer];
-    _svShade.startPoint = CGPointMake(0.5, 0.0);
-    _svShade.endPoint = CGPointMake(0.5, 1.0);
-    _svShade.colors = @[
-        (id)[UIColor colorWithWhite:0.0 alpha:0.0].CGColor,
-        (id)[UIColor blackColor].CGColor,
-    ];
-    [_svSquare.layer addSublayer:_svShade];
-    _svMarker = [[UIView alloc] initWithFrame:CGRectZero];
-    _svMarker.backgroundColor = [UIColor clearColor];
-    _svMarker.layer.borderWidth = 2.0;
-    _svMarker.layer.borderColor = [UIColor whiteColor].CGColor;
-    _svMarker.layer.shadowColor = [UIColor blackColor].CGColor;
-    _svMarker.layer.shadowOpacity = 0.8;
-    _svMarker.layer.shadowRadius = 2.0;
-    _svMarker.layer.shadowOffset = CGSizeZero;
-    _svMarker.userInteractionEnabled = NO;
-    [_accentRow addSubview:_svSquare];
-    [_accentRow addSubview:_svMarker];
-
-    // Вертикальная радужная полоса оттенка (градиент статичен — собираем
-    // один раз; сверху красный 0°, донизу снова красный 360°).
-    _hueStrip = [[UIView alloc] initWithFrame:CGRectZero];
-    _hueGradient = [CAGradientLayer layer];
-    _hueGradient.startPoint = CGPointMake(0.5, 0.0);
-    _hueGradient.endPoint = CGPointMake(0.5, 1.0);
-    _hueGradient.colors = @[
-        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // красный (0°)
-        (id)HUDColor(1.000, 0.850, 0.000).CGColor,   // жёлтый (60°)
-        (id)HUDColor(0.000, 1.000, 0.000).CGColor,   // зелёный (120°)
-        (id)HUDColor(0.000, 0.900, 0.900).CGColor,   // голубой (180°)
-        (id)HUDColor(0.000, 0.000, 1.000).CGColor,   // синий (240°)
-        (id)HUDColor(0.850, 0.000, 0.850).CGColor,   // пурпурный (300°)
-        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // снова красный (360°)
-    ];
-    _hueGradient.locations = @[ @0.0, @(1.0/6.0), @(2.0/6.0), @(3.0/6.0),
-                                @(4.0/6.0), @(5.0/6.0), @1.0 ];
-    [_hueStrip.layer addSublayer:_hueGradient];
-    _hueMarker = [[UIView alloc] initWithFrame:CGRectZero];
-    _hueMarker.backgroundColor = [UIColor whiteColor];
-    _hueMarker.layer.shadowColor = [UIColor blackColor].CGColor;
-    _hueMarker.layer.shadowOpacity = 0.8;
-    _hueMarker.layer.shadowRadius = 2.0;
-    _hueMarker.layer.shadowOffset = CGSizeZero;
-    _hueMarker.userInteractionEnabled = NO;
-    [_accentRow addSubview:_hueStrip];
-    [_accentRow addSubview:_hueMarker];
+    // Кнопка-квадратик: иконка палитры. UIKit-кнопкой её не делаем — жесты
+    // меню идут через свой разбор потока, а не через hitTest (см.
+    // performTapAtPoint:).
+    _accentButton = [[UIView alloc] initWithFrame:CGRectZero];
+    _accentButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+    _accentButton.layer.cornerRadius = 6.0;
+    _accentButton.layer.borderWidth = 1.0;
+    _accentButton.layer.borderColor = HUDLine().CGColor;
+    _accentButton.userInteractionEnabled = NO;
+    _accentIcon = [[UIImageView alloc] initWithFrame:CGRectZero];
+    UIImage *pickerGlyph = [UIImage systemImageNamed:@"paintpalette.fill"];
+    _accentIcon.image = [pickerGlyph imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    _accentIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:0.8];
+    _accentIcon.contentMode = UIViewContentModeScaleAspectFit;
+    _accentIcon.autoresizingMask = UIViewAutoresizingNone;
+    _accentIcon.userInteractionEnabled = NO;
+    [_accentButton addSubview:_accentIcon];
+    [_accentRow addSubview:_accentButton];
 
     [_scroll addSubview:_accentRow];
-    // Красим поле под текущий оттенок и ставим маркеры — сразу при сборке
-    // (HSV уже загружен в init).
+    // Поле, полоса и маркеры пикера живут в ЕГО собственном окне и собираются
+    // лениво — при первом открытии (см. ensurePickerWindow). Здесь только
+    // перекрашиваем акцентные элементы панели по загруженному HSV.
     [self updateAccentUI];
 
     // Слайдеры fov/smooth/delay из меню убраны по заказу: вкладка Config
@@ -1960,28 +1993,20 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
 
-        // Строка accent color: свотч слева от надписи, под ними HSV-пикер —
-        // поле «насыщенность × яркость» слева, радужная полоса оттенка
-        // справа (как в системном выборе цвета).
+        // Строка accent color: свотч текущего цвета слева от надписи (чуть
+        // крупнее), кнопка-квадратик справа — тап по ней открывает пикер в
+        // отдельном окне (см. togglePicker). Сам пикер в меню не рисуем.
         _accentRow.hidden = NO;
-        CGFloat pickerY = 22.0;
-        CGFloat pickerH = 96.0;
-        CGFloat stripW = 14.0;
-        CGFloat pickerX = 10.0;
-        _accentRow.frame = CGRectMake(x, y, rowWidth, pickerY + pickerH + 8.0);
-        _accentSwatch.frame = CGRectMake(10.0, 3.0, 16.0, 16.0);
-        _accentLabel.frame = CGRectMake(32.0, 0.0, rowWidth - 42.0, 22.0);
-        _svSquare.frame = CGRectMake(pickerX, pickerY, pickerH, pickerH);
-        _svBase.frame = _svSquare.bounds;
-        _svBase.cornerRadius = 6.0;
-        _svShade.frame = _svSquare.bounds;
-        _svShade.cornerRadius = 6.0;
-        _hueStrip.frame = CGRectMake(pickerX + pickerH + 6.0, pickerY, stripW, pickerH);
-        _hueGradient.frame = _hueStrip.bounds;
-        _hueGradient.cornerRadius = 4.0;
-        [self placeAccentSVMarker];
-        [self placeAccentHueMarker];
-        y += pickerY + pickerH + 8.0 + 10.0;
+        CGFloat accentRowH = 26.0;
+        _accentRow.frame = CGRectMake(x, y, rowWidth, accentRowH);
+        _accentSwatch.frame = CGRectMake(10.0, (accentRowH - 20.0) / 2.0, 20.0, 20.0);
+        _accentLabel.frame = CGRectMake(38.0, 0.0, rowWidth - 38.0 - 34.0, accentRowH);
+        CGFloat accentButtonSize = 22.0;
+        _accentButton.frame = CGRectMake(rowWidth - 10.0 - accentButtonSize,
+                                         (accentRowH - accentButtonSize) / 2.0,
+                                         accentButtonSize, accentButtonSize);
+        _accentIcon.frame = CGRectInset(_accentButton.bounds, 4.0, 4.0);
+        y += accentRowH + 10.0;
 
         // unload: высота 32 вместо 46 — по заказу кнопка меньше.
         _unloadButton.hidden = NO;
@@ -2258,7 +2283,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if (wantHide == _captureHidden) { return; }
     _captureHidden = wantHide;
     if (wantHide) {
-        // Скрытая панель не должна продолжать чужой жест.
+        // Скрытая панель не должна продолжать чужой жест; пикер в отдельном
+        // окне тоже прячем — его окно выше панели и secure-флаг на него не
+        // действует (свой флаг не выставлялся).
+        [self closePicker];
         [self endRawGesture];
         _panel.hidden = YES;
         _trigger.hidden = YES;
@@ -2304,19 +2332,46 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
 }
 
-#pragma mark - Accent color (вкладка Misc)
+#pragma mark - Accent color (вкладка Misc) и пикер в отдельном окне
 
-/// Тап по пикеру: ставим соответствующую составляющую HSV и перекрашиваем
-/// всё, что зависит от акцента (свотч, заголовок, активная вкладка, полоски).
-- (void)applyMenuAccentHue:(CGFloat)h saturation:(CGFloat)s brightness:(CGFloat)v
+/// Тап/перетаскивание по пикеру: ставим составляющую HSV (кэш + акцентные
+/// элементы меню), при save — сразу пишем в plist. Во время перетаскивания
+/// save=NO: файл пишется один раз при отпускании (см. commitRawDrag).
+- (void)applyMenuAccentHue:(CGFloat)h saturation:(CGFloat)s brightness:(CGFloat)v save:(BOOL)save
 {
     HUDMenuAccentSetHSV(h, s, v);
+    if (save) { HUDMenuAccentSave(); }
     [self updateAccentUI];
-    AscentHUDLog(@"[accent] цвет h=%.0f s=%.2f v=%.2f", sMenuAccentH, sMenuAccentS, sMenuAccentV);
+    if (save) {
+        AscentHUDLog(@"[accent] цвет h=%.0f s=%.2f v=%.2f", sMenuAccentH, sMenuAccentS, sMenuAccentV);
+    }
 }
 
-/// Перекраска всего, что зависит от текущего HSV: акцентные элементы, поле
-/// пикера (его горизонтальный градиент зависит от оттенка) и маркеры.
+/// Палец ведёт кружок или риску по пикеру: значение = позиция пальца
+/// (точка экрана в координатах карточки пикера).
+- (void)applyPickerDragAtPoint:(CGPoint)point
+{
+    CGPoint local = [_pickerCard convertPoint:point fromView:self];
+    if (_rawTarget == HUDRawDragPickerSV) {
+        CGRect sq = _svSquare.frame;
+        if (sq.size.width <= 0.0) { return; }
+        CGFloat sx = (local.x - sq.origin.x) / sq.size.width;
+        CGFloat sy = (local.y - sq.origin.y) / sq.size.height;
+        [self applyMenuAccentHue:sMenuAccentH
+                      saturation:MIN(MAX(sx, 0.0), 1.0)
+                      brightness:1.0 - MIN(MAX(sy, 0.0), 1.0)
+                            save:NO];
+    } else {
+        CGFloat ratio = HUDAccentRatioAtY(local, _hueStrip);
+        [self applyMenuAccentHue:ratio * 360.0
+                      saturation:sMenuAccentS
+                      brightness:sMenuAccentV
+                            save:NO];
+    }
+}
+
+/// Перекраска всего, что зависит от текущего HSV: акцентные элементы панели,
+/// поле пикера (его горизонтальный градиент зависит от оттенка) и маркеры.
 - (void)updateAccentUI
 {
     UIColor *accent = HUDMenuAccent();
@@ -2325,13 +2380,16 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _tabIndicator.backgroundColor = accent;
 
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
-    _svBase.colors = @[
-        (id)[UIColor whiteColor].CGColor,
-        (id)[UIColor colorWithHue:sMenuAccentH / 360.0
-                       saturation:1.0
-                       brightness:1.0
-                            alpha:1.0].CGColor,
-    ];
+    // Поля ещё может не быть — пикер собирается лениво при первом открытии.
+    if (_svBase != nil) {
+        _svBase.colors = @[
+            (id)[UIColor whiteColor].CGColor,
+            (id)[UIColor colorWithHue:sMenuAccentH / 360.0
+                           saturation:1.0
+                           brightness:1.0
+                                alpha:1.0].CGColor,
+        ];
+    }
 
     [self placeAccentSVMarker];
     [self placeAccentHueMarker];
@@ -2360,6 +2418,144 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _hueMarker.frame = CGRectMake(strip.origin.x - 2.0, cy - 1.5,
                                   strip.size.width + 4.0, 3.0);
     _hueMarker.layer.cornerRadius = 1.5;
+}
+
+#pragma mark - Окно пикера
+
+/// Ленивая сборка окна пикера: собственное прозрачное окно ВЫШЕ панели HUD,
+/// в центре экрана — тёмная карточка с полем и радужной полосой. Окно касаний
+/// не получает само (все они приходят в HUD по потоку HID) — оно только
+/// рисует; разбор касаний пикера идёт геометрически в HUD (см.
+/// rawDragTargetAtPoint и handleRawTouchPhase:).
+- (void)ensurePickerWindow
+{
+    if (_pickerWindow != nil) { return; }
+    _pickerWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    _pickerWindow.backgroundColor = [UIColor clearColor];
+    _pickerWindow.windowLevel = UIWindowLevelStatusBar;
+    _pickerWindow.userInteractionEnabled = NO;
+    UIViewController *host = [[UIViewController alloc] init];
+    host.view.backgroundColor = [UIColor clearColor];
+    _pickerWindow.rootViewController = host;
+
+    _pickerCard = [[UIView alloc] initWithFrame:CGRectZero];
+    _pickerCard.backgroundColor = HUDFill();
+    _pickerCard.layer.cornerRadius = 16.0;
+    _pickerCard.layer.borderWidth = 1.0;
+    _pickerCard.layer.borderColor = HUDLine().CGColor;
+    [host.view addSubview:_pickerCard];
+
+    // Поле: слева белое (насыщенность 0) → справа чистый цвет (1), сверху
+    // яркое (v=1) → снизу чёрное (v=0). Скругление — на самих слоях
+    // градиентов, чтобы контейнер не резал подложки и круг-маркер мог
+    // вылезать за край.
+    _svSquare = [[UIView alloc] initWithFrame:CGRectZero];
+    _svBase = [CAGradientLayer layer];
+    _svBase.startPoint = CGPointMake(0.0, 0.5);
+    _svBase.endPoint = CGPointMake(1.0, 0.5);
+    [_svSquare.layer addSublayer:_svBase];
+    _svShade = [CAGradientLayer layer];
+    _svShade.startPoint = CGPointMake(0.5, 0.0);
+    _svShade.endPoint = CGPointMake(0.5, 1.0);
+    _svShade.colors = @[
+        (id)[UIColor colorWithWhite:0.0 alpha:0.0].CGColor,
+        (id)[UIColor blackColor].CGColor,
+    ];
+    [_svSquare.layer addSublayer:_svShade];
+    _svMarker = [[UIView alloc] initWithFrame:CGRectZero];
+    _svMarker.backgroundColor = [UIColor clearColor];
+    _svMarker.layer.borderWidth = 2.0;
+    _svMarker.layer.borderColor = [UIColor whiteColor].CGColor;
+    _svMarker.layer.shadowColor = [UIColor blackColor].CGColor;
+    _svMarker.layer.shadowOpacity = 0.8;
+    _svMarker.layer.shadowRadius = 2.0;
+    _svMarker.layer.shadowOffset = CGSizeZero;
+    _svMarker.userInteractionEnabled = NO;
+    [_pickerCard addSubview:_svSquare];
+    [_pickerCard addSubview:_svMarker];
+
+    // Радужная полоса оттенка (градиент статичен: сверху красный 0°, донизу
+    // снова красный 360°) — палец мотает её вверх-вниз.
+    _hueStrip = [[UIView alloc] initWithFrame:CGRectZero];
+    _hueGradient = [CAGradientLayer layer];
+    _hueGradient.startPoint = CGPointMake(0.5, 0.0);
+    _hueGradient.endPoint = CGPointMake(0.5, 1.0);
+    _hueGradient.colors = @[
+        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // красный (0°)
+        (id)HUDColor(1.000, 0.850, 0.000).CGColor,   // жёлтый (60°)
+        (id)HUDColor(0.000, 1.000, 0.000).CGColor,   // зелёный (120°)
+        (id)HUDColor(0.000, 0.900, 0.900).CGColor,   // голубой (180°)
+        (id)HUDColor(0.000, 0.000, 1.000).CGColor,   // синий (240°)
+        (id)HUDColor(0.850, 0.000, 0.850).CGColor,   // пурпурный (300°)
+        (id)HUDColor(1.000, 0.000, 0.000).CGColor,   // снова красный (360°)
+    ];
+    _hueGradient.locations = @[ @0.0, @(1.0/6.0), @(2.0/6.0), @(3.0/6.0),
+                                @(4.0/6.0), @(5.0/6.0), @1.0 ];
+    [_hueStrip.layer addSublayer:_hueGradient];
+    _hueMarker = [[UIView alloc] initWithFrame:CGRectZero];
+    _hueMarker.backgroundColor = [UIColor whiteColor];
+    _hueMarker.layer.shadowColor = [UIColor blackColor].CGColor;
+    _hueMarker.layer.shadowOpacity = 0.8;
+    _hueMarker.layer.shadowRadius = 2.0;
+    _hueMarker.layer.shadowOffset = CGSizeZero;
+    _hueMarker.userInteractionEnabled = NO;
+    [_pickerCard addSubview:_hueStrip];
+    [_pickerCard addSubview:_hueMarker];
+}
+
+/// Раскладка карточки пикера: поле 150×150 слева, полоса оттенка справа,
+/// карточка — по центру экрана.
+- (void)layoutPicker
+{
+    CGRect screen = UIScreen.mainScreen.bounds;
+    CGFloat inset = 14.0;
+    CGFloat square = 150.0;
+    CGFloat stripW = 18.0;
+    CGFloat gap = 10.0;
+    CGFloat cardW = inset + square + gap + stripW + inset;
+    CGFloat cardH = inset + square + inset;
+    _pickerCard.frame = CGRectMake((screen.size.width - cardW) / 2.0,
+                                   (screen.size.height - cardH) / 2.0 - 20.0,
+                                   cardW, cardH);
+    _svSquare.frame = CGRectMake(inset, inset, square, square);
+    _svBase.frame = _svSquare.bounds;
+    _svBase.cornerRadius = 6.0;
+    _svShade.frame = _svSquare.bounds;
+    _svShade.cornerRadius = 6.0;
+    _hueStrip.frame = CGRectMake(inset + square + gap, inset, stripW, square);
+    _hueGradient.frame = _hueStrip.bounds;
+    _hueGradient.cornerRadius = 4.0;
+    [self placeAccentSVMarker];
+    [self placeAccentHueMarker];
+}
+
+- (void)togglePicker
+{
+    if (_pickerWindow != nil && !_pickerWindow.hidden) {
+        [self closePicker];
+    } else {
+        [self openPicker];
+    }
+}
+
+/// Открывает пикер в отдельном окне (кнопка-квадратик в строке accent color).
+- (void)openPicker
+{
+    [self ensurePickerWindow];
+    [self layoutPicker];
+    [self updateAccentUI];
+    _pickerWindow.hidden = NO;
+    AscentHUDLog(@"[accent] пикер открыт");
+}
+
+/// Закрывает пикер (тап мимо карточки, закрытие меню, запись экрана).
+- (void)closePicker
+{
+    if (_pickerWindow == nil || _pickerWindow.hidden) { return; }
+    HUDMenuAccentSave();
+    _pickerWindow.hidden = YES;
+    AscentHUDLog(@"[accent] пикер закрыт, цвет h=%.0f s=%.2f v=%.2f",
+                 sMenuAccentH, sMenuAccentS, sMenuAccentV);
 }
 
 - (void)sliderChanged:(UISlider *)sender
