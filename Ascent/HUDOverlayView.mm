@@ -600,6 +600,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     NSTimer *_timer;
     int      _lastFrameId;
     BOOL     _lastLive;
+    char     _lastStatus[128]; // последний отправленный в меню статус ESP
     // Переключатели рисования. Кэшируем: файл читаем раз в полсекунды, а не
     // на каждом кадре, иначе прокрутка/рисование заметно подрагивают.
     BOOL     _drawBox;
@@ -625,6 +626,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
     [self reloadOptions];
+    _lastStatus[0] = '\0';
 
     // 15 раз в секунду — столько же кадров читает GameESP; лишние setNeedsDisplay
     // отсекаем по номеру кадра.
@@ -655,6 +657,23 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
 
 - (void)tick
 {
+    AscentESPFrame info;
+    memset(&info, 0, sizeof(info));
+    AscentESPGetFrame(NULL, 0, &info);
+
+    // Статус ESP (info.status) шлём в меню при КАЖДОМ изменении — даже когда
+    // чит выключен, иначе в Misc осталась бы устаревшая строка. Уведомление
+    // подписывает панель (см. espStatusChanged:).
+    if (strncmp(info.status, _lastStatus, sizeof(_lastStatus)) != 0) {
+        strncpy(_lastStatus, info.status, sizeof(_lastStatus) - 1);
+        _lastStatus[sizeof(_lastStatus) - 1] = '\0';
+        NSString *text = [NSString stringWithUTF8String:info.status];
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"AscentESPStatusChanged"
+                          object:nil
+                        userInfo:@{ @"status" : (text.length > 0 ? text : @"esp: —") }];
+    }
+
     // Видимость ESP зависит от переключателя в меню: прячем холст целиком,
     // чтобы не тратить рисование, когда чит выключен.
     BOOL enabled = HUDOverlayNumber(@"cheat.esp", 0) > 0.5;
@@ -673,10 +692,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         _optionsTime = now;
         [self reloadOptions];
     }
-
-    AscentESPFrame info;
-    memset(&info, 0, sizeof(info));
-    AscentESPGetFrame(NULL, 0, &info);
 
     // Перерисовываем только когда пришёл новый кадр — иначе таймер гонял бы
     // drawRect впустую и грел экран.
@@ -837,6 +852,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
+    UILabel *_espStatusLabel;    // статус ESP на вкладке Misc (см. espStatusChanged:)
     // Вкладка Misc: строка accent color — надпись слева, свотч текущего цвета
     // СПРАВА от неё. Тап по свотчу (и по всей строке — чтобы легко попадать)
     // открывает HSV-пикер. См. togglePicker.
@@ -2320,6 +2336,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel.layer removeAllAnimations];
     if (_panelOpen) {
         [self reloadCheatControls];
+        // Статус ESP на момент открытия меню: дальше его держит актуальным
+        // уведомление AscentESPStatusChanged из холста (см. espStatusChanged:).
+        AscentESPFrame statusInfo;
+        memset(&statusInfo, 0, sizeof(statusInfo));
+        AscentESPGetFrame(NULL, 0, &statusInfo);
+        _espStatusLabel.text = (statusInfo.status[0] != '\0')
+            ? [NSString stringWithUTF8String:statusInfo.status] : @"esp: —";
         // Вкладку НЕ переключаем через selectTab: при открытии панель и так
         // проявляется целиком, и фейд содержимого поверх этого только мигал бы.
         // Раскладку всё равно делаем заранее — до начала фейда панели.
@@ -2432,7 +2455,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // Колонка вкладок слева. Выбранная — красным текстом плюс красная
     // полоска у правого края колонки (как в эталонном меню).
     _tabButtons = [NSMutableArray array];
-    NSArray<NSString *> *titles = @[ @"Esp", @"Aim", @"Misc", @"Config" ];
+    // Вкладки Aim и Config убраны по заказу — остались только Esp и Misc.
+    NSArray<NSString *> *titles = @[ @"Esp", @"Misc" ];
     for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
         UIButton *button = [self makeFlatButton:titles[i]];
         // Как в эталоне: подпись мелкая, по левому краю строки (у эталона
@@ -2682,6 +2706,22 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
     [_scroll addSubview:_unloadButton];
 
+    // Статус ESP (вкладка Misc): текст приходит уведомлением из холста ESP
+    // (см. AscentESPHostView tick) при изменении info.status — «смещения не
+    // заданы», «игроков: 4», «нет доступа» и т.п. Раньше статус нигде не
+    // отображался, и было не понять, почему боксы не рисуются.
+    _espStatusLabel = HUDLabel(@"esp: —", 10, UIFontWeightMedium);
+    _espStatusLabel.numberOfLines = 3;
+    _espStatusLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
+    _espStatusLabel.adjustsFontSizeToFitWidth = YES;
+    _espStatusLabel.minimumScaleFactor = 0.7;
+    _espStatusLabel.autoresizingMask = UIViewAutoresizingNone;
+    [_scroll addSubview:_espStatusLabel];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(espStatusChanged:)
+                                                 name:@"AscentESPStatusChanged"
+                                               object:nil];
+
     // Имя нового конфига. Тап по полю (см. performTapAtPoint:) вызывает
     // СИСТЕМНУЮ клавиатуру iPhone — как обычное поле ввода в iOS.
     _configNameField = [[UITextField alloc] initWithFrame:CGRectZero];
@@ -2894,8 +2934,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 
     _contentCard.frame = CGRectMake(cardX, cardY, cardW, cardH);
 
-    static NSString *const kSectionTitles[4] = { @"ESP", @"AIM", @"MISC", @"CONFIG" };
-    _sectionTitle.text = (_tab >= 0 && _tab < 4) ? kSectionTitles[_tab] : kSectionTitles[0];
+    static NSString *const kSectionTitles[2] = { @"ESP", @"MISC" };
+    _sectionTitle.text = (_tab >= 0 && _tab < 2) ? kSectionTitles[_tab] : kSectionTitles[0];
     _sectionTitle.frame = CGRectMake(14, 12, cardW - 28, 20);
 
     _scroll.frame = CGRectMake(0, kSectionTop, cardW, MAX(cardH - kSectionTop, 0));
@@ -2920,6 +2960,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (HUDFlatSwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
+    _espStatusLabel.hidden = YES;
     _accentRow.hidden = YES;
     _themeRow.hidden = YES;
     _targetRow.hidden = YES;
@@ -2932,50 +2973,10 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // Вкладка ESP: только главный переключатель — под-опции (боксы,
         // здоровье, имена, дистанция, линии) из меню убраны.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
-    } else if (tab == 1) {
-        // Вкладка Aim (по заказу расширена): aimbot, draw fov, ползунки fov и
-        // smooth и выбор цели target. Triggerbot убран.
-        [self layoutSwitchRow:_switches[1] x:x y:&y width:rowWidth];
-        [self layoutSwitchRow:_switches[3] x:x y:&y width:rowWidth];   // draw fov
-        [self layoutSliderGroup:_sliders[0] x:x y:&y width:rowWidth];  // fov
-        [self layoutSliderGroup:_sliders[1] x:x y:&y width:rowWidth];  // smooth
-
-        // target: надпись слева + стрелочка раскрытия СРАЗУ СПРАВА от неё; сами
-        // пилюли head/neck/body/legs лежат в СВОЕЙ строке ПОД target и видны
-        // только когда список раскрыт (по заказу).
-        _targetRow.hidden = NO;
-        CGFloat targetRowH = 26.0;
-        _targetRow.frame = CGRectMake(x, y, rowWidth, targetRowH);
-        // Надпись — вплотную к левому краю карточки (как тумблеры строк выше,
-        // по заказу «левее») и чуть ВЫШЕ середины строки (по заказу).
-        CGFloat targetArrowW = 22.0;
-        CGFloat targetLabelH = 22.0;
-        CGFloat targetLabelY = -4.0;
-        CGSize targetTextSize = [_targetLabel sizeThatFits:CGSizeMake(rowWidth, targetLabelH)];
-        CGFloat targetLabelW = ceil(targetTextSize.width) + 2.0;
-        if (targetLabelW > rowWidth - targetArrowW - 6.0) {
-            targetLabelW = MAX(0.0, rowWidth - targetArrowW - 6.0);
-        }
-        _targetLabel.frame = CGRectMake(0.0, targetLabelY, targetLabelW, targetLabelH);
-        _targetArrow.frame = CGRectMake(round(CGRectGetMaxX(_targetLabel.frame) + 4.0),
-                                        targetLabelY, targetArrowW, targetLabelH);
-        y += targetRowH + 2.0;
-
-        // Строка пилюль: в раскрытом списке занимает место и проявляется, в
-        // свернутом — скрыта (место не тратится, содержимое короче).
-        CGFloat pillsRowH = 24.0;
-        _targetPillsRow.hidden = !_targetExpanded;
-        _targetPillsRow.frame = CGRectMake(x, y, rowWidth, pillsRowH);
-        CGFloat pillH = 22.0;
-        CGFloat pillGap = 4.0;
-        CGFloat pillW = floor((rowWidth - pillGap * 3.0) / 4.0);
-        for (NSInteger i = 0; i < (NSInteger)_targetPills.count; i++) {
-            _targetPills[i].frame = CGRectMake(round(i * (pillW + pillGap)),
-                                               round((pillsRowH - pillH) / 2.0),
-                                               pillW, pillH);
-        }
-        if (_targetExpanded) { y += pillsRowH + 4.0; }
-    } else if (tab == 2) {
+    } else {
+        // Вкладка Aim (вместе с Config) УБРАНА по заказу — вторая вкладка
+        // теперь Misc. Элементы Aim (aimbot, draw fov, ползунки, target)
+        // создаются в buildContent, но всегда остаются скрытыми.
         // Misc: переключатель overlay, строка accent color и кнопка unload.
         // Подписи-пояснения под кнопкой больше нет (убрана по заказу).
         [self layoutSwitchRow:_switches[2] x:x y:&y width:rowWidth];
@@ -3026,35 +3027,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _unloadButton.hidden = NO;
         _unloadButton.frame = CGRectMake(x, y, rowWidth, 32);
         y += 32 + 6;
-    } else {
-        // Слайдеры fov/smooth/delay из вкладки убраны — сразу список конфигов.
 
-        // Список конфигов перечитываем только когда он поменялся
-        // (создали/удалили) — см. _configRowsDirty.
-        if (_configRowsDirty) { [self rebuildConfigRows]; }
-
-        // Имя нового конфига и кнопка создания. Тап по полю (см.
-        // performTapAtPoint:) открывает СИСТЕМНУЮ клавиатуру iPhone.
-        _configNameField.hidden = NO;
-        _configNameField.frame = CGRectMake(x, y, rowWidth, 34.0);
-        y += 34.0 + 6.0;
-
-        _configCreateButton.hidden = NO;
-        _configCreateButton.frame = CGRectMake(x, y, rowWidth, 38.0);
-        y += 38.0 + 8.0;
-
-        for (UIView *row in _configRows) {
-            row.hidden = NO;
-            row.frame = CGRectMake(x, y, rowWidth, 34.0);
-            for (UIView *sub in row.subviews) {
-                // 1 — имя, 2 — «▶» запустить, 3 — «✕» удалить.
-                if (sub.tag == 1) { sub.frame = CGRectMake(12, 0, rowWidth - 76.0, 34.0); }
-                if (sub.tag == 2) { sub.frame = CGRectMake(rowWidth - 58.0, 0, 20.0, 34.0); }
-                if (sub.tag == 3) { sub.frame = CGRectMake(rowWidth - 30.0, 0, 22.0, 34.0); }
-            }
-            y += 34.0 + 6.0;
-        }
-        if (_configRows.count > 0) { y += 2.0; }
+        // Статус ESP (обновляется уведомлением из холста): почему боксы не
+        // рисуются или сколько игроков прочитано — прямо в меню, чтобы не
+        // копаться в файле журнала.
+        _espStatusLabel.hidden = NO;
+        _espStatusLabel.frame = CGRectMake(x, y, rowWidth, 58);
+        y += 58 + 6;
     }
 
     _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
@@ -3118,11 +3097,20 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [self selectTab:sender.tag - 100];
 }
 
+/// Текст статуса ESP из холста: AscentESPHostView шлёт уведомление при
+/// изменении info.status. Обновляет подпись на вкладке Misc.
+- (void)espStatusChanged:(NSNotification *)note
+{
+    NSString *status = note.userInfo[@"status"];
+    if (status.length > 0) { _espStatusLabel.text = status; }
+}
+
 - (void)selectTab:(NSInteger)tab
 {
     // Нажатие по УЖЕ ВЫБРАННОЙ вкладке: ни анимации, ни сброса прокрутки — по
     // заказу («если нажимаешь на уже включённую вкладку, анимации быть не
     // должно»). Раньше здесь заново проигрывался фейд, и содержимое мигало.
+    if (tab < 0 || tab >= (NSInteger)_tabButtons.count) { return; } // вкладок 2: Esp и Misc
     if (tab == _tab) { return; }
     _tab = tab;
     _scroll.contentOffset = CGPointZero;   // по заказу: прокрутка всегда с верха
