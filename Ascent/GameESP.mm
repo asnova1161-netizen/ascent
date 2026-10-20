@@ -772,7 +772,22 @@ static int ESPWorldToScreen(const float m[16], const float pos[3],
 
 static void AscentESPTickOnce(void)
 {
-    if (AscentSharedNumber(@"cheat.esp") <= 0.5) {
+    double espSwitch = AscentSharedNumber(@"cheat.esp");
+
+    // Диагностика в журнал: видно и тумблер, и доступ, и каталог состояния.
+    // Пишем на первом проходе и дальше не чаще раза в 2 с.
+    {
+        static uint64_t sLastDiagUs = 0;
+        uint64_t diagNow = ESPNowUs();
+        if (sLastDiagUs == 0 || diagNow - sLastDiagUs >= 2000000ull) {
+            sLastDiagUs = diagNow;
+            AscentHUDLog(@"[esp] тик: cheat.esp=%.1f, attached=%d, base=0x%llx, каталог=%s",
+                         espSwitch, AscentGameIsAttached(), gResolver.base,
+                         AscentStateDirectory().UTF8String);
+        }
+    }
+
+    if (espSwitch <= 0.5) {
         // Выключено: сбрасываем резолвер, чтобы при включении всё перечиталось.
         uint64_t keptBase = gResolver.base;
         memset(&gResolver, 0, sizeof(gResolver));
