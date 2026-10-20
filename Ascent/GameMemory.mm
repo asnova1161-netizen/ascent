@@ -551,9 +551,11 @@ void AscentGameTick(void)
     BOOL attachedNow = AscentGameIsAttached();
     BOOL attachUp = (!attachedBefore && attachedNow);
 
-    // ESP живёт своим потоком: включаем чтение только когда есть и
-    // переключатель, и task-порт. Иначе фоновый цикл крутился бы впустую.
-    AscentESPSetEnabled(anyOn && attachedNow);
+    // ESP живёт своим потоком. Поднимаем его уже по одному тумблеру ESP
+    // (даже без task-порта): тогда на вкладке Misc видно ПРИЧИНУ (нет
+    // доступа / образ не найден), а не вечное «esp: —». Раньше цикл не
+    // стартовал без attach, и диагностика в меню была пустой.
+    AscentESPSetEnabled(esp > 0.5);
 
     if (esp > 0.5 && attachedNow && (changed || attachUp)) {
         // Прогон диагностики и при смене тумблера, и при ПЕРВОЙ успешной
