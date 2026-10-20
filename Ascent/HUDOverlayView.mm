@@ -600,7 +600,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     NSTimer *_timer;
     int      _lastFrameId;
     BOOL     _lastLive;
-    char     _lastStatus[128]; // последний отправленный в меню статус ESP
     // Переключатели рисования. Кэшируем: файл читаем раз в полсекунды, а не
     // на каждом кадре, иначе прокрутка/рисование заметно подрагивают.
     BOOL     _drawBox;
@@ -626,7 +625,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
     [self reloadOptions];
-    _lastStatus[0] = '\0';
 
     // 15 раз в секунду — столько же кадров читает GameESP; лишние setNeedsDisplay
     // отсекаем по номеру кадра.
@@ -661,19 +659,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     memset(&info, 0, sizeof(info));
     AscentESPGetFrame(NULL, 0, &info);
 
-    // Статус ESP (info.status) шлём в меню при КАЖДОМ изменении — даже когда
-    // чит выключен, иначе в Misc осталась бы устаревшая строка. Уведомление
-    // подписывает панель (см. espStatusChanged:).
-    if (strncmp(info.status, _lastStatus, sizeof(_lastStatus)) != 0) {
-        strncpy(_lastStatus, info.status, sizeof(_lastStatus) - 1);
-        _lastStatus[sizeof(_lastStatus) - 1] = '\0';
-        NSString *text = [NSString stringWithUTF8String:info.status];
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:@"AscentESPStatusChanged"
-                          object:nil
-                        userInfo:@{ @"status" : (text.length > 0 ? text : @"esp: —") }];
-    }
-
     // Видимость ESP зависит от переключателя в меню: прячем холст целиком,
     // чтобы не тратить рисование, когда чит выключен.
     BOOL enabled = HUDOverlayNumber(@"cheat.esp", 0) > 0.5;
@@ -691,12 +676,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (now - _optionsTime > 0.5) {
         _optionsTime = now;
         [self reloadOptions];
-        // Дважды в секунду шлём хвост журнала в меню: строки [il2cpp] и
-        // причины ошибок видны прямо во вкладке Misc.
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:@"AscentLogTailChanged"
-                          object:nil
-                        userInfo:@{ @"tail" : AscentHUDLogTail(12) }];
     }
 
     // Перерисовываем только когда пришёл новый кадр — иначе таймер гонял бы
@@ -858,16 +837,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
     UIScrollView *_scroll;
     UIButton *_unloadButton;
-    UILabel *_espStatusLabel;    // статус ESP на вкладке Misc (см. espStatusChanged:)
-    UILabel *_logLabel;          // последние строки журнала прямо в меню (Misc)
-    // Подбор смещений ESP прямо из меню (Misc): строки-числа для ключей
-    // esp.off.* + кнопка «проба esp». Сами смещения читает GameESP.mm из того
-    // же plist, поэтому подбор на устройстве не требует пересборки. Элементы
-    // живут в _espOffRows (контейнеры) и _espOffSliders (сами ползунки).
-    UIView *_espOffTitle;        // подпись блока «esp offsets»
-    UIButton *_espProbeButton;   // «проба esp» — прогон диагностики чтения
-    NSMutableArray<UIView *> *_espOffRows;
-    NSMutableArray<UISlider *> *_espOffSliders;
     // Вкладка Misc: строка accent color — надпись слева, свотч текущего цвета
     // СПРАВА от неё. Тап по свотчу (и по всей строке — чтобы легко попадать)
     // открывает HSV-пикер. См. togglePicker.
@@ -1828,11 +1797,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     for (UIView *row in _configRows) {
         if ([self pointIsOnScrollRow:point row:row]) { return YES; }
     }
-    // Строки подбора смещений ESP — обычные управляющие строки: нажатие на них
-    // остаётся нажатием, а не листанием (см. kControlScrollDecide).
-    for (UIView *row in _espOffRows) {
-        if ([self pointIsOnScrollRow:point row:row]) { return YES; }
-    }
     return NO;
 }
 
@@ -1869,14 +1833,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
         UIView *group = slider.superview;
         if (group == nil || group.hidden) { continue; }
         CGRect reach = CGRectInset(group.frame, 0.0, -3.0);
-        if (CGRectContainsPoint(reach, inScroll)) { return slider; }
-    }
-    // Строки подбора смещений ESP — такие же строки-ползунки, только лежат в
-    // своём списке (_espOffSliders): без этого их нельзя было бы тянуть.
-    for (UISlider *slider in _espOffSliders) {
-        UIView *row = slider.superview;
-        if (row == nil || row.hidden) { continue; }
-        CGRect reach = CGRectInset(row.frame, 0.0, -3.0);
         if (CGRectContainsPoint(reach, inScroll)) { return slider; }
     }
     return nil;
@@ -2010,16 +1966,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     for (UISlider *slider in _sliders) {
         UIView *group = slider.superview;
         if (![self pointIsOnScrollRow:point row:group]) { continue; }
-        CGPoint local = [slider convertPoint:point fromView:self];
-        [self applyTapToSlider:slider atPoint:local];
-        return;
-    }
-
-    // Строки подбора смещений ESP: тап по дорожке ставит значение так же, как
-    // у остальных ползунков (они живут в отдельном списке _espOffSliders).
-    for (UISlider *slider in _espOffSliders) {
-        UIView *row = slider.superview;
-        if (![self pointIsOnScrollRow:point row:row]) { continue; }
         CGPoint local = [slider convertPoint:point fromView:self];
         [self applyTapToSlider:slider atPoint:local];
         return;
@@ -2374,14 +2320,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_panel.layer removeAllAnimations];
     if (_panelOpen) {
         [self reloadCheatControls];
-        // Статус ESP на момент открытия меню: дальше его держит актуальным
-        // уведомление AscentESPStatusChanged из холста (см. espStatusChanged:).
-        AscentESPFrame statusInfo;
-        memset(&statusInfo, 0, sizeof(statusInfo));
-        AscentESPGetFrame(NULL, 0, &statusInfo);
-        _espStatusLabel.text = (statusInfo.status[0] != '\0')
-            ? [NSString stringWithUTF8String:statusInfo.status] : @"esp: —";
-        _logLabel.text = AscentHUDLogTail(12);
         // Вкладку НЕ переключаем через selectTab: при открытии панель и так
         // проявляется целиком, и фейд содержимого поверх этого только мигал бы.
         // Раскладку всё равно делаем заранее — до начала фейда панели.
@@ -2736,66 +2674,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _sliderValueLabels[key] = valueLabel;
     }
 
-    // ПОДБОР СМЕЩЕНИЙ ESP (вкладка Misc). Cмещения IL2CPP меняются с каждым
-    // обновлением Standoff 2, а вписывать их вслепую в plist неудобно: здесь
-    // для каждого ключа esp.off.* своя строка с ползунком и числом. Значение
-    // пишется в общий plist (его читает GameESP.mm) и сразу видно в статусе —
-    // подбирается на устройстве без пересборки. Кнопка «проба esp» гоняет
-    // диагностику AscentESPRunProbe: в журнале видно, на каком шаге пусто.
-    _espOffRows = [NSMutableArray array];
-    _espOffSliders = [NSMutableArray array];
-
-    _espOffTitle = HUDLabel(@"esp offsets", 12, UIFontWeightSemibold);
-    _espOffTitle.autoresizingMask = UIViewAutoresizingNone;
-    [_scroll addSubview:_espOffTitle];
-
-    // key -> подпись. Порядок тот же, в каком смещения читает GameESP.mm.
-    NSArray<NSArray<NSString *> *> *espOffKeys = @[
-        @[ @"esp.off.list",      @"list" ],
-        @[ @"esp.off.listArray", @"listArray" ],
-        @[ @"esp.off.matrix",    @"matrix" ],
-        @[ @"esp.off.pos",       @"pos" ],
-        @[ @"esp.off.health",    @"health" ],
-        @[ @"esp.off.team",      @"team" ],
-        @[ @"esp.off.name",      @"name" ],
-        @[ @"esp.off.local",     @"local" ],
-    ];
-
-    for (NSArray<NSString *> *pair in espOffKeys) {
-        NSString *key = pair[0];
-        NSString *title = pair[1];
-
-        UIView *row = [[UIView alloc] initWithFrame:CGRectZero];
-        row.autoresizingMask = UIViewAutoresizingNone;
-        UILabel *nameLabel = HUDLabel(title, 11, UIFontWeightMedium);
-        nameLabel.tag = 1;
-        nameLabel.autoresizingMask = UIViewAutoresizingNone;
-        [row addSubview:nameLabel];
-        UILabel *valueLabel = HUDLabel(@"", 11, UIFontWeightSemibold);
-        valueLabel.textAlignment = NSTextAlignmentRight;
-        valueLabel.tag = 2;
-        valueLabel.autoresizingMask = UIViewAutoresizingNone;
-        [row addSubview:valueLabel];
-        UISlider *slider = [[UISlider alloc] initWithFrame:CGRectZero];
-        slider.accessibilityIdentifier = key;
-        slider.minimumTrackTintColor = HUDMenuAccent();
-        slider.maximumTrackTintColor = HUDSoftFill();
-        [row addSubview:slider];
-
-        [_scroll addSubview:row];
-        [_espOffRows addObject:row];
-        [_espOffSliders addObject:slider];
-        _sliderValueLabels[key] = valueLabel;
-    }
-
-    _espProbeButton = [self makeFlatButton:@"проба esp"];
-    _espProbeButton.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    _espProbeButton.backgroundColor = HUDGray();
-    _espProbeButton.layer.cornerRadius = 12.0;
-    [_espProbeButton addTarget:self action:@selector(espProbeTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self addTapGesture:_espProbeButton action:@selector(panelControlTapped:)];
-    [_scroll addSubview:_espProbeButton];
-
     _unloadButton = [self makeFlatButton:@"unload"];
     // Шрифт как у подписей вкладок (12 Semibold), а не 14 Heavy — по заказу.
     _unloadButton.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
@@ -2804,37 +2682,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     [_unloadButton addTarget:self action:@selector(unloadTapped) forControlEvents:UIControlEventTouchUpInside];
     [self addTapGesture:_unloadButton action:@selector(panelControlTapped:)];
     [_scroll addSubview:_unloadButton];
-
-    // Статус ESP (вкладка Misc): текст приходит уведомлением из холста ESP
-    // (см. AscentESPHostView tick) при изменении info.status — «смещения не
-    // заданы», «игроков: 4», «нет доступа» и т.п. Раньше статус нигде не
-    // отображался, и было не понять, почему боксы не рисуются.
-    _espStatusLabel = HUDLabel(@"esp: —", 10, UIFontWeightMedium);
-    _espStatusLabel.numberOfLines = 3;
-    _espStatusLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
-    _espStatusLabel.adjustsFontSizeToFitWidth = YES;
-    _espStatusLabel.minimumScaleFactor = 0.7;
-    _espStatusLabel.autoresizingMask = UIViewAutoresizingNone;
-    [_scroll addSubview:_espStatusLabel];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(espStatusChanged:)
-                                                 name:@"AscentESPStatusChanged"
-                                               object:nil];
-
-    // Окно журнала (Misc): холст ESP шлёт хвост лога дважды в секунду —
-    // см. AscentESPHostView tick.
-    _logLabel = [[UILabel alloc] init];
-    _logLabel.numberOfLines = 0;
-    _logLabel.clipsToBounds = YES;
-    _logLabel.font = [UIFont fontWithName:@"Menlo" size:9.0]
-                        ?: [UIFont systemFontOfSize:9.0];
-    _logLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
-    _logLabel.text = AscentHUDLogTail(12);
-    [_scroll addSubview:_logLabel];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(logTailChanged:)
-                                                 name:@"AscentLogTailChanged"
-                                               object:nil];
 
     // Имя нового конфига. Тап по полю (см. performTapAtPoint:) вызывает
     // СИСТЕМНУЮ клавиатуру iPhone — как обычное поле ввода в iOS.
@@ -3074,8 +2921,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (HUDFlatSwitch *toggle in _switches) { toggle.superview.hidden = YES; }
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
-    _espStatusLabel.hidden = YES;
-    _logLabel.hidden = YES;
     _accentRow.hidden = YES;
     _themeRow.hidden = YES;
     _targetRow.hidden = YES;
@@ -3083,10 +2928,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
-    // Блок подбора смещений ESP — только на Misc.
-    _espOffTitle.hidden = YES;
-    _espProbeButton.hidden = YES;
-    for (UIView *row in _espOffRows) { row.hidden = YES; }
 
     if (tab == 0) {
         // Вкладка ESP: только главный переключатель — под-опции (боксы,
@@ -3146,34 +2987,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _unloadButton.hidden = NO;
         _unloadButton.frame = CGRectMake(x, y, rowWidth, 32);
         y += 32 + 6;
-
-        // Статус ESP (обновляется уведомлением из холста): почему боксы не
-        // рисуются или сколько игроков прочитано — прямо в меню, чтобы не
-        // копаться в файле журнала.
-        _espStatusLabel.hidden = NO;
-        _espStatusLabel.frame = CGRectMake(x, y, rowWidth, 58);
-        y += 58 + 6;
-
-        // Подбор смещений ESP: заголовок, 8 строк-ползунков, кнопка пробы.
-        // Строки те же 40 pt, что у ползунков Aim (layoutSliderGroup), но
-        // подписи значения шире — там hex, поэтому строка чуть выше.
-        _espOffTitle.hidden = NO;
-        _espOffTitle.frame = CGRectMake(x, y, rowWidth, 16);
-        y += 16 + 2;
-        for (UIView *row in _espOffRows) {
-            row.hidden = NO;
-            [self layoutEspOffsetRow:row x:x y:&y width:rowWidth];
-        }
-        _espProbeButton.hidden = NO;
-        _espProbeButton.frame = CGRectMake(x, y, 96, 28);
-        y += 28 + 6;
-
-        // Последние строки журнала — прямо в меню: по ним видно, что делает
-        // диагностика ([il2cpp]...) и почему боксы не рисуются, без поиска
-        // отдельного экрана (жалоба «логов не видно»).
-        _logLabel.hidden = NO;
-        _logLabel.frame = CGRectMake(x, y, rowWidth, 104);
-        y += 104 + 6;
     }
 
     _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
@@ -3224,21 +3037,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     *y += kSliderGroupHeight + kSliderGroupGap;
 }
 
-/// Строка подбора смещения ESP: название слева, значение (hex + dec) справа,
-/// ползунок под ними. Высота на 6 pt больше, чем у Aim: подпись значения
-/// длиннее («0xFFFF  (65535)»), и в 46 pt она упиралась бы в название.
-- (void)layoutEspOffsetRow:(UIView *)row x:(CGFloat)x y:(CGFloat *)y width:(CGFloat)width
-{
-    const CGFloat rowHeight = 46.0;
-    row.frame = CGRectMake(x, *y, width, rowHeight);
-    for (UIView *sub in row.subviews) {
-        if (sub.tag == 1) { sub.frame = CGRectMake(0, 0, width * 0.42, 16); }
-        if (sub.tag == 2) { sub.frame = CGRectMake(width * 0.42, 0, width * 0.58, 16); }
-        if ([sub isKindOfClass:[UISlider class]]) { sub.frame = CGRectMake(0, 18, width, 24); }
-    }
-    *y += rowHeight + 4.0;
-}
-
 #pragma mark - Действия панели
 
 - (void)closePanel
@@ -3250,22 +3048,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)tabTapped:(UIButton *)sender
 {
     [self selectTab:sender.tag - 100];
-}
-
-/// Текст статуса ESP из холста: AscentESPHostView шлёт уведомление при
-/// изменении info.status. Обновляет подпись на вкладке Misc.
-- (void)espStatusChanged:(NSNotification *)note
-{
-    NSString *status = note.userInfo[@"status"];
-    if (status.length > 0) { _espStatusLabel.text = status; }
-}
-
-/// Хвост журнала из холста ESP (уведомление AscentLogTailChanged) — окно
-/// журнала на вкладке Misc.
-- (void)logTailChanged:(NSNotification *)note
-{
-    NSString *tail = note.userInfo[@"tail"];
-    if (tail != nil) { _logLabel.text = tail; }
 }
 
 - (void)selectTab:(NSInteger)tab
@@ -3307,7 +3089,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     AscentHUDLog(@"[gesture] панель: нажатие на %@ (tag=%ld)",
                  NSStringFromClass([view class]), (long)view.tag);
     if (view == _unloadButton) { [self unloadTapped]; return; }
-    if (view == _espProbeButton) { [self espProbeTapped]; return; }
     if (view.tag >= 100 && view.tag < 100 + (NSInteger)_tabButtons.count) { [self selectTab:view.tag - 100]; }
 }
 
@@ -3419,15 +3200,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         if (slider.value > slider.maximumValue) { slider.value = slider.maximumValue; }
         [self updateSliderLabel:key];
     }
-    // Смещения ESP — тот же порядок: диапазон, значение из plist, подпись.
-    for (UISlider *slider in _espOffSliders) {
-        NSString *key = slider.accessibilityIdentifier;
-        [self configureSlider:slider forKey:key];
-        slider.value = (float)HUDOverlayNumber(key, 0.0);
-        if (slider.value < slider.minimumValue) { slider.value = slider.minimumValue; }
-        if (slider.value > slider.maximumValue) { slider.value = slider.maximumValue; }
-        [self updateSliderLabel:key];
-    }
 }
 
 - (void)configureSlider:(UISlider *)slider forKey:(NSString *)key
@@ -3438,14 +3210,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     } else if ([key isEqualToString:@"cheat.smooth"]) {
         // По заказу: smooth — ОТ 1 ДО 10 (было до 20), стартовое значение 4.
         slider.minimumValue = 1; slider.maximumValue = 10; slider.value = 4;
-    } else if ([key hasPrefix:@"esp.off."]) {
-        // Смещения ESP: это адреса/поля, поэтому диапазон широкий, а шаг —
-        // 1 (шестнадцатеричные значения пишем в подписи). Ползунок здесь не
-        // «тонкая» настройка, а способ перебрать значение на устройстве:
-        // найти точный адрес он не заменит, но грубый проход — вполне.
-        slider.minimumValue = 0;
-        slider.maximumValue = (float)0xFFFF;
-        slider.value = (float)HUDOverlayNumber(key, 0.0);
     } else {
         slider.minimumValue = 0; slider.maximumValue = 300; slider.value = 60;
     }
@@ -3456,8 +3220,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     if ([key isEqualToString:@"cheat.fov"]) { return @""; }   // просто число, по заказу
     // smooth — тоже без буквы «x» (по заказу): показываем просто число.
     if ([key isEqualToString:@"cheat.smooth"]) { return @""; }
-    // Смещения ESP показываем шестнадцатерично — так их и пишут в отчётах.
-    if ([key hasPrefix:@"esp.off."]) { return @""; }
     return @"мс";
 }
 
@@ -3469,16 +3231,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (UISlider *candidate in _sliders) {
         if ([candidate.accessibilityIdentifier isEqualToString:key]) { slider = candidate; break; }
     }
-    for (UISlider *candidate in _espOffSliders) {   // смещения ESP живут в своём списке
-        if ([candidate.accessibilityIdentifier isEqualToString:key]) { slider = candidate; break; }
-    }
-    if ([key hasPrefix:@"esp.off."]) {
-        // Смещение показываем и в шестнадцатеричном виде, и в десятичном:
-        // в plist лежит число, но в отчётах/дампе адрес — hex.
-        label.text = [NSString stringWithFormat:@"0x%X  (%d)", (unsigned)lroundf(slider.value),
-                      (int)lroundf(slider.value)];
-        return;
-    }
+    if (slider == nil) { return; }
     label.text = [NSString stringWithFormat:@"%d%@", (int)lroundf(slider.value), [self suffixForKey:key]];
 }
 
@@ -3888,11 +3641,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         slider.minimumTrackTintColor = accent;
         slider.maximumTrackTintColor = HUDSoftFill();
     }
-    // Строки подбора смещений ESP — те же ползунки, только в своём списке.
-    for (UISlider *slider in _espOffSliders) {
-        slider.minimumTrackTintColor = accent;
-        slider.maximumTrackTintColor = HUDSoftFill();
-    }
 
     // Поле пикера: слева белый (s=0) → справа чистый цвет текущего оттенка.
     // Поля ещё может не быть — пикер собирается лениво при первом открытии.
@@ -4144,26 +3892,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 {
     HUDOverlaySetNumber(sender.accessibilityIdentifier, sender.value);
     [self updateSliderLabel:sender.accessibilityIdentifier];
-
-    // Смещения ESP: значение попало в plist, который GameESP.mm читает на
-    // каждом проходе. Сбрасываем кэш конфига (Explorer перечитывает сразу) и
-    // прогоняем пробу — так на устройстве сразу видно, стало ли чтение лучше,
-    // без закрытия меню и перезапуска приложения.
-    if ([sender.accessibilityIdentifier hasPrefix:@"esp.off."]) {
-        AscentHUDLog(@"[esp] %@ = %d", sender.accessibilityIdentifier, (int)lroundf(sender.value));
-        [self espProbeTapped];
-    }
-}
-
-/// «проба esp»: перезапускает чтение с новыми смещениями и гоняет диагностику.
-/// Сама диагностика (AscentESPRunProbe) уходит на фоновый поток и печатает в
-/// журнал, на каком шаге чтение оборвалось — по этому видно, какое смещение
-/// ещё неверное.
-- (void)espProbeTapped
-{
-    AscentESPSyncFromState();   // перечитать plist и (пере)запустить цикл ESP
-    AscentESPRunProbe();
-    AscentHUDLog(@"[esp] проба запущена");
 }
 
 #pragma mark - Конфиги (вкладка Config)
