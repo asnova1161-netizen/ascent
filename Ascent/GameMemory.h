@@ -15,6 +15,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <mach/mach.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,11 @@ BOOL AscentGameIsAttached(void);
 int AscentGamePid(void);
 uint64_t AscentGameModuleBase(void);
 uint64_t AscentGameModuleSize(void);
+
+/// task-порт привязанного процесса (MACH_PORT_NULL, если не привязаны).
+/// Нужен диагностике для перебора регионы памяти (vm_region_64). Снаружи им
+/// пользоваться аккуратно: это «ключ» к чужому адресному пространству.
+mach_port_t AscentGameTask(void);
 
 /// Чтение/запись памяти удалённого процесса.
 BOOL AscentGameRead(uint64_t address, void *buffer, size_t length);
