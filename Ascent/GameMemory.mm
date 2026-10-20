@@ -437,6 +437,72 @@ uint64_t AscentGameScanPattern(uint64_t start, uint64_t length,
     return found;
 }
 
+#pragma mark - Образы (dyld)
+
+// База образа по имени (например, «UnityFramework»): идём по списку dyld
+// (dyld_all_image_info → infoArray[i].{imageFilePath, imageLoadAddress}),
+// сравниваем путь с нужным именем. Результат кэшируется — база образа
+// не меняется пока игра жива.
+uint64_t AscentGameImageBase(NSString *name)
+{
+    static NSMutableDictionary *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary new]; });
+    if (name == nil) { return 0; }
+    @synchronized (cache) {
+        NSNumber *hit = cache[name];
+        if (hit != nil) { return (uint64_t)hit.unsignedLongLongValue; }
+    }
+
+    uint64_t result = 0;
+    task_dyld_info_data_t dyldInfo;
+    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+    kern_return_t kr = task_info(gGameTask, TASK_DYLD_INFO, (task_info_t)&dyldInfo, &count);
+    if (kr == KERN_SUCCESS && dyldInfo.all_image_info_addr != 0) {
+        // dyld_all_image_infos: +0x00 infoArrayCount (u32), +0x08 infoArray (ptr)
+        uint32_t infoArrayCount = 0;
+        uint64_t infoArray = 0;
+        AscentGameRead(dyldInfo.all_image_info_addr + 0x0, &infoArrayCount, sizeof(infoArrayCount));
+        AscentGameRead(dyldInfo.all_image_info_addr + 0x8, &infoArray, sizeof(infoArray));
+        if (infoArray != 0 && infoArrayCount > 0 && infoArrayCount < 4096) {
+            const char *needle = name.UTF8String;
+            for (uint32_t i = 0; i < infoArrayCount && result == 0; i++) {
+                // dyld_image_info: +0x00 imageLoadAddress, +0x08 imageFilePath, +0x10 imageFileModDate
+                uint64_t entry = infoArray + (uint64_t)i * 24;
+                uint64_t loadAddr = 0;
+                uint64_t filePathPtr = 0;
+                if (!AscentGameRead(entry + 0x0, &loadAddr, sizeof(loadAddr))) { continue; }
+                if (!AscentGameRead(entry + 0x8, &filePathPtr, sizeof(filePathPtr))) { continue; }
+                if (loadAddr == 0 || filePathPtr == 0) { continue; }
+
+                // Читаем C-строку пути кусками, пока не упрёмся в NUL.
+                char path[512];
+                memset(path, 0, sizeof(path));
+                int donePath = 0;
+                for (size_t off = 0; off < sizeof(path) - 1 && !donePath; off += 64) {
+                    char chunk[64];
+                    size_t want = sizeof(path) - 1 - off;
+                    if (want > sizeof(chunk)) { want = sizeof(chunk); }
+                    if (!AscentGameRead(filePathPtr + off, chunk, want)) { break; }
+                    for (size_t k = 0; k < want; k++) {
+                        path[off + k] = chunk[k];
+                        if (chunk[k] == 0) { donePath = 1; break; }
+                    }
+                }
+                path[sizeof(path) - 1] = 0;
+                if (needle != NULL && strstr(path, needle) != NULL) {
+                    result = loadAddr;
+                }
+            }
+        }
+    }
+
+    @synchronized (cache) {
+        cache[name] = @((unsigned long long)result);
+    }
+    return result;
+}
+
 #pragma mark - Переключатели из общего файла
 
 static double AscentSharedNumber(NSString *key)
