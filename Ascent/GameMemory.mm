@@ -13,6 +13,7 @@
 #import "GameMemory.h"
 #import "HUDHelper.h"
 #import "GameESP.h"
+#import "Il2CppDiag.h"
 
 #import <errno.h>
 #import <stdlib.h>
@@ -293,6 +294,7 @@ BOOL AscentGameIsAttached(void)
 int AscentGamePid(void)        { return gGamePid; }
 uint64_t AscentGameModuleBase(void) { return gGameBase; }
 uint64_t AscentGameModuleSize(void) { return gGameSize; }
+mach_port_t AscentGameTask(void)    { return gGameTask; }
 
 void AscentGameDetach(void)
 {
@@ -477,5 +479,8 @@ void AscentGameTick(void)
         // Первое включение — прогон диагностики: по её строкам в журнале
         // видно, какие смещения правильные, а какие надо поправить.
         AscentESPRunProbe();
+        // И диагностика il2cpp: перебираем регионы памяти, ищем метаданные
+        // (global-metadata.dat) и печатаем их шапку. Это данные для резолвера.
+        AscentIl2CppDiagnose();
     }
 }
