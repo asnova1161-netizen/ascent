@@ -691,6 +691,12 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     if (now - _optionsTime > 0.5) {
         _optionsTime = now;
         [self reloadOptions];
+        // Дважды в секунду шлём хвост журнала в меню: строки [il2cpp] и
+        // причины ошибок видны прямо во вкладке Misc.
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"AscentLogTailChanged"
+                          object:nil
+                        userInfo:@{ @"tail" : AscentHUDLogTail(12) }];
     }
 
     // Перерисовываем только когда пришёл новый кадр — иначе таймер гонял бы
@@ -853,6 +859,7 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIScrollView *_scroll;
     UIButton *_unloadButton;
     UILabel *_espStatusLabel;    // статус ESP на вкладке Misc (см. espStatusChanged:)
+    UILabel *_logLabel;          // последние строки журнала прямо в меню (Misc)
     // Вкладка Misc: строка accent color — надпись слева, свотч текущего цвета
     // СПРАВА от неё. Тап по свотчу (и по всей строке — чтобы легко попадать)
     // открывает HSV-пикер. См. togglePicker.
@@ -2343,6 +2350,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         AscentESPGetFrame(NULL, 0, &statusInfo);
         _espStatusLabel.text = (statusInfo.status[0] != '\0')
             ? [NSString stringWithUTF8String:statusInfo.status] : @"esp: —";
+        _logLabel.text = AscentHUDLogTail(12);
         // Вкладку НЕ переключаем через selectTab: при открытии панель и так
         // проявляется целиком, и фейд содержимого поверх этого только мигал бы.
         // Раскладку всё равно делаем заранее — до начала фейда панели.
@@ -2722,6 +2730,21 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
                                                  name:@"AscentESPStatusChanged"
                                                object:nil];
 
+    // Окно журнала (Misc): холст ESP шлёт хвост лога дважды в секунду —
+    // см. AscentESPHostView tick.
+    _logLabel = [[UILabel alloc] init];
+    _logLabel.numberOfLines = 0;
+    _logLabel.clipsToBounds = YES;
+    _logLabel.font = [UIFont fontWithName:@"Menlo" size:9.0]
+                        ?: [UIFont systemFontOfSize:9.0];
+    _logLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
+    _logLabel.text = AscentHUDLogTail(12);
+    [_scroll addSubview:_logLabel];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(logTailChanged:)
+                                                 name:@"AscentLogTailChanged"
+                                               object:nil];
+
     // Имя нового конфига. Тап по полю (см. performTapAtPoint:) вызывает
     // СИСТЕМНУЮ клавиатуру iPhone — как обычное поле ввода в iOS.
     _configNameField = [[UITextField alloc] initWithFrame:CGRectZero];
@@ -2961,6 +2984,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     for (UISlider *slider in _sliders) { slider.superview.hidden = YES; }
     _unloadButton.hidden = YES;
     _espStatusLabel.hidden = YES;
+    _logLabel.hidden = YES;
     _accentRow.hidden = YES;
     _themeRow.hidden = YES;
     _targetRow.hidden = YES;
@@ -3034,6 +3058,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         _espStatusLabel.hidden = NO;
         _espStatusLabel.frame = CGRectMake(x, y, rowWidth, 58);
         y += 58 + 6;
+
+        // Последние строки журнала — прямо в меню: по ним видно, что делает
+        // диагностика ([il2cpp]...) и почему боксы не рисуются, без поиска
+        // отдельного экрана (жалоба «логов не видно»).
+        _logLabel.hidden = NO;
+        _logLabel.frame = CGRectMake(x, y, rowWidth, 104);
+        y += 104 + 6;
     }
 
     _scroll.contentSize = CGSizeMake(w, MAX(y, _scroll.bounds.size.height));
@@ -3103,6 +3134,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 {
     NSString *status = note.userInfo[@"status"];
     if (status.length > 0) { _espStatusLabel.text = status; }
+}
+
+/// Хвост журнала из холста ESP (уведомление AscentLogTailChanged) — окно
+/// журнала на вкладке Misc.
+- (void)logTailChanged:(NSNotification *)note
+{
+    NSString *tail = note.userInfo[@"tail"];
+    if (tail != nil) { _logLabel.text = tail; }
 }
 
 - (void)selectTab:(NSInteger)tab
