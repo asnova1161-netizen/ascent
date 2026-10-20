@@ -455,32 +455,45 @@ void AscentGameTick(void)
     double esp = AscentSharedNumber(@"cheat.esp");
     double aimbot = AscentSharedNumber(@"cheat.aimbot");
 
-    if (esp == gLastEsp && aimbot == gLastAimbot) {
-        return;
-    }
-
-    gLastEsp = esp;
-    gLastAimbot = aimbot;
-
+    BOOL changed = (esp != gLastEsp) || (aimbot != gLastAimbot);
     BOOL anyOn = (esp > 0.5) || (aimbot > 0.5);
-    AscentHUDLog(@"[game] переключатели: esp=%d, aimbot=%d", esp > 0.5, aimbot > 0.5);
+    BOOL attachedBefore = AscentGameIsAttached();
 
-    if (anyOn && !AscentGameIsAttached()) {
-        AscentGameProbe(@"standoff");
-    } else if (!anyOn && AscentGameIsAttached()) {
-        AscentGameDetach();
-        AscentHUDLog(@"[game] все функции выключены — task-порт отпущен");
+    if (changed) {
+        gLastEsp = esp;
+        gLastAimbot = aimbot;
+        AscentHUDLog(@"[game] переключатели: esp=%d, aimbot=%d", esp > 0.5, aimbot > 0.5);
+
+        if (anyOn && !attachedBefore) {
+            AscentGameProbe(@"standoff");
+        } else if (!anyOn && attachedBefore) {
+            AscentGameDetach();
+            AscentHUDLog(@"[game] все функции выключены — task-порт отпущен");
+        }
+    } else if (anyOn && !attachedBefore) {
+        // Чит включён, а доступа нет — игра могла запуститься ПОСЛЕ тумблера.
+        // Раньше привязка делалась ТОЛЬКО при смене переключателя, и если игру
+        // запускали позже, ESP и диагностика не стартовали вообще. Повторяем
+        // тихо раз в ~4.5 с (каждый 3-й тик); логируем только когда процесс
+        // уже появился, чтобы не забивать журнал.
+        static int sAttachRetry = 0;
+        if ((++sAttachRetry % 3) == 0 && AscentGameFindProcess(@"standoff") > 0) {
+            AscentGameProbe(@"standoff");
+        }
     }
+
+    BOOL attachedNow = AscentGameIsAttached();
+    BOOL attachUp = (!attachedBefore && attachedNow);
 
     // ESP живёт своим потоком: включаем чтение только когда есть и
     // переключатель, и task-порт. Иначе фоновый цикл крутился бы впустую.
-    AscentESPSetEnabled(anyOn && AscentGameIsAttached());
-    if (esp > 0.5 && AscentGameIsAttached()) {
-        // Первое включение — прогон диагностики: по её строкам в журнале
-        // видно, какие смещения правильные, а какие надо поправить.
+    AscentESPSetEnabled(anyOn && attachedNow);
+
+    if (esp > 0.5 && attachedNow && (changed || attachUp)) {
+        // Прогон диагностики и при смене тумблера, и при ПЕРВОЙ успешной
+        // привязке — иначе логи не появлялись, если игру запустили позже.
+        // Сама диагностика уходит на фоновый поток с бюджетом (Il2CppDiag.mm).
         AscentESPRunProbe();
-        // И диагностика il2cpp: перебираем регионы памяти, ищем метаданные
-        // (global-metadata.dat) и печатаем их шапку. Это данные для резолвера.
         AscentIl2CppDiagnose();
     }
 }
