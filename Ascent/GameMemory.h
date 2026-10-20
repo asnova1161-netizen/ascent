@@ -37,6 +37,11 @@ int AscentGamePid(void);
 uint64_t AscentGameModuleBase(void);
 uint64_t AscentGameModuleSize(void);
 
+/// База образа по имени (например, «UnityFramework»): идём по списку dyld
+/// привязанного процесса. Результат кэшируется — база не меняется, пока
+/// игра жива. 0 — образ не найден.
+uint64_t AscentGameImageBase(NSString *name);
+
 /// task-порт привязанного процесса (MACH_PORT_NULL, если не привязаны).
 /// Нужен диагностике для перебора регионы памяти (vm_region_64). Снаружи им
 /// пользоваться аккуратно: это «ключ» к чужому адресному пространству.
