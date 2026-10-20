@@ -96,10 +96,17 @@ static const uint64_t kCandidateRva[11] = {
 };
 static const uint32_t kCandidateFieldOff[11] = {16, 16, 16, 16, 16, 64, 56, 32, 40, 16, 16};
 
-// Смещения полей игрока (из реверса).
-static const uint32_t kOffTeam      = 0x14;  // u32 команда
-static const uint32_t kOffTransform = 0x28;  // u64 Transform
-static const uint32_t kOffHealth    = 0x90;  // u32 здоровье (фильтр 1..32)
+// Смещения полей игрока (из f_2840c / f_27ed0).
+static const uint32_t kOffTeam       = 0x14;  // u8 команда
+static const uint32_t kOffComponents = 0x28;  // u64 держатель компонентов
+static const uint32_t kOffHealth     = 0x90;  // u8 здоровье (фильтр 1..32)
+
+// Камера и компоненты (из f_282ac / f_2b854 / f_3c2ec).
+static const uint32_t kOffCamView   = 0x70;  // view: 64 байта
+static const uint32_t kOffCamProj   = 0xB0;  // proj: 64 байта
+static const uint32_t kOffCamCached = 0xF0;  // готовая матрица proj×view (кэш)
+static const uint32_t kOffNodeStride = 0x30; // размер TRS-записи
+static const uint32_t kMaxComponents = 64;   // count компонентов ∈ [1,64]
 
 // Тайминги (мкс), как в оригинале.
 static const uint64_t kScanIntervalUs   = 200ull * 1000ull;    // перескан статиков
@@ -119,7 +126,7 @@ typedef struct {
     uint64_t camObj;      // камера, с которой перечитываем матрицу
     int      matrixReady;
     float    matrix[16];
-    int      matrixSource;  // 1 = cam+0x100, 2 = A×B
+    int      matrixSource;  // 1 = кэш cam+0xF0, 2 = proj × view
 
     uint64_t lastScanUs;
     uint64_t lastRootsUs;
@@ -166,21 +173,44 @@ static uint32_t ESPRead32(uint64_t address)
     return value;
 }
 
+static uint8_t ESPRead8(uint64_t address)
+{
+    uint8_t value = 0;
+    if (!ESPLikePointer(address)) { return 0; }
+    if (!AscentGameRead(address, &value, sizeof(value))) { return 0; }
+    return value;
+}
+
 static BOOL ESPReadBulk(uint64_t address, void *buffer, size_t length)
 {
     if (!ESPLikePointer(address)) { return NO; }
     return AscentGameRead(address, buffer, length);
 }
 
-// Читает il2cpp-массив: количество по +0x18 (в пределах [1; maxCount]),
-// элементы по +0x20 (указатели по 8 байт).
-static BOOL ESPReadArrayInfo(uint64_t array, uint32_t maxCount,
-                             uint64_t *outElements, uint32_t *outCount)
+// Читает массив как readarray_2aee8: count = u32@(obj+0x18) ∈ [1,0x2000];
+// элементы — obj+0x20, если u64@(obj+0x20) похож на выровненный указатель;
+// иначе inner = u64@(obj+0x10): если count2 = u32@(inner+0x18) < 0x2001 и
+// count2 ≥ count — элементы в inner+0x20, иначе снова obj+0x20.
+static BOOL ESPReadArrayInfo(uint64_t obj, uint64_t *outElements, uint32_t *outCount)
 {
-    if (!ESPLikePointer(array)) { return NO; }
-    uint32_t count = ESPRead32(array + 0x18);
-    if (count < 1 || count > maxCount) { return NO; }
-    *outElements = array + 0x20;
+    *outElements = 0;
+    *outCount = 0;
+    if (!ESPLikePointer(obj)) { return NO; }
+    uint32_t count = ESPRead32(obj + 0x18);
+    if (count < 1 || count > 0x2000) { return NO; }
+
+    uint64_t elements = obj + 0x20;
+    uint64_t first = ESPRead64(obj + 0x20);
+    if (!(ESPLikePointer(first) && (first & 7) == 0)) {
+        uint64_t inner = ESPRead64(obj + 0x10);
+        if (inner >= 0x1000001ull) {
+            uint32_t count2 = ESPRead32(inner + 0x18);
+            if (count2 < 0x2001 && count2 >= count) {
+                elements = inner + 0x20;
+            }
+        }
+    }
+    *outElements = elements;
     *outCount = count;
     return YES;
 }
@@ -215,49 +245,94 @@ static void ESPMatMul(float out[16], const float a[16], const float b[16])
     }
 }
 
-// Чтение матрицы с камеры: гейт (пара 0x80 байт по cam+0x70), затем быстрый
-// путь (64 байта по cam+0x100) или произведение пара A×B.
-static int ESPMatrixFromCamera(uint64_t cam, float out[16])
+// Валидация view (f_2b350): все элементы конечны и |v| ≤ 1e5; m33 ∈ [0.9,1.1];
+// нормы первых трёх строк 3x3: |row0|² ≤ 4 и min(|row0|²,|row1|²) ≥ 0.25,
+// |row2|² ∈ [0.25,4].
+static int ESPViewValid(const float *v)
 {
-    uint8_t pair[128];
-    if (!ESPReadBulk(cam + 0x70, pair, sizeof(pair))) { return 0; }
-    if (!ESPMatValid(pair) || !ESPMatValid(pair + 64)) { return 0; }
-
-    uint8_t fast[64];
-    if (ESPReadBulk(cam + 0x100, fast, sizeof(fast)) && ESPMatValid(fast)) {
-        memcpy(out, fast, 64);
-        gResolver.matrixSource = 1;
-        return 1;
+    for (int i = 0; i < 16; i++) {
+        if (!isfinite(v[i]) || fabsf(v[i]) > 1e5f) { return 0; }
     }
-    ESPMatMul(out, (const float *)pair, (const float *)(pair + 64));
-    gResolver.matrixSource = 2;
-    return ESPMatValid(out);
+    if (!(v[15] >= 0.9f && v[15] <= 1.1f)) { return 0; }
+    float row0 = v[0] * v[0] + v[4] * v[4] + v[8] * v[8];
+    float row1 = v[1] * v[1] + v[5] * v[5] + v[9] * v[9];
+    float row2 = v[2] * v[2] + v[6] * v[6] + v[10] * v[10];
+    if (!(row0 <= 4.0f)) { return 0; }
+    if (!(fminf(row0, row1) >= 0.25f)) { return 0; }
+    if (!(row2 >= 0.25f && row2 <= 4.0f)) { return 0; }
+    return 1;
 }
 
-// Обновление матрицы: сначала перечитываем с уже известной камеры,
-// иначе берём камеру из кэмп-холдера (свежий путь).
+// Валидация проекции (f_2b350): все элементы конечны и |v| ≤ 1e5; m00 ∈ [0.1,10].
+static int ESPProjValid(const float *p)
+{
+    for (int i = 0; i < 16; i++) {
+        if (!isfinite(p[i]) || fabsf(p[i]) > 1e5f) { return 0; }
+    }
+    if (!(p[0] >= 0.1f && p[0] <= 10.0f)) { return 0; }
+    return 1;
+}
+
+// Сырые view/proj камеры-ребёнка (f_2b350): 128 байт по camChild+0x70,
+// первые 64 байта — view, вторые — proj.
+static int ESPRawViewProj(uint64_t camChild, float view[16], float proj[16])
+{
+    uint8_t raw[128];
+    if (!ESPReadBulk(camChild + kOffCamView, raw, sizeof(raw))) { return 0; }
+    memcpy(view, raw, 64);
+    memcpy(proj, raw + 64, 64);
+    return ESPViewValid(view) && ESPProjValid(proj);
+}
+
+// Комбинированная матрица (f_2b218): быстрый кэш camChild+0xF0, иначе
+// out = proj × view (column-major) с валидацией f_2b5d0.
+static int ESPCombinedMatrix(uint64_t camChild, float out[16], int *source)
+{
+    uint8_t fast[64];
+    if (ESPReadBulk(camChild + kOffCamCached, fast, sizeof(fast)) && ESPMatValid(fast)) {
+        memcpy(out, fast, 64);
+        if (source != NULL) { *source = 1; }
+        return 1;
+    }
+    float view[16], proj[16];
+    if (!ESPRawViewProj(camChild, view, proj)) { return 0; }
+    ESPMatMul(out, proj, view);
+    if (!ESPMatValid(out)) { return 0; }
+    if (source != NULL) { *source = 2; }
+    return 1;
+}
+
+// Обновление матрицы (f_282ac): camChild = u64@(camHolder+0x10) — обязательный
+// хоп; свежий путь — гейт сырых view/proj и комбинированная матрица; иначе
+// кэш прошлой камеры; при провале — сброс готовности.
 static int ESPUpdateMatrix(void)
 {
-    if (gResolver.matrixReady && ESPLikePointer(gResolver.camObj)) {
-        float m[16];
-        if (ESPMatrixFromCamera(gResolver.camObj, m)) {
-            memcpy(gResolver.matrix, m, 64);
-            return 1;
-        }
-        gResolver.matrixReady = 0;
-        gResolver.camObj = 0;
-    }
-    uint64_t cam = gResolver.camHolder;
-    if (ESPLikePointer(cam)) {
-        float m[16];
-        if (ESPMatrixFromCamera(cam, m)) {
-            gResolver.camObj = cam;
-            memcpy(gResolver.matrix, m, 64);
-            gResolver.matrixReady = 1;
+    ESPResolver *r = &gResolver;
+
+    uint64_t camChild = ESPRead64(r->camHolder + 0x10);
+    if (ESPLikePointer(camChild)) {
+        float view[16], proj[16], out[16];
+        int source = 0;
+        if (ESPRawViewProj(camChild, view, proj) &&
+            ESPCombinedMatrix(camChild, out, &source)) {
+            r->camObj = camChild;
+            r->matrixSource = source;
+            memcpy(r->matrix, out, 64);
+            r->matrixReady = 1;
             return 1;
         }
     }
-    return gResolver.matrixReady;
+
+    if (r->matrixReady && ESPLikePointer(r->camObj)) {
+        float out[16];
+        if (ESPCombinedMatrix(r->camObj, out, NULL)) {
+            memcpy(r->matrix, out, 64);
+            return 1;
+        }
+        r->matrixReady = 0;
+        r->camObj = 0;
+    }
+    return 0;
 }
 
 #pragma mark - Резолвер: скан статиков и поиск корня
@@ -272,146 +347,184 @@ static void ESPScanStatics(uint64_t base)
     r->K1 = ESPRead64(base + kRvaK1);
 }
 
-// Имя класса: il2cpp-строка по klass+0x10, сравниваем первые 3 символа.
-static int ESPClassNameIs(uint64_t klass, char c0, char c1, char c2)
+// Имя класса (strcompare_2afa8): u64@(klass+0x10) — сырая C-строка; читаем
+// 24 байта, [23] = 0, сравнение точное (имя целиком).
+static int ESPClassNameIs(uint64_t klass, const char *name)
 {
-    uint64_t nameObj = ESPRead64(klass + 0x10);
-    if (!ESPLikePointer(nameObj)) { return 0; }
-    uint32_t length = ESPRead32(nameObj + 0x10);
-    if (length < 3) { return 0; }
-    uint16_t chars[3] = {0, 0, 0};
-    if (!ESPReadBulk(nameObj + 0x14, chars, sizeof(chars))) { return 0; }
-    return (chars[0] == (uint16_t)c0 && chars[1] == (uint16_t)c1 && chars[2] == (uint16_t)c2) ? 1 : 0;
+    uint64_t namePtr = ESPRead64(klass + 0x10);
+    if (!ESPLikePointer(namePtr)) { return 0; }
+    uint8_t buffer[24];
+    memset(buffer, 0, sizeof(buffer));
+    if (!ESPReadBulk(namePtr, buffer, sizeof(buffer))) { return 0; }
+    buffer[23] = 0;
+    return strncmp((const char *)buffer, name, sizeof(buffer)) == 0 ? 1 : 0;
 }
 
+// check_27674 (реализация ниже, нужна и поиску корня).
+static int ESPCheckRoot(uint64_t root);
+
 // Поиск «корня» списка игроков и камеры (порт f_270f0):
-//   V1=[base+0xB80B2A0] → +0xB8 → [V3] → массив1;
-//   z → [z+0x10] → +0x18 → массив2; z2 → [z2+0x20]==0 → [z2+0x10] → массив3;
-//   e → klass=[e]; для пары кандидатов: v=[e+off], w=[v]; w==P3 → корень
-//   (флаг 0), иначе w==P2 → запасной корень (флаг 1). Камера: a2=[e+0x20],
-//   [a2]==P4, имя класса «loa» → камера, «qst» → пропуск, прочее — резерв.
+//   v1=[base+0xB80B2A0] → v2=[v1+0xB8] → v3=[v2] → массив1;
+//   elem1 → z1=[elem1+0x10] → z2=[z1+0x18] → массив2;
+//   elem2: u8@(elem2+0x20)==0 → u64@(elem2+0x10) → массив3;
+//   elem3: klass=[elem3]; до 10 кандидатов (первый матч выигрывает, без break),
+//   w=[v] == P3 → корень (флаг 0), w == P2 → запасной (флаг 1). Камера:
+//   a2=[elem3+0x20] при [a2]==P4: имя «loa» → камера безусловно, «qst» —
+//   пропуск, иначе — только если камеры ещё нет. Старые корень/камеру при
+//   неудаче не затираем.
 static void ESPFindRoots(void)
 {
     ESPResolver *r = &gResolver;
     r->lastFail = 0;
 
-    uint64_t candidates[11];
-    for (int c = 0; c < 11; c++) {
+    if (!ESPLikePointer(r->P3) && !ESPLikePointer(r->P2)) { r->lastFail = 1; return; }
+
+    uint64_t candidates[10];
+    for (int c = 0; c < 10; c++) {
         candidates[c] = ESPRead64(r->base + kCandidateRva[c]);
     }
 
     uint64_t v1 = ESPRead64(r->base + kRvaRootProbe);
-    if (!ESPLikePointer(v1)) { r->lastFail = 1; return; }
+    if (!ESPLikePointer(v1)) { r->lastFail = 2; return; }
     uint64_t v2 = ESPRead64(v1 + 0xB8);
-    if (!ESPLikePointer(v2)) { r->lastFail = 1; return; }
+    if (!ESPLikePointer(v2)) { r->lastFail = 2; return; }
     uint64_t v3 = ESPRead64(v2);
-    if (!ESPLikePointer(v3)) { r->lastFail = 2; return; }
+    if (!ESPLikePointer(v3)) { r->lastFail = 3; return; }
 
     uint64_t elements1 = 0;
     uint32_t count1 = 0;
-    if (!ESPReadArrayInfo(v3, 0x2000, &elements1, &count1)) { r->lastFail = 3; return; }
+    if (!ESPReadArrayInfo(v3, &elements1, &count1)) { r->lastFail = 3; return; }
 
     uint64_t foundRoot = 0;
     uint64_t fallbackRoot = 0;
     uint64_t cam = 0;
 
     for (uint32_t i = 0; i < count1; i++) {
-        uint64_t z = ESPRead64(elements1 + i * 8);
-        if (!ESPLikePointer(z)) { continue; }
-        uint64_t a = ESPRead64(z + 0x10);
-        if (!ESPLikePointer(a)) { continue; }
-        uint64_t b = ESPRead64(a + 0x18);
-        if (!ESPLikePointer(b)) { continue; }
+        uint64_t elem1 = ESPRead64(elements1 + i * 8);
+        if (!ESPLikePointer(elem1)) { continue; }
+        uint64_t z1 = ESPRead64(elem1 + 0x10);
+        if (!ESPLikePointer(z1)) { continue; }
+        uint64_t z2 = ESPRead64(z1 + 0x18);
 
         uint64_t elements2 = 0;
         uint32_t count2 = 0;
-        if (!ESPReadArrayInfo(b, 0x2000, &elements2, &count2)) { continue; }
+        if (!ESPReadArrayInfo(z2, &elements2, &count2)) { continue; }
 
         for (uint32_t j = 0; j < count2; j++) {
-            uint64_t z2 = ESPRead64(elements2 + j * 8);
-            if (!ESPLikePointer(z2)) { continue; }
-            if (ESPRead32(z2 + 0x20) != 0) { continue; }
-            uint64_t source3 = ESPRead64(z2 + 0x10);
-            if (!ESPLikePointer(source3)) { continue; }
+            uint64_t elem2 = ESPRead64(elements2 + j * 8);
+            if (!ESPLikePointer(elem2)) { continue; }
+            if (ESPRead8(elem2 + 0x20) != 0) { continue; }   // ровно один байт
+            uint64_t z3 = ESPRead64(elem2 + 0x10);
 
             uint64_t elements3 = 0;
             uint32_t count3 = 0;
-            if (!ESPReadArrayInfo(source3, 0x800, &elements3, &count3)) { continue; }
+            if (!ESPReadArrayInfo(z3, &elements3, &count3)) { continue; }
 
             for (uint32_t k = 0; k < count3; k++) {
-                uint64_t obj = ESPRead64(elements3 + k * 8);
-                if (!ESPLikePointer(obj)) { continue; }
-                uint64_t klass = ESPRead64(obj);
-                if (!ESPLikePointer(klass)) { continue; }
+                uint64_t elem3 = ESPRead64(elements3 + k * 8);
+                if (!ESPLikePointer(elem3)) { continue; }
+                uint64_t klass = ESPRead64(elem3);   // без проверки — как в оригинале
 
-                if (!foundRoot || !fallbackRoot) {
-                    for (int c = 0; c < 11; c++) {
+                if (!foundRoot) {
+                    for (int c = 0; c < 10; c++) {
                         if (candidates[c] == 0 || klass != candidates[c]) { continue; }
-                        uint64_t v = ESPRead64(obj + kCandidateFieldOff[c]);
-                        if (!ESPLikePointer(v)) { break; }
+                        uint64_t v = ESPRead64(elem3 + kCandidateFieldOff[c]);
+                        if (!ESPLikePointer(v)) { continue; }
                         uint64_t w = ESPRead64(v);
-                        if (w == r->P3 && r->P3 >= 0x1000001ull) {
-                            if (!foundRoot) { foundRoot = v; }
-                        } else if (w == r->P2 && r->P2 >= 0x1000001ull && !fallbackRoot) {
-                            fallbackRoot = v;
+                        if (w == r->P3 && ESPLikePointer(r->P3)) {
+                            foundRoot = v;
+                        } else if (w == r->P2 && ESPLikePointer(r->P2)) {
+                            if (!fallbackRoot) { fallbackRoot = v; }
                         }
-                        break;
                     }
                 }
 
-                if (!cam) {
-                    uint64_t a2 = ESPRead64(obj + 0x20);
-                    if (ESPLikePointer(a2) && ESPRead64(a2) == r->P4) {
-                        if (ESPClassNameIs(klass, 'l', 'o', 'a')) {
-                            cam = a2;
-                        } else if (!ESPClassNameIs(klass, 'q', 's', 't')) {
-                            cam = a2;  // резерв: не «loa» и не «qst»
-                        }
+                uint64_t a2 = ESPRead64(elem3 + 0x20);
+                if (!ESPLikePointer(a2)) { continue; }
+                if (ESPRead64(a2) == r->P4) {
+                    if (ESPClassNameIs(klass, "loa")) {
+                        cam = a2;                       // «loa» перезаписывает камеру
+                    } else if (!ESPClassNameIs(klass, "qst")) {
+                        if (!cam) { cam = a2; }
                     }
                 }
             }
         }
     }
 
-    r->camHolder = cam;
-
     uint64_t root = foundRoot ? foundRoot : fallbackRoot;
+
+    if (ESPLikePointer(cam) && cam != r->camHolder) {
+        r->camHolder = cam;
+        r->camObj = 0;
+        r->matrixReady = 0;
+    }
+
     if (!ESPLikePointer(root)) {
         if (r->lastFail == 0) { r->lastFail = 4; }
         return;
     }
+    if (root == r->rootA) { return; }
 
-    // check_27674: корень валиден, если [root] равен P3 или P2 (оба — heap).
-    uint64_t w = ESPRead64(root);
-    int w8 = (w != r->P3) ? 1 : (r->P3 < 0x1000001ull);
-    if (w8 == 1 && w == r->P2 && r->P2 >= 0x1000001ull) {
-        r->rootA = root;
-        r->rootFlag = 1;
-    } else if (w == r->P3 && r->P3 >= 0x1000001ull) {
-        r->rootA = root;
-        r->rootFlag = 0;
-    } else {
-        r->lastFail = 5;
-    }
+    // check_27674: [root] == P3 → флаг 0; иначе [root] == P2 → флаг 1.
+    if (!ESPCheckRoot(root)) { r->lastFail = 5; return; }
+
+    r->rootA = root;
+    r->camObj = 0;
+    r->matrixReady = 0;
 }
 
 #pragma mark - Резолвер: игроки
 
-// validate_275a4: объект — экземпляр класса игроков (klass == K1) и у него
-// есть Transform.
-static int ESPValidatePlayerObject(uint64_t obj)
+// check_27674: корень валиден по классу: [root] == P3 → флаг 0; иначе
+// [root] == P2 → флаг 1; иначе/при невалидном статике — 0.
+static int ESPCheckRoot(uint64_t root)
 {
-    if (!ESPLikePointer(obj)) { return 0; }
-    uint64_t klass = ESPRead64(obj);
-    if (!ESPLikePointer(klass)) { return 0; }
-    if (!ESPLikePointer(gResolver.K1) || klass != gResolver.K1) { return 0; }
-    return ESPLikePointer(ESPRead64(obj + kOffTransform)) ? 1 : 0;
+    ESPResolver *r = &gResolver;
+    if (!ESPLikePointer(root)) { return 0; }
+    uint64_t klass = ESPRead64(root);
+    if (klass == r->P3 && ESPLikePointer(r->P3)) { r->rootFlag = 0; return 1; }
+    if (klass == r->P2 && ESPLikePointer(r->P2)) { r->rootFlag = 1; return 1; }
+    return 0;
 }
 
-// Список игроков: owner = [rootA + (флаг ? 0x50 : 0x40)] — объект-список.
-// Пробуем две вложенности: owner сам il2cpp-массив (вариант 1) или
-// массив лежит по owner+0x20 (вариант 2). Далее фильтры оригинала:
-// объект — K1, здоровье u32@(obj+0x90) ∈ [1..32], без дублей.
+// validate_275a4: цепочка списка игроков от корня:
+//   owner = [root + (флаг ? 0x50 : 0x40)] → [owner+0x30] → [..+0x18] → [..+0x10];
+//   годен, если не (countA ≤ countB и ((countA-1)|(countB-1)) ≥ 0x2000).
+static int ESPValidateRoot(uint64_t root)
+{
+    ESPResolver *r = &gResolver;
+    uint64_t t1 = ESPRead64(root + (r->rootFlag ? 0x50 : 0x40));
+    if (!ESPLikePointer(t1)) { return 0; }
+    uint64_t t2 = ESPRead64(t1 + 0x30);
+    if (!ESPLikePointer(t2)) { return 0; }
+    uint64_t t3 = ESPRead64(t2 + 0x18);
+    if (!ESPLikePointer(t3)) { return 0; }
+    uint64_t t4 = ESPRead64(t3 + 0x10);
+    if (!ESPLikePointer(t4)) { return 0; }
+
+    uint32_t countA = ESPRead32(t3 + 0x18);
+    uint32_t countB = ESPRead32(t4 + 0x18);
+    if (countA <= countB) {
+        uint32_t merged = (countA - 1u) | (countB - 1u);
+        if (merged >= 0x2000u) { return 0; }
+    }
+    return 1;
+}
+
+// Ежетиковая проверка кэшированного корня (f_update): check_27674 + validate_275a4.
+static int ESPRootStillValid(void)
+{
+    if (!ESPLikePointer(gResolver.rootA)) { return 0; }
+    if (!ESPCheckRoot(gResolver.rootA)) { return 0; }
+    return ESPValidateRoot(gResolver.rootA);
+}
+
+// Список игроков (порт f_27ed0): owner = [rootA + (флаг ? 0x50 : 0x40)];
+// t2 = [owner+0x30]; t3 = [t2+0x18]; items = [t3+0x10];
+// count = u32@(t3+0x18) ∈ [1,0x800]; игрок = u64@(u64@(items+0x20+i*8)).
+// Свои пропускаются по P1; если P1 нет — фильтр здоровья u8@(obj+0x90) ∈ [1,32];
+// без дублей, не больше 64.
 static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
 {
     ESPResolver *r = &gResolver;
@@ -419,36 +532,35 @@ static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
 
     uint64_t owner = ESPRead64(r->rootA + (r->rootFlag ? 0x50 : 0x40));
     if (!ESPLikePointer(owner)) { return -2; }
+    uint64_t t2 = ESPRead64(owner + 0x30);
+    if (!ESPLikePointer(t2)) { return -2; }
+    uint64_t t3 = ESPRead64(t2 + 0x18);
+    if (!ESPLikePointer(t3)) { return -2; }
+    uint64_t items = ESPRead64(t3 + 0x10);
+    if (!ESPLikePointer(items)) { return -3; }
+    uint32_t count = ESPRead32(t3 + 0x18);
+    if (count < 1 || count > 0x800) { return -3; }
 
-    uint64_t elements = 0;
-    uint32_t count = 0;
-    int variant = 0;
-    if (ESPReadArrayInfo(owner, 0x800, &elements, &count)) {
-        variant = 1;
-    } else {
-        uint64_t inner = ESPRead64(owner + 0x20);
-        if (ESPReadArrayInfo(inner, 0x800, &elements, &count)) {
-            variant = 2;
-        }
-    }
-    if (variant == 0) { return -3; }
-    r->listVariant = variant;
+    r->listVariant = 1;
     r->nEntries = count;
-
-    uint32_t limit = count;
-    if (limit > (uint32_t)capacity) { limit = (uint32_t)capacity; }
 
     int outCount = 0;
     uint32_t rejected = 0;
     uint64_t seen[64];
     int seenCount = 0;
 
-    for (uint32_t i = 0; i < limit; i++) {
-        uint64_t obj = ESPRead64(elements + i * 8);
-        if (!ESPValidatePlayerObject(obj)) { rejected++; continue; }
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t raw = ESPRead64(items + 0x20 + (uint64_t)i * 8);
+        if (!ESPLikePointer(raw)) { rejected++; continue; }
+        uint64_t obj = ESPRead64(raw);          // двойное разыменование
+        if (!ESPLikePointer(obj)) { rejected++; continue; }
 
-        uint32_t health = ESPRead32(obj + kOffHealth);
-        if (health < 1 || health > 32) { rejected++; continue; }
+        if (ESPLikePointer(r->P1)) {
+            if (obj == r->P1) { rejected++; continue; }
+        } else {
+            uint32_t health = ESPRead8(obj + kOffHealth);
+            if (health < 1 || health > 32) { rejected++; continue; }
+        }
 
         int duplicate = 0;
         for (int s = 0; s < seenCount; s++) {
@@ -458,13 +570,15 @@ static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
         if (seenCount < 64) { seen[seenCount++] = obj; }
 
         outObjects[outCount++] = obj;
+        if (outCount >= capacity || outCount >= 64) { break; }
     }
 
     r->nRejected = rejected;
     return outCount;
 }
 
-// Моя команда: u32@(u64@(u64@(rootA+0xC0)+0xB0)+0x13) — только для корня P3.
+// Моя команда: u8@(u64@(u64@(rootA+0xC0)+0xB0)+0x13) — только для корня P3
+// (флаг 0). При корне P2 фильтр команды выключен (selfTeam = 0).
 static uint32_t ESPMyTeam(void)
 {
     if (gResolver.rootFlag != 0) { return 0; }
@@ -472,7 +586,7 @@ static uint32_t ESPMyTeam(void)
     if (!ESPLikePointer(a)) { return 0; }
     uint64_t b = ESPRead64(a + 0xB0);
     if (!ESPLikePointer(b)) { return 0; }
-    return ESPRead32(b + 0x13);
+    return ESPRead8(b + 0x13);
 }
 
 #pragma mark - Резолвер: позиция трансформа
@@ -510,11 +624,24 @@ static void ESPRead48(uint64_t address, float out[12])
     memcpy(out, buffer, 48);
 }
 
+// Проверка позиции (f_2b7cc): не (0,0,0), всё конечно, max(|x|,|y|,|z|) ≤ 20000.
+static int ESPPosValid(const float p[3])
+{
+    if (p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f) { return 0; }
+    for (int i = 0; i < 3; i++) {
+        if (!isfinite(p[i])) { return 0; }
+    }
+    float m = fabsf(p[0]);
+    if (fabsf(p[1]) > m) { m = fabsf(p[1]); }
+    if (fabsf(p[2]) > m) { m = fabsf(p[2]); }
+    return m <= 20000.0f ? 1 : 0;
+}
+
 // Позиция мира из Transform (порт get_position_by_transform_with):
-//   P = [transform+0x10]; ptrA = [P+0x28]; index = u32@(P+0x30);
-//   ptrB = [ptrA+0x18] (TRS-записи по 48 байт), ptrC = [ptrA+0x20] (родители);
+//   P = [transform+0x10]; arr = [P+0x28]; index = u32@(P+0x30);
+//   nodes = [arr+0x18] (TRS-записи по 48 байт), parents = [arr+0x20] (индексы);
 //   acc = своя позиция; далее ≤50 раз: acc = parent.pos + parent.quat ×
-//   (parent.scale ⊙ acc); parent<0 — стоп.
+//   (parent.scale ⊙ acc); индекс < 0 — стоп.
 static int ESPPositionFromTransform(uint64_t transform, float out[3])
 {
     uint64_t p = ESPRead64(transform + 0x10);
@@ -529,15 +656,15 @@ static int ESPPositionFromTransform(uint64_t transform, float out[3])
     if (!ESPLikePointer(ptrB) || !ESPLikePointer(ptrC)) { return 0; }
 
     float entry[12];
-    ESPRead48(ptrB + (uint64_t)index * 48, entry);
-    if (!ESPVecFinite1e5(entry) || !ESPQuatOk(entry + 3)) { return 0; }
+    ESPRead48(ptrB + (uint64_t)index * kOffNodeStride, entry);
+    if (!ESPVecFinite1e5(entry) || !ESPQuatOk(entry + 3) || !ESPScaleOk(entry + 7)) { return 0; }
 
     float ax = entry[0], ay = entry[1], az = entry[2];
     uint32_t parent = ESPRead32(ptrC + (uint64_t)index * 4);
 
     for (int iter = 50; iter > 0 && (parent & 0x80000000u) == 0; iter--) {
         float e[12];
-        ESPRead48(ptrB + (uint64_t)parent * 48, e);
+        ESPRead48(ptrB + (uint64_t)parent * kOffNodeStride, e);
         if (!ESPVecFinite1e5(e) || !ESPQuatOk(e + 3) || !ESPScaleOk(e + 7)) { return 0; }
 
         float px = e[0], py = e[1], pz = e[2];
@@ -566,6 +693,60 @@ static int ESPPositionFromTransform(uint64_t transform, float out[3])
     out[1] = ay;
     out[2] = az;
     return 1;
+}
+
+// Компоненты игрока (f_2b854): a = [obj+0x28]; b = [a+0x10];
+// elements = [b+0x10]; count = u32@(b+0x18) ∈ [1,64].
+static int ESPComponentElements(uint64_t obj, uint64_t *outElements, uint32_t *outCount)
+{
+    uint64_t a = ESPRead64(obj + kOffComponents);
+    if (a < 0x1000001ull) { return 0; }
+    uint64_t b = ESPRead64(a + 0x10);
+    if (b < 0x1000001ull) { return 0; }
+    uint64_t elements = ESPRead64(b + 0x10);
+    if (elements < 0x1000001ull) { return 0; }
+    uint32_t count = ESPRead32(b + 0x18);
+    if (count < 1 || count > kMaxComponents) { return 0; }
+    *outElements = elements;
+    *outCount = count;
+    return 1;
+}
+
+// Позиция по компоненту (f_2b6f8): трансформ по [comp+0x28], иначе по [comp+0x30].
+static int ESPPositionFromComponent(uint64_t comp, float out[3])
+{
+    uint64_t t = ESPRead64(comp + 0x28);
+    if (t >= 0x1000001ull && ESPPositionFromTransform(t, out) && ESPPosValid(out)) { return 1; }
+    t = ESPRead64(comp + 0x30);
+    if (t >= 0x1000001ull && ESPPositionFromTransform(t, out) && ESPPosValid(out)) { return 1; }
+    return 0;
+}
+
+// Позиция игрока (порт f_2840c): сначала компонент с klass == K1 → трансформ
+// из [comp+0x28] → обход родителей; затем любой компонент через f_2b6f8.
+static int ESPPositionForPlayer(uint64_t obj, float out[3])
+{
+    uint64_t elements = 0;
+    uint32_t count = 0;
+    if (!ESPComponentElements(obj, &elements, &count)) { return 0; }
+
+    if (ESPLikePointer(gResolver.K1)) {
+        for (uint32_t i = 0; i < count; i++) {
+            uint64_t comp = ESPRead64(elements + 0x20 + (uint64_t)i * 8);
+            if (!ESPLikePointer(comp)) { continue; }
+            if (ESPRead64(comp) != gResolver.K1) { continue; }
+            uint64_t t = ESPRead64(comp + 0x28);
+            if (!ESPLikePointer(t)) { continue; }
+            if (ESPPositionFromTransform(t, out) && ESPPosValid(out)) { return 1; }
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t comp = ESPRead64(elements + 0x20 + (uint64_t)i * 8);
+        if (!ESPLikePointer(comp)) { continue; }
+        if (ESPPositionFromComponent(comp, out)) { return 1; }
+    }
+    return 0;
 }
 
 #pragma mark - Резолвер: проекция
@@ -621,7 +802,13 @@ static void AscentESPTickOnce(void)
         ESPScanStatics(r->base);
     }
 
-    // 2) Корень и камера: полный поиск раз в 8 с; повтор через 3.1 с, пока корня нет.
+    // 2) Корень и камера. Каждый тик кэшированный корень перепроверяется
+    // (f_update: check_27674 + validate_275a4); при провале — полный поиск.
+    if (ESPLikePointer(r->rootA) && !ESPRootStillValid()) {
+        r->rootA = 0;
+        r->camObj = 0;
+        r->matrixReady = 0;
+    }
     BOOL needRoots = (r->lastRootsUs == 0 || now - r->lastRootsUs >= kRootsIntervalUs ||
                       (!ESPLikePointer(r->rootA) && now - r->lastRootsUs >= kRootsRetryUs));
     if (needRoots) {
@@ -660,17 +847,16 @@ static void AscentESPTickOnce(void)
     for (int i = 0; i < count && playerCount < kAscentESPMaxPlayers; i++) {
         uint64_t obj = objects[i];
 
-        uint32_t team = ESPRead32(obj + kOffTeam);
-        uint32_t health = ESPRead32(obj + kOffHealth);
-        uint64_t transform = ESPRead64(obj + kOffTransform);
-
         float pos[3];
-        if (!ESPPositionFromTransform(transform, pos)) { continue; }
+        if (!ESPPositionForPlayer(obj, pos)) { continue; }
+
+        uint32_t team = ESPRead8(obj + kOffTeam);
+        uint32_t health = ESPRead8(obj + kOffHealth);
 
         CGPoint feet;
         CGPoint headPoint;
         float depth = 0.0f;
-        float headPos[3] = {pos[0], pos[1] + 1.8f, pos[2]};
+        float headPos[3] = {pos[0], pos[1] + 1.75f, pos[2]};
         if (!ESPWorldToScreen(r->matrix, pos, &feet, &depth)) { continue; }
         if (!ESPWorldToScreen(r->matrix, headPos, &headPoint, NULL)) { continue; }
 
@@ -696,7 +882,7 @@ static void AscentESPTickOnce(void)
     char status[256];
     snprintf(status, sizeof(status),
              "ESP: корень ok (флаг %d), матр %s, список v%d, игроков %d (отбрано %u)",
-             r->rootFlag, r->matrixSource == 1 ? "быстрая" : "A×B",
+             r->rootFlag, r->matrixSource == 1 ? "быстрая" : "P×V",
              r->listVariant, playerCount, r->nRejected);
     AscentESPPublish(players, playerCount, YES, status);
 
