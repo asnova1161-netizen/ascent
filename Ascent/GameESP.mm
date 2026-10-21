@@ -101,6 +101,9 @@ static const uint32_t kOffTeam       = 0x14;  // u8 команда
 static const uint32_t kOffComponents = 0x28;  // u64 держатель компонентов
 static const uint32_t kOffHealth     = 0x90;  // u8 здоровье (фильтр 1..32)
 
+// Держатель трансформа игрока (f_2840c): [obj+0x70] → [+0x10] → трансформ.
+static const uint32_t kOffPlayerHolder = 0x70;
+
 // Камера и компоненты (из f_282ac / f_2b854 / f_3c2ec).
 static const uint32_t kOffCamView   = 0x70;  // view: 64 байта
 static const uint32_t kOffCamProj   = 0xB0;  // proj: 64 байта
@@ -363,6 +366,33 @@ static int ESPClassNameIs(uint64_t klass, const char *name)
 // check_27674 (реализация ниже, нужна и поиску корня).
 static int ESPCheckRoot(uint64_t root);
 
+// Цепочка списка игроков от ПРОИЗВОЛЬНОГО корня с заданным флагом:
+//   [root + (флаг?0x50:0x40)] → [..+0x30] → [..+0x18] → [..+0x10];
+// годна, если счётчики правдоподобны (как validate_275a4) и count ∈ [1,0x800].
+// Нужна, когда теги корня (P2/P3) не прочитались: находим корень по тому,
+// что от него реально строится список игроков.
+static int ESPListCountForRoot(uint64_t root, uint32_t flag, uint32_t *outCount)
+{
+    uint64_t t1 = ESPRead64(root + (flag ? 0x50 : 0x40));
+    if (!ESPLikePointer(t1)) { return 0; }
+    uint64_t t2 = ESPRead64(t1 + 0x30);
+    if (!ESPLikePointer(t2)) { return 0; }
+    uint64_t t3 = ESPRead64(t2 + 0x18);
+    if (!ESPLikePointer(t3)) { return 0; }
+    uint64_t t4 = ESPRead64(t3 + 0x10);
+    if (!ESPLikePointer(t4)) { return 0; }
+
+    uint32_t countA = ESPRead32(t3 + 0x18);
+    uint32_t countB = ESPRead32(t4 + 0x18);
+    if (countA < 1 || countA > 0x800) { return 0; }
+    if (countA <= countB) {
+        uint32_t merged = (countA - 1u) | (countB - 1u);
+        if (merged >= 0x2000u) { return 0; }
+    }
+    if (outCount != NULL) { *outCount = countA; }
+    return 1;
+}
+
 // Поиск «корня» списка игроков и камеры (порт f_270f0):
 //   v1=[base+0xB80B2A0] → v2=[v1+0xB8] → v3=[v2] → массив1;
 //   elem1 → z1=[elem1+0x10] → z2=[z1+0x18] → массив2;
@@ -377,7 +407,10 @@ static void ESPFindRoots(void)
     ESPResolver *r = &gResolver;
     r->lastFail = 0;
 
-    if (!ESPLikePointer(r->P3) && !ESPLikePointer(r->P2)) { r->lastFail = 1; return; }
+    // Теги корня (P3/P2) могут не прочитаться на другой версии игры — тогда
+    // работаем «по содержимому»: ищем любой узел, у которого цепочка списка
+    // игроков даёт правдоподобное число записей.
+    const BOOL haveTags = ESPLikePointer(r->P3) || ESPLikePointer(r->P2);
 
     uint64_t candidates[10];
     for (int c = 0; c < 10; c++) {
@@ -395,9 +428,24 @@ static void ESPFindRoots(void)
     uint32_t count1 = 0;
     if (!ESPReadArrayInfo(v3, &elements1, &count1)) { r->lastFail = 3; return; }
 
+    // Поля-кандидаты, по которым у узла лежит ссылка на корень. В оригинале
+    // смещение берётся из таблицы вместе с адресом класса; здесь мы эту
+    // таблицу дублируем, но дополнительно перебираем ВСЕ типовые смещения —
+    // так поиск переживает смену таблицы при обновлении игры.
+    static const uint32_t kFieldSweep[] = {
+        0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60
+    };
+    static const int kFieldSweepCount = (int)(sizeof(kFieldSweep) / sizeof(kFieldSweep[0]));
+
     uint64_t foundRoot = 0;
     uint64_t fallbackRoot = 0;
+    uint64_t validatedRoot[2] = { 0, 0 };
     uint64_t cam = 0;
+
+    // Бюджет на «дорогие» запасные проверки: полный перебор полей по всем
+    // узлам — это десятки тысяч чтений, а тик идёт на главном runloop.
+    // Ограничиваемся первыми 96 узлами — этого с запасом хватает.
+    int fallbackBudget = 96;
 
     for (uint32_t i = 0; i < count1; i++) {
         uint64_t elem1 = ESPRead64(elements1 + i * 8);
@@ -425,7 +473,8 @@ static void ESPFindRoots(void)
                 if (!ESPLikePointer(elem3)) { continue; }
                 uint64_t klass = ESPRead64(elem3);   // без проверки — как в оригинале
 
-                if (!foundRoot) {
+                // 1) Точный путь оригинала: klass из таблицы кандидатов.
+                if (!foundRoot && haveTags) {
                     for (int c = 0; c < 10; c++) {
                         if (candidates[c] == 0 || klass != candidates[c]) { continue; }
                         uint64_t v = ESPRead64(elem3 + kCandidateFieldOff[c]);
@@ -439,13 +488,65 @@ static void ESPFindRoots(void)
                     }
                 }
 
+                // 2) Таблица не совпала — сверяем класс по всем типовым полям.
+                if (!foundRoot && haveTags && fallbackBudget > 0) {
+                    fallbackBudget--;
+                    for (int e = 0; e < kFieldSweepCount; e++) {
+                        uint64_t v = ESPRead64(elem3 + kFieldSweep[e]);
+                        if (!ESPLikePointer(v)) { continue; }
+                        uint64_t w = ESPRead64(v);
+                        if (w == r->P3 && ESPLikePointer(r->P3)) {
+                            foundRoot = v;
+                            break;
+                        }
+                        if (w == r->P2 && ESPLikePointer(r->P2) && !fallbackRoot) {
+                            fallbackRoot = v;
+                        }
+                    }
+                }
+
+                // 3) Тегов нет вовсе — проверяем саму цепочку списка игроков:
+                //    годится любой узел, у которого она даёт [1, 0x800] записей.
+                if (!haveTags && fallbackBudget > 0) {
+                    fallbackBudget--;
+                    for (int flag = 0; flag < 2; flag++) {
+                        if (validatedRoot[flag] != 0) { continue; }
+                        for (int e = 0; e < kFieldSweepCount; e++) {
+                            uint64_t v = ESPRead64(elem3 + kFieldSweep[e]);
+                            if (!ESPLikePointer(v)) { continue; }
+                            uint32_t chainCount = 0;
+                            if (ESPListCountForRoot(v, flag, &chainCount)) {
+                                validatedRoot[flag] = v;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Камера: 1) как в оригинале — [a2] == P4; 2) по содержимому —
+                // если у ребёнка a2 валидная матрица вида/проекции.
                 uint64_t a2 = ESPRead64(elem3 + 0x20);
                 if (!ESPLikePointer(a2)) { continue; }
-                if (ESPRead64(a2) == r->P4) {
+
+                BOOL isCam = NO;
+                if (ESPLikePointer(r->P4) && ESPRead64(a2) == r->P4) {
                     if (ESPClassNameIs(klass, "loa")) {
                         cam = a2;                       // «loa» перезаписывает камеру
+                        isCam = YES;
                     } else if (!ESPClassNameIs(klass, "qst")) {
                         if (!cam) { cam = a2; }
+                        isCam = YES;
+                    }
+                }
+                if (!isCam && !cam) {
+                    // Содержимое: у камеры ребёнок держит 128 байт view/proj
+                    // по +0x70 и они проходят валидацию.
+                    uint64_t child = ESPRead64(a2 + 0x10);
+                    if (ESPLikePointer(child)) {
+                        float viewCheck[16], projCheck[16];
+                        if (ESPRawViewProj(child, viewCheck, projCheck)) {
+                            cam = a2;
+                        }
                     }
                 }
             }
@@ -453,6 +554,11 @@ static void ESPFindRoots(void)
     }
 
     uint64_t root = foundRoot ? foundRoot : fallbackRoot;
+    int rootFlagFromContent = -1;
+    if (!ESPLikePointer(root) && !haveTags) {
+        if (validatedRoot[0] != 0) { root = validatedRoot[0]; rootFlagFromContent = 0; }
+        else if (validatedRoot[1] != 0) { root = validatedRoot[1]; rootFlagFromContent = 1; }
+    }
 
     if (ESPLikePointer(cam) && cam != r->camHolder) {
         r->camHolder = cam;
@@ -466,8 +572,13 @@ static void ESPFindRoots(void)
     }
     if (root == r->rootA) { return; }
 
-    // check_27674: [root] == P3 → флаг 0; иначе [root] == P2 → флаг 1.
-    if (!ESPCheckRoot(root)) { r->lastFail = 5; return; }
+    if (rootFlagFromContent >= 0) {
+        // Корень найден по содержимому: тег неизвестен, но цепочка проверена.
+        r->rootFlag = (uint32_t)rootFlagFromContent;
+    } else if (!ESPCheckRoot(root)) {
+        r->lastFail = 5;
+        return;
+    }
 
     r->rootA = root;
     r->camObj = 0;
@@ -722,10 +833,20 @@ static int ESPPositionFromComponent(uint64_t comp, float out[3])
     return 0;
 }
 
-// Позиция игрока (порт f_2840c): сначала компонент с klass == K1 → трансформ
-// из [comp+0x28] → обход родителей; затем любой компонент через f_2b6f8.
+// Позиция игрока (порт f_2840c): сначала держатель [obj+0x70] → трансформ
+// [holder+0x10] (это главный путь оригинала), затем компонент с klass == K1,
+// затем любой компонент через f_2b6f8.
 static int ESPPositionForPlayer(uint64_t obj, float out[3])
 {
+    uint64_t holder = ESPRead64(obj + kOffPlayerHolder);
+    if (ESPLikePointer(holder)) {
+        uint64_t holderTransform = ESPRead64(holder + 0x10);
+        if (ESPLikePointer(holderTransform) &&
+            ESPPositionFromTransform(holderTransform, out) && ESPPosValid(out)) {
+            return 1;
+        }
+    }
+
     uint64_t elements = 0;
     uint32_t count = 0;
     if (!ESPComponentElements(obj, &elements, &count)) { return 0; }
