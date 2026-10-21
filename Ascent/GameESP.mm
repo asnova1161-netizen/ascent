@@ -440,7 +440,8 @@ static void ESPFindRoots(void)
     uint64_t foundRoot = 0;
     uint64_t fallbackRoot = 0;
     uint64_t validatedRoot[2] = { 0, 0 };
-    uint64_t cam = 0;
+    uint64_t camExact = 0;      // камера по точному признаку оригинала ([a2] == P4)
+    uint64_t camContent = 0;    // запасная: у ребёнка валидные view/proj
 
     // Бюджет на «дорогие» запасные проверки: полный перебор полей по всем
     // узлам — это десятки тысяч чтений, а тик идёт на главном runloop.
@@ -523,35 +524,34 @@ static void ESPFindRoots(void)
                     }
                 }
 
-                // Камера: 1) как в оригинале — [a2] == P4; 2) по содержимому —
-                // если у ребёнка a2 валидная матрица вида/проекции.
+                // Камера. Сначала — точный признак оригинала: a2=[elem3+0x20],
+                // [a2]==P4; имя «loa» ставит камеру безусловно, «qst» — пропуск,
+                // иначе только если камеры ещё нет. Запасной путь (по валидным
+                // view/proj у ребёнка) применяется ТОЛЬКО если точный не дал
+                // ничего — иначе он может подсунуть чужой объект.
                 uint64_t a2 = ESPRead64(elem3 + 0x20);
                 if (!ESPLikePointer(a2)) { continue; }
 
-                BOOL isCam = NO;
                 if (ESPLikePointer(r->P4) && ESPRead64(a2) == r->P4) {
                     if (ESPClassNameIs(klass, "loa")) {
-                        cam = a2;                       // «loa» перезаписывает камеру
-                        isCam = YES;
+                        camExact = a2;                  // «loa» перезаписывает камеру
                     } else if (!ESPClassNameIs(klass, "qst")) {
-                        if (!cam) { cam = a2; }
-                        isCam = YES;
+                        if (!camExact) { camExact = a2; }
                     }
-                }
-                if (!isCam && !cam) {
-                    // Содержимое: у камеры ребёнок держит 128 байт view/proj
-                    // по +0x70 и они проходят валидацию.
+                } else if (!camContent) {
                     uint64_t child = ESPRead64(a2 + 0x10);
                     if (ESPLikePointer(child)) {
                         float viewCheck[16], projCheck[16];
                         if (ESPRawViewProj(child, viewCheck, projCheck)) {
-                            cam = a2;
+                            camContent = a2;
                         }
                     }
                 }
             }
         }
     }
+
+    uint64_t cam = camExact ? camExact : camContent;
 
     uint64_t root = foundRoot ? foundRoot : fallbackRoot;
     int rootFlagFromContent = -1;
@@ -833,20 +833,12 @@ static int ESPPositionFromComponent(uint64_t comp, float out[3])
     return 0;
 }
 
-// Позиция игрока (порт f_2840c): сначала держатель [obj+0x70] → трансформ
-// [holder+0x10] (это главный путь оригинала), затем компонент с klass == K1,
-// затем любой компонент через f_2b6f8.
+// Позиция игрока (порт f_2840c): компонент с klass == K1 → [comp+0x28],
+// затем любой компонент через f_2b6f8 ([comp+0x28], иначе [comp+0x30]).
+// Ветка [obj+0x70] в оригинале читает u16-идентификатор, а не трансформ,
+// поэтому здесь её нет.
 static int ESPPositionForPlayer(uint64_t obj, float out[3])
 {
-    uint64_t holder = ESPRead64(obj + kOffPlayerHolder);
-    if (ESPLikePointer(holder)) {
-        uint64_t holderTransform = ESPRead64(holder + 0x10);
-        if (ESPLikePointer(holderTransform) &&
-            ESPPositionFromTransform(holderTransform, out) && ESPPosValid(out)) {
-            return 1;
-        }
-    }
-
     uint64_t elements = 0;
     uint32_t count = 0;
     if (!ESPComponentElements(obj, &elements, &count)) { return 0; }
@@ -990,7 +982,9 @@ static void AscentESPTickOnce(void)
     // 3) Матрица камеры.
     if (!ESPUpdateMatrix()) {
         char status[256];
-        snprintf(status, sizeof(status), "матрица камеры не читается (корень:%d)", r->lastFail);
+        snprintf(status, sizeof(status),
+                 "ESP: нет матрицы | fail=%d base=0x%llx P3=0x%llx cam=0x%llx",
+                 r->lastFail, r->base, r->P3, r->camHolder);
         AscentESPPublish(NULL, 0, NO, status);
         return;
     }
@@ -1004,7 +998,8 @@ static void AscentESPTickOnce(void)
         else if (count == -2) { why = "корень без списка"; }
         else if (count == -3) { why = "структура списка не найдена"; }
         char status[256];
-        snprintf(status, sizeof(status), "ESP: %s (scan fail=%d)", why, r->lastFail);
+        snprintf(status, sizeof(status), "ESP: %s | fail=%d P3=0x%llx root=0x%llx cam=0x%llx",
+                 why, r->lastFail, r->P3, r->rootA, r->camHolder);
         AscentESPPublish(NULL, 0, NO, status);
         return;
     }
@@ -1021,7 +1016,6 @@ static void AscentESPTickOnce(void)
         float pos[3];
         if (!ESPPositionForPlayer(obj, pos)) { continue; }
 
-        uint32_t team = ESPRead8(obj + kOffTeam);
         uint32_t health = ESPRead8(obj + kOffHealth);
 
         CGPoint feet;
@@ -1040,7 +1034,10 @@ static void AscentESPTickOnce(void)
         player->boxHeight = boxHeight;
         player->health = (float)health * (100.0f / 32.0f);
         if (player->health > 100.0f) { player->health = 100.0f; }
-        player->team = (myTeam != 0 && team == myTeam) ? 0 : 1;
+        // Команда пока не фильтруется: снимок всегда рисуем как врагов.
+        // Фильтр «своих» в оригинале идёт по отдельному источнику myTeam,
+        // и ошибка в нём молча скрывала бы всех игроков.
+        player->team = 1;
         // Расстояние: w матрицы проекции = глубина вдоль взгляда камеры
         // (в метрах). Для подписи «N m» под боксом точности хватает.
         player->distance = (int)(depth + 0.5f);
@@ -1052,9 +1049,9 @@ static void AscentESPTickOnce(void)
 
     char status[256];
     snprintf(status, sizeof(status),
-             "ESP: корень ok (флаг %d), матр %s, список v%d, игроков %d (отбрано %u)",
+             "ESP: корень ok (флаг %d), матр %s, список v%d, игроков %d (записей %u, отбрано %u, моя команда %u)",
              r->rootFlag, r->matrixSource == 1 ? "быстрая" : "P×V",
-             r->listVariant, playerCount, r->nRejected);
+             r->listVariant, playerCount, r->nEntries, r->nRejected, myTeam);
     AscentESPPublish(players, playerCount, YES, status);
 
     // Периодический подробный лог для отладки на устройстве.
