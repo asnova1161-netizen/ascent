@@ -466,9 +466,48 @@ static uint64_t AscentImageBaseInTask(task_t task, const char *needle);
 static BOOL AscentFindGameByContent(int *outPid, task_t *outTask, uint64_t *outBase);
 static BOOL AscentFindGameByPidScan(int *outPid, task_t *outTask, uint64_t *outBase);
 
+// Читаем СВОИ подписи-права через csops (CS_OPS_ENTITLEMENTS_BLOB = 7):
+// blob — это plist, поэтому достаточно найти в нём строку с именем права.
+// Нужно, чтобы на устройстве было видно, дали ли процессу task_for_pid-allow
+// вообще: без него ни одна дорога к памяти игры не работает, и лечится это
+// только переупаковкой, а не кодом.
+extern "C" int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+static BOOL AscentSelfHasTaskForPidEntitlement(void)
+{
+    const size_t blobSize = 16384;
+    uint8_t *blob = (uint8_t *)malloc(blobSize);
+    if (blob == NULL) {
+        return NO;
+    }
+    memset(blob, 0, blobSize);
+
+    BOOL found = NO;
+    if (csops(getpid(), 7, blob, blobSize) == 0) {
+        static const char needle[] = "task_for_pid-allow";
+        const size_t needleLength = sizeof(needle) - 1;
+        for (size_t i = 0; i + needleLength < blobSize; i++) {
+            if (memcmp(blob + i, needle, needleLength) == 0) {
+                found = YES;
+                break;
+            }
+        }
+    }
+
+    free(blob);
+    return found;
+}
+
 BOOL AscentGameAttach(NSString *nameHint)
 {
     AscentGameDetach();
+
+    static BOOL sLoggedEntitlement = NO;
+    if (!sLoggedEntitlement) {
+        sLoggedEntitlement = YES;
+        AscentHUDLog(@"[game] права процесса: task_for_pid-allow %@",
+                     AscentSelfHasTaskForPidEntitlement() ? @"ЕСТЬ" : @"НЕТ");
+    }
 
     int pid = AscentGameFindProcess(nameHint);
     task_t task = MACH_PORT_NULL;
