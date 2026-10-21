@@ -31,6 +31,20 @@
 // а типы совпадают, поэтому повторное объявление безопасно.
 extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
 
+// libproc. На iOS заголовка <libproc.h> нет, но функции есть в libsystem.
+// Именно ими пользуется рабочий PastaWare: proc_listallpids отдаёт список
+// pid, proc_pidpath — ПОЛНЫЙ путь исполняемого файла процесса. Искать игру
+// по одному имени (kp_proc.p_comm) нельзя: у Standoff 2 полный путь
+// .../Standoff2.app/Standoff2, а p_comm может быть обрезан/пуст, и из
+// HUD-процесса (плагин SpringBoard под root) sysctl(KERN_PROC_ALL) список
+// процессов игры не показывает — доступ к памяти тогда «не получен» всегда.
+extern "C" int proc_listallpids(void *buffer, int buffersize);
+extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+
+// Сколько pid берём за раз. PastaWare просит список дважды: сначала узнать
+// число, потом — сами pid.
+#define ASCENT_MAX_PIDS 4096
+
 // В части SDK константы нет: просим ядро сделать приватную копию страницы.
 #ifndef VM_PROT_COPY
 #define VM_PROT_COPY 0x10
@@ -114,39 +128,60 @@ int AscentGameFindProcess(NSString *nameHint)
         return -1;
     }
 
-    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
-    size_t length = 0;
-    if (sysctl(mib, 4, NULL, &length, NULL, 0) != 0 || length == 0) {
-        AscentGameSetErrorFormat(@"список процессов не получен (errno=%d)", errno);
-        return -1;
-    }
-
-    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(length);
-    if (procs == NULL) {
-        AscentGameSetError(@"нет памяти под список процессов");
-        return -1;
-    }
-
-    if (sysctl(mib, 4, procs, &length, NULL, 0) != 0) {
-        AscentGameSetErrorFormat(@"список процессов не прочитан (errno=%d)", errno);
-        free(procs);
-        return -1;
-    }
-
-    size_t count = length / sizeof(struct kinfo_proc);
     const char *hint = nameHint.UTF8String;
-    int found = -1;
 
-    for (size_t i = 0; i < count; i++) {
-        const char *name = procs[i].kp_proc.p_comm;
-        if (name[0] == '\0') continue;
-        if (AscentContainsInsensitive(name, hint)) {
-            found = procs[i].kp_proc.p_pid;
-            break;
+    // Основной путь — тот же, что у рабочего PastaWare: перебор pid через
+    // libproc и сверка ПОЛНОГО пути исполняемого файла. Так «Standoff2»
+    // находится и из HUD-процесса, где sysctl(KERN_PROC_ALL) бесполезен.
+    int found = -1;
+    int count = proc_listallpids(NULL, 0);
+    if (count > 0) {
+        if (count > ASCENT_MAX_PIDS) { count = ASCENT_MAX_PIDS; }
+        int *pids = (int *)malloc(sizeof(int) * (size_t)count);
+        if (pids != NULL) {
+            int filled = proc_listallpids(pids, (int)(sizeof(int) * (size_t)count));
+            int got = filled > 0 ? (filled / (int)sizeof(int)) : 0;
+            char path[4096];
+            for (int i = 0; i < got; i++) {
+                int pid = pids[i];
+                if (pid <= 0) continue;
+                memset(path, 0, sizeof(path));
+                // proc_pidpath возвращает длину пути или <= 0 при отказе.
+                if (proc_pidpath(pid, path, (uint32_t)sizeof(path)) <= 0) continue;
+                if (AscentContainsInsensitive(path, hint)) {
+                    found = pid;
+                    break;
+                }
+            }
+            free(pids);
         }
     }
 
-    free(procs);
+    if (found > 0) {
+        return found;
+    }
+
+    // Запасной путь: старый перебор через sysctl. На части сборок iOS он всё
+    // же видит нужный процесс — пусть будет, вреда нет.
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t length = 0;
+    if (sysctl(mib, 4, NULL, &length, NULL, 0) == 0 && length > 0) {
+        struct kinfo_proc *procs = (struct kinfo_proc *)malloc(length);
+        if (procs != NULL) {
+            if (sysctl(mib, 4, procs, &length, NULL, 0) == 0) {
+                size_t n = length / sizeof(struct kinfo_proc);
+                for (size_t i = 0; i < n; i++) {
+                    const char *name = procs[i].kp_proc.p_comm;
+                    if (name[0] == '\0') continue;
+                    if (AscentContainsInsensitive(name, hint)) {
+                        found = procs[i].kp_proc.p_pid;
+                        break;
+                    }
+                }
+            }
+            free(procs);
+        }
+    }
 
     if (found <= 0) {
         AscentGameSetErrorFormat(@"процесс «%@» не найден", nameHint);
