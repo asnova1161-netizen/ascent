@@ -19,17 +19,28 @@
 #import <stdlib.h>
 #import <string.h>
 #import <unistd.h>
+#import <dlfcn.h>
 #import <sys/sysctl.h>
 
 #import <mach/mach.h>
 #import <mach/task.h>
 #import <mach/task_info.h>
 #import <mach/vm_map.h>
+#import <mach/mach_host.h>
+#import <mach/processor_set.h>
 #import <mach-o/loader.h>
 
 // Объявляем сами: в части SDK прототипа нет в публичных заголовках,
 // а типы совпадают, поэтому повторное объявление безопасно.
 extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
+
+// <mach/mach_vm.h> на iOS SDK — заглушка ("unsupported"), поэтому прототип
+// объявляем сами. Рабочий PastaWare читает память именно этим вызовом.
+extern "C" kern_return_t mach_vm_read_overwrite(vm_map_t target_task,
+                                                mach_vm_address_t address,
+                                                mach_vm_size_t size,
+                                                mach_vm_address_t data,
+                                                mach_vm_size_t *outsize);
 
 // libproc. На iOS заголовка <libproc.h> нет, но функции есть в libsystem.
 // Именно ими пользуется рабочий PastaWare: proc_listallpids отдаёт список
@@ -41,6 +52,11 @@ extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_po
 extern "C" int proc_listallpids(void *buffer, int buffersize);
 extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 extern "C" int proc_name(int pid, void *buffer, uint32_t buffersize);
+
+// processor_set_default / host_processor_set_priv / processor_set_tasks /
+// pid_for_task объявлены в <mach/mach_host.h>, <mach/processor_set.h> и
+// <mach/task.h> — они уже подключены выше. Этими вызовами рабочий PastaWare
+// (sub_10003b8cc) достаёт task-порт, когда task_for_pid его не дал.
 
 // Сколько pid берём за раз. PastaWare просит список дважды: сначала узнать
 // число, потом — сами pid.
@@ -220,13 +236,17 @@ BOOL AscentGameRead(uint64_t address, void *buffer, size_t length)
         return NO;
     }
 
-    vm_size_t readBytes = 0;
-    kern_return_t result = vm_read_overwrite(gGameTask,
-                                            (vm_address_t)address,
-                                            (vm_size_t)length,
-                                            (vm_address_t)buffer,
-                                            &readBytes);
-    if (result != KERN_SUCCESS || readBytes != (vm_size_t)length) {
+    // Читаем ровно тем же вызовом, что и рабочий PastaWare —
+    // mach_vm_read_overwrite(gGameTask, addr, size, buf, &readBytes).
+    // vm_read_overwrite на части сборок iOS устарел и может отказывать там,
+    // где mach_vm_read_overwrite проходит.
+    mach_vm_size_t readBytes = 0;
+    kern_return_t result = mach_vm_read_overwrite(gGameTask,
+                                                  (mach_vm_address_t)address,
+                                                  (mach_vm_size_t)length,
+                                                  (mach_vm_address_t)buffer,
+                                                  &readBytes);
+    if (result != KERN_SUCCESS || readBytes != (mach_vm_size_t)length) {
         AscentGameSetErrorFormat(@"чтение 0x%llx (%zu байт) не удалось: 0x%x, errno=%d",
                                  address, length, result, errno);
         return NO;
@@ -369,6 +389,77 @@ void AscentGameDetach(void)
     gGameSize = 0;
 }
 
+// Получение task-порта игры: сначала task_for_pid (как PastaWare
+// sub_10003b758), при неудаче — перебор всех задач ядра через
+// processor_set_tasks (как PastaWare sub_10003b8cc). Без этой второй дороги
+// на части устройств/сборок iOS task_for_pid не отдаёт порт, и любое чтение
+// памяти игры невозможно — ESP тогда честно пишет «нет доступа».
+//
+// host_processor_set_priv — приватный вызов; в публичном iOS SDK его
+// заголовка может не быть. Поэтому берём его через dlsym: так сборка не
+// зависит от версии SDK, а на устройстве символ есть (PastaWare зовёт его же).
+typedef kern_return_t (*AscentHostPsetPrivFn)(host_t, processor_set_t, processor_set_t *);
+
+static AscentHostPsetPrivFn AscentHostPsetPriv(void)
+{
+    static AscentHostPsetPrivFn fn = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fn = (AscentHostPsetPrivFn)dlsym(RTLD_DEFAULT, "host_processor_set_priv");
+    });
+    return fn;
+}
+
+static task_t AscentTaskForPid(int pid)
+{
+    task_t task = MACH_PORT_NULL;
+
+    // Дорога 1: обычный task_for_pid.
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if (kr == KERN_SUCCESS && task != MACH_PORT_NULL) {
+        return task;
+    }
+    AscentHUDLog(@"[game] task_for_pid(%d) = 0x%x — пробую processor_set_tasks", pid, kr);
+
+    // Дорога 2: processor_set_default -> host_processor_set_priv ->
+    // processor_set_tasks -> pid_for_task. Точная копия того, что делает
+    // рабочий PastaWare.
+    AscentHostPsetPrivFn psetPrivFn = AscentHostPsetPriv();
+    if (psetPrivFn == NULL) {
+        AscentHUDLog(@"[game] host_processor_set_priv недоступен");
+        return MACH_PORT_NULL;
+    }
+
+    host_t host = mach_host_self();
+    processor_set_t pset = MACH_PORT_NULL;
+    processor_set_t psetPriv = MACH_PORT_NULL;
+    task_array_t tasks = NULL;
+    mach_msg_type_number_t taskCount = 0;
+
+    if (processor_set_default(host, &pset) != KERN_SUCCESS) { return MACH_PORT_NULL; }
+    if (psetPrivFn(host, pset, &psetPriv) != KERN_SUCCESS) { return MACH_PORT_NULL; }
+    if (processor_set_tasks(psetPriv, &tasks, &taskCount) != KERN_SUCCESS) { return MACH_PORT_NULL; }
+
+    for (mach_msg_type_number_t i = 0; i < taskCount; i++) {
+        int taskPid = 0;
+        if (pid_for_task(tasks[i], &taskPid) != KERN_SUCCESS) { continue; }
+        if (taskPid == pid) {
+            task = tasks[i];
+            break;
+        }
+    }
+    if (tasks != NULL) {
+        vm_deallocate(mach_task_self(), (vm_address_t)tasks,
+                      (vm_size_t)(taskCount * sizeof(task_t)));
+    }
+    if (task == MACH_PORT_NULL) {
+        AscentHUDLog(@"[game] processor_set_tasks: задача pid=%d не найдена", pid);
+    } else {
+        AscentHUDLog(@"[game] processor_set_tasks: задача pid=%d найдена", pid);
+    }
+    return task;
+}
+
 BOOL AscentGameAttach(NSString *nameHint)
 {
     AscentGameDetach();
@@ -378,15 +469,13 @@ BOOL AscentGameAttach(NSString *nameHint)
         return NO;
     }
 
-    task_t task = MACH_PORT_NULL;
-    kern_return_t result = task_for_pid(mach_task_self(), pid, &task);
-    if (result != KERN_SUCCESS || task == MACH_PORT_NULL) {
-        AscentGameSetErrorFormat(@"task_for_pid(%d) вернул 0x%x — права не дали task-порт", pid, result);
-        AscentHUDLog(@"[game] task_for_pid(%d) = 0x%x (task=%u) — %@",
-                     pid, result, (unsigned)task, gGameError);
+    task_t task = AscentTaskForPid(pid);
+    if (task == MACH_PORT_NULL) {
+        AscentGameSetErrorFormat(@"task-порт для pid %d не получен (ни task_for_pid, ни processor_set_tasks)", pid);
+        AscentHUDLog(@"[game] доступ НЕ получен: %@", gGameError);
         return NO;
     }
-    AscentHUDLog(@"[game] task_for_pid(%d) ок, task=%u", pid, (unsigned)task);
+    AscentHUDLog(@"[game] task-порт получен: pid=%d task=%u", pid, (unsigned)task);
 
     gGamePid = pid;
     gGameTask = task;
