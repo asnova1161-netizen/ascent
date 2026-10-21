@@ -305,6 +305,36 @@ NSString *AscentHUDLogTail(int maxLines)
     return [tail componentsJoinedByString:@"\n"];
 }
 
+NSString *AscentHUDLogTailMatching(NSString *tag, int maxLines)
+{
+    if (tag.length == 0) {
+        return AscentHUDLogTail(maxLines);
+    }
+    if (maxLines <= 0) {
+        maxLines = 12;
+    }
+
+    // Берём хвост журнала побольше: нужные строки могли уйти вглубь из-за
+    // отметок оверлея («HUD alive» и т.п.).
+    NSString *text = AscentLogTailText(256 * 1024);
+    if (text.length == 0) {
+        return @"(журнал пуст)";
+    }
+
+    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (NSInteger index = (NSInteger)lines.count - 1; index >= 0 && (NSInteger)hits.count < maxLines; index--) {
+        NSString *line = lines[(NSUInteger)index];
+        if ([line rangeOfString:tag].location != NSNotFound) {
+            [hits insertObject:line atIndex:0];
+        }
+    }
+    if (hits.count == 0) {
+        return @"";
+    }
+    return [hits componentsJoinedByString:@"\n"];
+}
+
 #pragma mark - Запуск самого себя
 
 // Путь фиксированный и общий для root и для приложения (как в TrollSpeed):
