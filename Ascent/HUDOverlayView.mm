@@ -835,6 +835,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *_tabIndicator;        // красная полоска у выбранной вкладки
     UIView *_contentCard;         // тёмная карточка справа
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
+    UILabel *_espStatusLabel;     // вкладка ESP: живой статус («почему пусто»)
+    NSTimer *_espStatusTimer;     // обновляет статус, пока открыта вкладка ESP
     UIScrollView *_scroll;
     UIButton *_unloadButton;
     // Вкладка Misc: строка accent color — надпись слева, свотч текущего цвета
@@ -979,16 +981,18 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     _espView.hidden = YES;
     [_stage addSubview:_espView];
 
-    // По заказу при КАЖДОМ новом запуске сбрасываются ВСЕ настройки меню:
-    // позиции квадрата и панели, акцент, тема и все переключатели. Список
-    // конфигов НЕ трогаем — он лежит в отдельном файле. Всё делается ОДНИМ
-    // словарём и ОДНОЙ записью файла: раньше шло восемь отдельных
-    // HUDOverlaySetFlag, и каждый заново читал plist и атомарно его
-    // перезаписывал. Значения по умолчанию: переключатели выключены (см.
-    // HUDSwitchDefault), акцент — красный (см. HUDMenuAccentLoad), тема — dark.
+    // По заказу при КАЖДОМ новом запуске сбрасываются настройки меню:
+    // позиции квадрата и панели, акцент и тема. Список конфигов НЕ трогаем —
+    // он лежит в отдельном файле.
+    //
+    // ВАЖНО: переключатели cheat.esp / cheat.aimbot из файла НЕ удаляем.
+    // Раньше они вычищались здесь, и оверлей при каждом старте гасил ESP —
+    // включённая в меню галочка «слетала» после перезапуска HUD (выход из
+    // игры, перезапуск SpringBoard), и боксы не появлялись, хотя в меню стоял
+    // Enable. Значение тумблера — это выбор пользователя, а не «позиция»,
+    // сбрасывать его нельзя.
     NSMutableDictionary *fresh = HUDOverlayDict();
-    [fresh removeObjectsForKeys:@[ @"cheat.esp", @"cheat.aimbot", @"misc.overlay",
-                                   @"hud.accent", @"hud.accent.h", @"hud.accent.s",
+    [fresh removeObjectsForKeys:@[ @"hud.accent", @"hud.accent.h", @"hud.accent.s",
                                    @"hud.accent.v", @"hud.theme" ]];
     fresh[@"trigger.x"] = @0;
     fresh[@"trigger.y"] = @0;
@@ -2184,6 +2188,14 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _stage.bounds = HUDOrientationBounds(_orientation, screen);
     _stage.center = CGPointMake(CGRectGetMidX(screen), CGRectGetMidY(screen));
     _stage.transform = CGAffineTransformMakeRotation(HUDOrientationAngle(_orientation));
+
+    // Холст ESP растягиваем ПРЯМО по сцене, а не только через autoresizing:
+    // вью создаётся до первой раскладки, когда границы сцены ещё нулевые, и
+    // «тянущаяся» маска не всегда доводит её до реального размера. С нулевым
+    // размером drawRect сразу выходит, и боксы не рисуются вообще.
+    if (_espView != nil) {
+        _espView.frame = _stage.bounds;
+    }
 }
 
 - (CGRect)stageBounds
@@ -2479,6 +2491,17 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     // оставить её включённой, содержимое поедет дважды.
     _scroll.panGestureRecognizer.enabled = NO;
     [_contentCard addSubview:_scroll];
+
+    // Вкладка ESP: живой статус чтения игры. Показывает простым текстом,
+    // почему боксов нет (нет доступа к процессу, не найден образ, не найден
+    // корень списка игроков и т.п.). Раньше это было видно только в журнале
+    // через отладочное окно — на устройстве докопаться до него сложно.
+    _espStatusLabel = HUDLabel(@"", 9, UIFontWeightRegular);
+    _espStatusLabel.numberOfLines = 0;
+    _espStatusLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    _espStatusLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
+    _espStatusLabel.hidden = YES;
+    [_scroll addSubview:_espStatusLabel];
 
     [self buildContent];
     [self startKeyboardObserver];
@@ -2927,13 +2950,27 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _targetPillsRow.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
+    _espStatusLabel.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
 
     if (tab == 0) {
         // Вкладка ESP: только главный переключатель — под-опции (боксы,
         // здоровье, имена, дистанция, линии) из меню убраны.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
+
+        // Живой статус чтения игры — прямо под переключателем. Обновляется
+        // таймером, пока открыта эта вкладка (см. startESPStatusTimer).
+        _espStatusLabel.hidden = NO;
+        [self refreshESPStatusText];
+        CGSize statusFit = [_espStatusLabel sizeThatFits:CGSizeMake(rowWidth - 16.0, 400.0)];
+        CGFloat statusH = MAX(statusFit.height, 14.0);
+        _espStatusLabel.frame = CGRectMake(x + 8.0, y + 2.0, rowWidth - 16.0, statusH);
+        y += statusH + 8.0;
+        [self startESPStatusTimer];
     } else {
+        // Ушли с вкладки ESP — статус больше не нужен, гасим таймер, чтобы
+        // не читать снимок кадра впустую.
+        [self stopESPStatusTimer];
         // Вкладка Aim (вместе с Config) УБРАНА по заказу — вторая вкладка
         // теперь Misc. Элементы Aim (aimbot, draw fov, ползунки, target)
         // создаются в buildContent, но всегда остаются скрытыми.
@@ -3243,6 +3280,86 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         // исчезнут в тот же кадр.
         [self applyCaptureVisibility];
     }
+    if ([sender.accessibilityIdentifier isEqualToString:@"cheat.esp"]) {
+        // Тумблер ESP включают прямо в меню, а цикл чтения памяти иначе
+        // поднимался бы только по таймеру HUDApp (раз в 1.5 с). Поднимаем его
+        // СРАЗУ: так боксы появляются без ожидания, и в журнале есть явная
+        // метка, что переключатель дошёл до оверлея.
+        AscentHUDLog(@"[esp] меню: Enable -> %d, поднимаю цикл чтения",
+                     (int)sender.on);
+        AscentESPSetEnabled(sender.on);
+        // Обновляем статус сразу, не ожидая таймера: видно, что включение
+        // подхватилось.
+        [self refreshESPStatusText];
+    }
+}
+
+#pragma mark - Живой статус ESP (вкладка ESP)
+
+/// Простой человекочитаемый текст: что сейчас происходит с чтением игры.
+/// Источник — снимок кадра ESP (AscentESPGetFrame), который наполняет
+/// отдельный поток в GameESP.mm. Никакой памяти игры здесь не читается.
+- (void)refreshESPStatusText
+{
+    if (_espStatusLabel == nil) { return; }
+
+    BOOL espOn = HUDOverlayFlag(@"cheat.esp", NO);
+    AscentESPFrame info;
+    memset(&info, 0, sizeof(info));
+    // Буфер игроков не запрашиваем (нам нужен только статус), поэтому число
+    // игроков берём из самого снимка кадра, а не из возврата функции.
+    AscentESPGetFrame(NULL, 0, &info);
+    int count = info.count;
+
+    NSMutableString *text = [NSMutableString string];
+    if (!espOn) {
+        [text appendString:@"ESP выключен — включите Enable выше.\n"];
+        [text appendString:@"Затем зайдите в матч: боксы появятся над игроками."];
+        _espStatusLabel.text = text;
+        return;
+    }
+
+    [text appendFormat:@"кадров: %d, игроков в кадре: %d\n", info.frameId, count];
+    [text appendFormat:@"доступ к игре: %@\n", info.pid > 0 ? @"есть" : @"НЕТ"];
+    if (info.status[0] != '\0') {
+        [text appendFormat:@"состояние: %s\n", info.status];
+    } else {
+        [text appendString:@"состояние: (пока нет данных)\n"];
+    }
+    if (count > 0) {
+        [text appendString:@"ESP работает: боксы должны быть видны."];
+    } else if (info.pid <= 0) {
+        [text appendString:@"Ждём доступ к процессу игры (Standoff 2 должна быть запущена)."];
+    } else {
+        [text appendString:@"Ждём игроков: зайдите в матч и постойте у врагов."];
+    }
+    _espStatusLabel.text = text;
+}
+
+- (void)startESPStatusTimer
+{
+    [_espStatusTimer invalidate];
+    _espStatusTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                       target:self
+                                                     selector:@selector(espStatusTimerFired:)
+                                                     userInfo:nil
+                                                      repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:_espStatusTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopESPStatusTimer
+{
+    [_espStatusTimer invalidate];
+    _espStatusTimer = nil;
+}
+
+- (void)espStatusTimerFired:(NSTimer *)timer
+{
+    if (_espStatusLabel == nil || _espStatusLabel.hidden) {
+        [self stopESPStatusTimer];
+        return;
+    }
+    [self refreshESPStatusText];
 }
 
 #pragma mark - Скрытие при записи экрана (вкладка Misc)
@@ -3415,6 +3532,8 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
     _sectionTitle.textColor = HUDText();
     _buildLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.32];
+    // Живой статус ESP — тот же полупрозрачный тон, что и при сборке меню.
+    _espStatusLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
     // Надпись «ascent»: свой цвет по теме (тёмная #827e7b, светлая чёрный).
     [self applyPanelTitleTheme];
     _unloadButton.backgroundColor = HUDGray();
@@ -4100,6 +4219,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)dealloc
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self stopESPStatusTimer];
     if (_usesDeviceOrientationFallback) {
         [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     } else {
