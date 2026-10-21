@@ -40,6 +40,7 @@ extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_po
 // процессов игры не показывает — доступ к памяти тогда «не получен» всегда.
 extern "C" int proc_listallpids(void *buffer, int buffersize);
 extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+extern "C" int proc_name(int pid, void *buffer, uint32_t buffersize);
 
 // Сколько pid берём за раз. PastaWare просит список дважды: сначала узнать
 // число, потом — сами pid.
@@ -53,17 +54,18 @@ extern "C" int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 // Голова dyld_all_image_infos: только стабильные первые поля, без хвоста,
 // который в разных версиях iOS разной длины.
 //
-// Раскладка на arm64 (см. <mach-o/dyld_images.h>, struct dyld_all_image_infos):
+// Раскладка на arm64 — СНЯТА С РАБОЧЕГО PastaWare (sub_10003b9d8): он читает
+// 160 байт структуры и берёт infoArrayCount по смещению +4, а infoArray —
+// по +8. Значит:
 //   +0x00 version        (u32)
 //   +0x04 infoArrayCount (u32)
-//   +0x08 ЗАЗОР          (4..7 байт — infoArray должен быть выровнен на 8)
-//   +0x10 infoArray      (ptr)
-// Зазор объявлен ЯВНО: если положиться на неявное выравнивание, смещение
-// infoArray легко «уедет» и вместо массива образов прочитается мусор.
+//   +0x08 infoArray      (ptr)   <- уже выровнен на 8, зазора НЕТ
+// Раньше здесь ошибочно считалось, что между счётчиком и массивом есть
+// 4-байтовый зазор и infoArray лежит на +0x10 — из-за этого читался мусор,
+// и образ UnityFramework не находился. Сверяемся с PastaWare, а не с догадкой.
 typedef struct {
     uint32_t version;
     uint32_t infoArrayCount;
-    uint32_t _reserved;
     uint64_t infoArray;
 } AscentDyldImagesHead;
 
@@ -130,9 +132,13 @@ int AscentGameFindProcess(NSString *nameHint)
 
     const char *hint = nameHint.UTF8String;
 
-    // Основной путь — тот же, что у рабочего PastaWare: перебор pid через
-    // libproc и сверка ПОЛНОГО пути исполняемого файла. Так «Standoff2»
-    // находится и из HUD-процесса, где sysctl(KERN_PROC_ALL) бесполезен.
+    // Основной путь — ровно как у рабочего PastaWare (sub_10003b794):
+    //   1) proc_listallpids(NULL, 0)              — сколько всего pid;
+    //   2) proc_listallpids(pids, count*4)        — сами pid;
+    //   3) proc_name(pid, buf, 1000)              — короткое имя процесса;
+    //   4) strcasestr(buf, "Standoff2")           — регистронезависимая подстрока.
+    // Дополнительно сверяем полный путь (proc_pidpath): если короткое имя
+    // почему-то не отдалось, путь всё равно содержит «Standoff2».
     int found = -1;
     int count = proc_listallpids(NULL, 0);
     if (count > 0) {
@@ -141,14 +147,24 @@ int AscentGameFindProcess(NSString *nameHint)
         if (pids != NULL) {
             int filled = proc_listallpids(pids, (int)(sizeof(int) * (size_t)count));
             int got = filled > 0 ? (filled / (int)sizeof(int)) : 0;
-            char path[4096];
-            for (int i = 0; i < got; i++) {
+            for (int i = 0; i < got && found < 0; i++) {
                 int pid = pids[i];
                 if (pid <= 0) continue;
+
+                // 3) Короткое имя процесса — как в PastaWare.
+                char shortName[1024];
+                memset(shortName, 0, sizeof(shortName));
+                if (proc_name(pid, shortName, (uint32_t)sizeof(shortName)) > 0 &&
+                    AscentContainsInsensitive(shortName, hint)) {
+                    found = pid;
+                    break;
+                }
+
+                // Запас: полный путь исполняемого файла.
+                char path[4096];
                 memset(path, 0, sizeof(path));
-                // proc_pidpath возвращает длину пути или <= 0 при отказе.
-                if (proc_pidpath(pid, path, (uint32_t)sizeof(path)) <= 0) continue;
-                if (AscentContainsInsensitive(path, hint)) {
+                if (proc_pidpath(pid, path, (uint32_t)sizeof(path)) > 0 &&
+                    AscentContainsInsensitive(path, hint)) {
                     found = pid;
                     break;
                 }
@@ -158,8 +174,10 @@ int AscentGameFindProcess(NSString *nameHint)
     }
 
     if (found > 0) {
+        AscentHUDLog(@"[game] поиск «%@»: pid=%d (proc_listallpids: %d процессов)", nameHint, found, count);
         return found;
     }
+    AscentHUDLog(@"[game] поиск «%@»: НЕ найден (proc_listallpids вернул %d)", nameHint, count);
 
     // Запасной путь: старый перебор через sysctl. На части сборок iOS он всё
     // же видит нужный процесс — пусть будет, вреда нет.
@@ -364,8 +382,11 @@ BOOL AscentGameAttach(NSString *nameHint)
     kern_return_t result = task_for_pid(mach_task_self(), pid, &task);
     if (result != KERN_SUCCESS || task == MACH_PORT_NULL) {
         AscentGameSetErrorFormat(@"task_for_pid(%d) вернул 0x%x — права не дали task-порт", pid, result);
+        AscentHUDLog(@"[game] task_for_pid(%d) = 0x%x (task=%u) — %@",
+                     pid, result, (unsigned)task, gGameError);
         return NO;
     }
+    AscentHUDLog(@"[game] task_for_pid(%d) ок, task=%u", pid, (unsigned)task);
 
     gGamePid = pid;
     gGameTask = task;
@@ -503,11 +524,8 @@ uint64_t AscentGameImageBase(NSString *name)
     mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
     kern_return_t kr = task_info(gGameTask, TASK_DYLD_INFO, (task_info_t)&dyldInfo, &count);
     if (kr == KERN_SUCCESS && dyldInfo.all_image_info_addr != 0) {
-        // dyld_all_image_infos (arm64): +0x00 version (u32), +0x04 infoArrayCount (u32),
-        // +0x08..0x0F выравнивающий зазор, +0x10 infoArray (ptr). Читаем структуру
-        // целиком — так компилятор сам расставит выравнивание, и мы не завяжемся
-        // на «магические» смещения (раньше здесь были +0x0/+0x8, из-за чего
-        // вместо infoArray читался зазор, и образ UnityFramework не находился).
+        // Раскладку головы см. в AscentDyldImagesHead: infoArrayCount на +4,
+        // infoArray на +8 (ровно как в рабочем PastaWare).
         AscentDyldImagesHead head;
         memset(&head, 0, sizeof(head));
         if (!AscentGameRead(dyldInfo.all_image_info_addr, &head, sizeof(head))) {
@@ -522,34 +540,41 @@ uint64_t AscentGameImageBase(NSString *name)
             return 0;
         }
         if (infoArrayCount < 4096) {
-            const char *needle = name.UTF8String;
-            for (uint32_t i = 0; i < infoArrayCount && result == 0; i++) {
-                // dyld_image_info: +0x00 imageLoadAddress, +0x08 imageFilePath, +0x10 imageFileModDate
-                uint64_t entry = infoArray + (uint64_t)i * 24;
-                uint64_t loadAddr = 0;
-                uint64_t filePathPtr = 0;
-                if (!AscentGameRead(entry + 0x0, &loadAddr, sizeof(loadAddr))) { continue; }
-                if (!AscentGameRead(entry + 0x8, &filePathPtr, sizeof(filePathPtr))) { continue; }
-                if (loadAddr == 0 || filePathPtr == 0) { continue; }
+            // Массив образов читаем ОДНИМ куском, как PastaWare: у него на
+            // это один vm_read_overwrite на count*24 байт, а не по два чтения
+            // на каждый образ. Иначе при большом списке (в игре ~600-900
+            // образов) мы делали бы больше тысячи syscall-ов на каждый поиск.
+            size_t arrayBytes = (size_t)infoArrayCount * 24;
+            AscentDyldImageInfo *images = (AscentDyldImageInfo *)malloc(arrayBytes);
+            if (images != NULL) {
+                if (AscentGameRead(infoArray, images, arrayBytes)) {
+                    const char *needle = name.UTF8String;
+                    for (uint32_t i = 0; i < infoArrayCount && result == 0; i++) {
+                        uint64_t loadAddr = images[i].imageLoadAddress;
+                        uint64_t filePathPtr = images[i].imageFilePath;
+                        if (loadAddr == 0 || filePathPtr == 0) { continue; }
 
-                // Читаем C-строку пути кусками, пока не упрёмся в NUL.
-                char path[512];
-                memset(path, 0, sizeof(path));
-                int donePath = 0;
-                for (size_t off = 0; off < sizeof(path) - 1 && !donePath; off += 64) {
-                    char chunk[64];
-                    size_t want = sizeof(path) - 1 - off;
-                    if (want > sizeof(chunk)) { want = sizeof(chunk); }
-                    if (!AscentGameRead(filePathPtr + off, chunk, want)) { break; }
-                    for (size_t k = 0; k < want; k++) {
-                        path[off + k] = chunk[k];
-                        if (chunk[k] == 0) { donePath = 1; break; }
+                        // Читаем C-строку пути кусками, пока не упрёмся в NUL.
+                        char path[512];
+                        memset(path, 0, sizeof(path));
+                        int donePath = 0;
+                        for (size_t off = 0; off < sizeof(path) - 1 && !donePath; off += 64) {
+                            char chunk[64];
+                            size_t want = sizeof(path) - 1 - off;
+                            if (want > sizeof(chunk)) { want = sizeof(chunk); }
+                            if (!AscentGameRead(filePathPtr + off, chunk, want)) { break; }
+                            for (size_t k = 0; k < want; k++) {
+                                path[off + k] = chunk[k];
+                                if (chunk[k] == 0) { donePath = 1; break; }
+                            }
+                        }
+                        path[sizeof(path) - 1] = 0;
+                        if (needle != NULL && strstr(path, needle) != NULL) {
+                            result = loadAddr;
+                        }
                     }
                 }
-                path[sizeof(path) - 1] = 0;
-                if (needle != NULL && strstr(path, needle) != NULL) {
-                    result = loadAddr;
-                }
+                free(images);
             }
         }
     }
