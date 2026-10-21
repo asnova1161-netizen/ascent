@@ -1060,6 +1060,14 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     }
 
     AscentHUDLog(@"HUD: UIKit-оверлей создан (сборка 5), bounds=%@", NSStringFromCGRect(frame));
+
+    // ГЛАВНОЕ: цикл чтения памяти игры поднимаем ПРЯМО ЗДЕСЬ, а не надеемся на
+    // таймер HUDApp (AscentGameTick). Раньше ESP стартовал только по нему, и
+    // если таймер почему-то не тикал, не появлялось ни одной строки «[esp]»,
+    // а в меню висело «кадров: 0». Цикл сам decide'ит по ключу cheat.esp и сам
+    // берёт task-порт игры — от таймера он больше не зависит.
+    AscentESPSyncFromState();
+    AscentHUDLog(@"HUD: цикл ESP поднят напрямую (не ждём таймер игровых функций)");
     return self;
 }
 
