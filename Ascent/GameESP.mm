@@ -448,7 +448,15 @@ static void ESPFindRoots(void)
     // Ограничиваемся первыми 96 узлами — этого с запасом хватает.
     int fallbackBudget = 96;
 
-    for (uint32_t i = 0; i < count1; i++) {
+    // Жёсткий бюджет по времени на весь обход: даже на слабом устройстве
+    // поиск не должен занимать runloop дольше ~0.12 с. Не успели — выходим
+    // с тем, что нашли, и повторим позже.
+    const uint64_t kRootsBudgetUs = 120000ull;
+    uint64_t rootsStartUs = ESPNowUs();
+    BOOL outOfTime = NO;
+
+    for (uint32_t i = 0; i < count1 && !outOfTime; i++) {
+        if ((i & 0x0F) == 0 && ESPNowUs() - rootsStartUs >= kRootsBudgetUs) { outOfTime = YES; break; }
         uint64_t elem1 = ESPRead64(elements1 + i * 8);
         if (!ESPLikePointer(elem1)) { continue; }
         uint64_t z1 = ESPRead64(elem1 + 0x10);
@@ -459,7 +467,8 @@ static void ESPFindRoots(void)
         uint32_t count2 = 0;
         if (!ESPReadArrayInfo(z2, &elements2, &count2)) { continue; }
 
-        for (uint32_t j = 0; j < count2; j++) {
+        for (uint32_t j = 0; j < count2 && !outOfTime; j++) {
+            if ((j & 0x0F) == 0 && ESPNowUs() - rootsStartUs >= kRootsBudgetUs) { outOfTime = YES; break; }
             uint64_t elem2 = ESPRead64(elements2 + j * 8);
             if (!ESPLikePointer(elem2)) { continue; }
             if (ESPRead8(elem2 + 0x20) != 0) { continue; }   // ровно один байт
@@ -469,7 +478,8 @@ static void ESPFindRoots(void)
             uint32_t count3 = 0;
             if (!ESPReadArrayInfo(z3, &elements3, &count3)) { continue; }
 
-            for (uint32_t k = 0; k < count3; k++) {
+            for (uint32_t k = 0; k < count3 && !outOfTime; k++) {
+                if ((k & 0x3F) == 0 && ESPNowUs() - rootsStartUs >= kRootsBudgetUs) { outOfTime = YES; break; }
                 uint64_t elem3 = ESPRead64(elements3 + k * 8);
                 if (!ESPLikePointer(elem3)) { continue; }
                 uint64_t klass = ESPRead64(elem3);   // без проверки — как в оригинале
@@ -538,7 +548,7 @@ static void ESPFindRoots(void)
                     } else if (!ESPClassNameIs(klass, "qst")) {
                         if (!camExact) { camExact = a2; }
                     }
-                } else if (!camContent) {
+                } else if (!camExact && !camContent) {
                     uint64_t child = ESPRead64(a2 + 0x10);
                     if (ESPLikePointer(child)) {
                         float viewCheck[16], projCheck[16];
@@ -567,7 +577,7 @@ static void ESPFindRoots(void)
     }
 
     if (!ESPLikePointer(root)) {
-        if (r->lastFail == 0) { r->lastFail = 4; }
+        if (r->lastFail == 0) { r->lastFail = outOfTime ? 6 : 4; }
         return;
     }
     if (root == r->rootA) { return; }
@@ -1067,6 +1077,9 @@ static void AscentESPTickOnce(void)
 
 #pragma mark - Таймер
 
+static dispatch_queue_t gESPTickQueue = NULL;
+static int gESPTickBusy = 0;
+
 static void AscentESPStartTimer(void)
 {
     static dispatch_once_t once;
@@ -1076,14 +1089,24 @@ static void AscentESPStartTimer(void)
         // заведомо. Отдельный dispatch-источник мог вообще не запуститься
         // (тогда счётчик кадров навсегда оставался нулём), а NSTimer на
         // главном runloop гарантированно тикает, пока жив оверлей.
+        //
+        // Само чтение памяти уводим в отдельную последовательную очередь:
+        // обход указателей игры — это десятки тысяч обращений к mach, и на
+        // главном потоке он подвешивал оверлей (переставали нажиматься тапы).
+        gESPTickQueue = dispatch_queue_create("com.ascentios.esp.tick", DISPATCH_QUEUE_SERIAL);
         dispatch_async(dispatch_get_main_queue(), ^{
-            AscentHUDLog(@"[esp] цикл запущен (главный runloop, 66 мс)");
+            AscentHUDLog(@"[esp] цикл запущен (runloop 66 мс, чтение в фоне)");
             NSTimer *timer = [NSTimer timerWithTimeInterval:0.066
                                                     repeats:YES
                                                       block:^(NSTimer *fireTimer) {
-                @autoreleasepool {
-                    AscentESPTickOnce();
-                }
+                // Пропускаем кадр, если прошлый проход ещё не закончился.
+                if (!__sync_bool_compare_and_swap(&gESPTickBusy, 0, 1)) { return; }
+                dispatch_async(gESPTickQueue, ^{
+                    @autoreleasepool {
+                        AscentESPTickOnce();
+                    }
+                    __sync_lock_release(&gESPTickBusy);
+                });
             }];
             [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
         });
