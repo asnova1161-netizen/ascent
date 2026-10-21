@@ -47,12 +47,6 @@ struct LoaderView: View {
                     .allowsHitTesting(false)
                     .zIndex(10)
 
-                // Отладочное окно: открывается ТОЛЬКО длинным тапом по «ascent».
-                // Само по себе на экране ничего не пишет.
-                if state.debugVisible {
-                    DebugOverlay(state: state, topInset: top, bottomInset: bottom)
-                        .zIndex(20)
-                }
             }
             .frame(width: size.width, height: size.height)
         }
@@ -83,10 +77,6 @@ private struct LoaderContent: View {
                 .foregroundColor(.white)
                 .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 4)
                 .offset(y: -8)
-                // Отладочное окно: длинный тап по заголовку.
-                .onLongPressGesture(minimumDuration: 0.6) {
-                    state.toggleDebug()
-                }
 
             startButton
                 .padding(.top, 40)
