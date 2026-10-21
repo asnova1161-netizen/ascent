@@ -3341,7 +3341,38 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     } else {
         [text appendString:@"Ждём игроков: зайдите в матч и постойте у врагов."];
     }
+
+    // Пока доступа нет — показываем прямо здесь строки журнала про игру и ESP.
+    // Так причина видна в меню, без отладочного окна: общий хвост журнала
+    // забивают отметки оверлея, и нужное оттуда не вытащить.
+    if (info.pid <= 0) {
+        NSString *gameLines = AscentHUDLogTailMatching(@"[game]", 6);
+        NSString *espLines = AscentHUDLogTailMatching(@"[esp]", 4);
+        if (gameLines.length > 0) {
+            [text appendFormat:@"\n\nжурнал [game]:\n%@", [self trimmedLogLines:gameLines]];
+        }
+        if (espLines.length > 0) {
+            [text appendFormat:@"\n\nжурнал [esp]:\n%@", [self trimmedLogLines:espLines]];
+        }
+    }
     _espStatusLabel.text = text;
+}
+
+/// Убирает из строк журнала дату и метку процесса, оставляя суть — чтобы
+/// строки влезали в узкую колонку меню.
+- (NSString *)trimmedLogLines:(NSString *)text
+{
+    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (NSString *line in lines) {
+        NSString *trimmed = line;
+        NSRange close = [trimmed rangeOfString:@"] "];
+        if (close.location != NSNotFound) {
+            trimmed = [trimmed substringFromIndex:close.location + close.length];
+        }
+        if (trimmed.length > 0) { [out addObject:trimmed]; }
+    }
+    return [out componentsJoinedByString:@"\n"];
 }
 
 - (void)startESPStatusTimer
@@ -3368,6 +3399,18 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         return;
     }
     [self refreshESPStatusText];
+
+    // Текст статуса меняется по длине (добавляются строки журнала), поэтому
+    // после каждого обновления подгоняем высоту надписи — иначе нижние строки
+    // обрезались бы и причина отказа осталась бы невидимой.
+    CGRect frame = _espStatusLabel.frame;
+    CGSize fit = [_espStatusLabel sizeThatFits:CGSizeMake(frame.size.width, 400.0)];
+    CGFloat newHeight = MAX(fit.height, 14.0);
+    if (fabs(newHeight - frame.size.height) > 0.5) {
+        frame.size.height = newHeight;
+        _espStatusLabel.frame = frame;
+        [_espStatusLabel.superview setNeedsLayout];
+    }
 }
 
 #pragma mark - Скрытие при записи экрана (вкладка Misc)
