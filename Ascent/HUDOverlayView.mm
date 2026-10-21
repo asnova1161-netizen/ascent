@@ -696,7 +696,27 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     AscentESPFrame info;
     memset(&info, 0, sizeof(info));
     int count = AscentESPGetFrame(players, kAscentESPMaxPlayers, &info);
-    if (count <= 0 || !info.live) { return; }
+
+    // Игроков нет — выводим на экран причину (одна-две строки в левом верхнем
+    // углу). Так причина видна прямо в игре, без захода в меню и журнал.
+    if (count <= 0) {
+        if (info.status[0] == 0) { return; }
+        NSString *why = [NSString stringWithUTF8String:info.status];
+        if (why.length == 0) { return; }
+        CGRect bounds = self.bounds;
+        if (bounds.size.width < 2.0) { return; }
+        UIFont *font = [UIFont monospacedSystemFontOfSize:9.0 weight:UIFontWeightSemibold];
+        if (font == nil) { font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightSemibold]; }
+        NSDictionary *attrs = @{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: [UIColor colorWithRed:1.0 green:0.85 blue:0.2 alpha:0.95],
+            NSBackgroundColorAttributeName: [UIColor colorWithWhite:0.0 alpha:0.55]
+        };
+        CGRect textRect = CGRectMake(8.0, 8.0, MAX(80.0, bounds.size.width - 16.0), 60.0);
+        [why drawInRect:textRect withAttributes:attrs];
+        return;
+    }
+    if (!info.live) { return; }
 
     CGRect bounds = self.bounds;
     CGFloat width = bounds.size.width;
