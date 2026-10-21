@@ -697,25 +697,8 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     memset(&info, 0, sizeof(info));
     int count = AscentESPGetFrame(players, kAscentESPMaxPlayers, &info);
 
-    // Игроков нет — выводим на экран причину (одна-две строки в левом верхнем
-    // углу). Так причина видна прямо в игре, без захода в меню и журнал.
-    if (count <= 0) {
-        if (info.status[0] == 0) { return; }
-        NSString *why = [NSString stringWithUTF8String:info.status];
-        if (why.length == 0) { return; }
-        CGRect bounds = self.bounds;
-        if (bounds.size.width < 2.0) { return; }
-        UIFont *font = [UIFont monospacedSystemFontOfSize:9.0 weight:UIFontWeightSemibold];
-        if (font == nil) { font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightSemibold]; }
-        NSDictionary *attrs = @{
-            NSFontAttributeName: font,
-            NSForegroundColorAttributeName: [UIColor colorWithRed:1.0 green:0.85 blue:0.2 alpha:0.95],
-            NSBackgroundColorAttributeName: [UIColor colorWithWhite:0.0 alpha:0.55]
-        };
-        CGRect textRect = CGRectMake(8.0, 8.0, MAX(80.0, bounds.size.width - 16.0), 60.0);
-        [why drawInRect:textRect withAttributes:attrs];
-        return;
-    }
+    // Игроков нет — ничего не рисуем.
+    if (count <= 0) { return; }
     if (!info.live) { return; }
 
     CGRect bounds = self.bounds;
@@ -855,8 +838,6 @@ static HUDOverlayView *_hudCurrentOverlay = nil;
     UIView *_tabIndicator;        // красная полоска у выбранной вкладки
     UIView *_contentCard;         // тёмная карточка справа
     UILabel *_sectionTitle;       // заголовок раздела внутри карточки
-    UILabel *_espStatusLabel;     // вкладка ESP: живой статус («почему пусто»)
-    NSTimer *_espStatusTimer;     // обновляет статус, пока открыта вкладка ESP
     UIScrollView *_scroll;
     UIButton *_unloadButton;
     // Вкладка Misc: строка accent color — надпись слева, свотч текущего цвета
@@ -2520,16 +2501,7 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _scroll.panGestureRecognizer.enabled = NO;
     [_contentCard addSubview:_scroll];
 
-    // Вкладка ESP: живой статус чтения игры. Показывает простым текстом,
-    // почему боксов нет (нет доступа к процессу, не найден образ, не найден
-    // корень списка игроков и т.п.). Раньше это было видно только в журнале
-    // через отладочное окно — на устройстве докопаться до него сложно.
-    _espStatusLabel = HUDLabel(@"", 9, UIFontWeightRegular);
-    _espStatusLabel.numberOfLines = 0;
-    _espStatusLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    _espStatusLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
-    _espStatusLabel.hidden = YES;
-    [_scroll addSubview:_espStatusLabel];
+    // Вкладка ESP: только переключатель Enable — никакой диагностики на экране.
 
     [self buildContent];
     [self startKeyboardObserver];
@@ -2978,27 +2950,13 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     _targetPillsRow.hidden = YES;
     _configNameField.hidden = YES;
     _configCreateButton.hidden = YES;
-    _espStatusLabel.hidden = YES;
     for (UIView *row in _configRows) { row.hidden = YES; }
 
     if (tab == 0) {
         // Вкладка ESP: только главный переключатель — под-опции (боксы,
         // здоровье, имена, дистанция, линии) из меню убраны.
         [self layoutSwitchRow:_switches[0] x:x y:&y width:rowWidth];
-
-        // Живой статус чтения игры — прямо под переключателем. Обновляется
-        // таймером, пока открыта эта вкладка (см. startESPStatusTimer).
-        _espStatusLabel.hidden = NO;
-        [self refreshESPStatusText];
-        CGSize statusFit = [_espStatusLabel sizeThatFits:CGSizeMake(rowWidth - 16.0, 400.0)];
-        CGFloat statusH = MAX(statusFit.height, 14.0);
-        _espStatusLabel.frame = CGRectMake(x + 8.0, y + 2.0, rowWidth - 16.0, statusH);
-        y += statusH + 8.0;
-        [self startESPStatusTimer];
     } else {
-        // Ушли с вкладки ESP — статус больше не нужен, гасим таймер, чтобы
-        // не читать снимок кадра впустую.
-        [self stopESPStatusTimer];
         // Вкладка Aim (вместе с Config) УБРАНА по заказу — вторая вкладка
         // теперь Misc. Элементы Aim (aimbot, draw fov, ползунки, target)
         // создаются в buildContent, но всегда остаются скрытыми.
@@ -3316,120 +3274,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
         AscentHUDLog(@"[esp] меню: Enable -> %d, поднимаю цикл чтения",
                      (int)sender.on);
         AscentESPSetEnabled(sender.on);
-        // Обновляем статус сразу, не ожидая таймера: видно, что включение
-        // подхватилось.
-        [self refreshESPStatusText];
-    }
-}
-
-#pragma mark - Живой статус ESP (вкладка ESP)
-
-/// Простой человекочитаемый текст: что сейчас происходит с чтением игры.
-/// Источник — снимок кадра ESP (AscentESPGetFrame), который наполняет
-/// отдельный поток в GameESP.mm. Никакой памяти игры здесь не читается.
-- (void)refreshESPStatusText
-{
-    if (_espStatusLabel == nil) { return; }
-
-    BOOL espOn = HUDOverlayFlag(@"cheat.esp", NO);
-    AscentESPFrame info;
-    memset(&info, 0, sizeof(info));
-    // Буфер игроков не запрашиваем (нам нужен только статус), поэтому число
-    // игроков берём из самого снимка кадра, а не из возврата функции.
-    AscentESPGetFrame(NULL, 0, &info);
-    int count = info.count;
-
-    NSMutableString *text = [NSMutableString string];
-    if (!espOn) {
-        [text appendString:@"ESP выключен — включите Enable выше.\n"];
-        [text appendString:@"Затем зайдите в матч: боксы появятся над игроками."];
-        _espStatusLabel.text = text;
-        return;
-    }
-
-    [text appendFormat:@"кадров: %d, игроков в кадре: %d\n", info.frameId, count];
-    [text appendFormat:@"доступ к игре: %@\n", info.pid > 0 ? @"есть" : @"НЕТ"];
-    if (info.status[0] != '\0') {
-        [text appendFormat:@"состояние: %s\n", info.status];
-    } else {
-        [text appendString:@"состояние: (пока нет данных)\n"];
-    }
-    if (count > 0) {
-        [text appendString:@"ESP работает: боксы должны быть видны."];
-    } else if (info.pid <= 0) {
-        [text appendString:@"Ждём доступ к процессу игры (Standoff 2 должна быть запущена)."];
-    } else {
-        [text appendString:@"Ждём игроков: зайдите в матч и постойте у врагов."];
-    }
-
-    // Пока доступа нет — показываем прямо здесь строки журнала про игру и ESP.
-    // Так причина видна в меню, без отладочного окна: общий хвост журнала
-    // забивают отметки оверлея, и нужное оттуда не вытащить.
-    if (info.pid <= 0) {
-        NSString *gameLines = AscentHUDLogTailMatching(@"[game]", 6);
-        NSString *espLines = AscentHUDLogTailMatching(@"[esp]", 4);
-        if (gameLines.length > 0) {
-            [text appendFormat:@"\n\nжурнал [game]:\n%@", [self trimmedLogLines:gameLines]];
-        }
-        if (espLines.length > 0) {
-            [text appendFormat:@"\n\nжурнал [esp]:\n%@", [self trimmedLogLines:espLines]];
-        }
-    }
-    _espStatusLabel.text = text;
-}
-
-/// Убирает из строк журнала дату и метку процесса, оставляя суть — чтобы
-/// строки влезали в узкую колонку меню.
-- (NSString *)trimmedLogLines:(NSString *)text
-{
-    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
-    NSMutableArray<NSString *> *out = [NSMutableArray array];
-    for (NSString *line in lines) {
-        NSString *trimmed = line;
-        NSRange close = [trimmed rangeOfString:@"] "];
-        if (close.location != NSNotFound) {
-            trimmed = [trimmed substringFromIndex:close.location + close.length];
-        }
-        if (trimmed.length > 0) { [out addObject:trimmed]; }
-    }
-    return [out componentsJoinedByString:@"\n"];
-}
-
-- (void)startESPStatusTimer
-{
-    [_espStatusTimer invalidate];
-    _espStatusTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
-                                                       target:self
-                                                     selector:@selector(espStatusTimerFired:)
-                                                     userInfo:nil
-                                                      repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:_espStatusTimer forMode:NSRunLoopCommonModes];
-}
-
-- (void)stopESPStatusTimer
-{
-    [_espStatusTimer invalidate];
-    _espStatusTimer = nil;
-}
-
-- (void)espStatusTimerFired:(NSTimer *)timer
-{
-    if (_espStatusLabel == nil || _espStatusLabel.hidden) {
-        [self stopESPStatusTimer];
-        return;
-    }
-    [self refreshESPStatusText];
-
-    // Текст статуса меняется по длине (добавляются строки журнала), поэтому
-    // после каждого обновления подгоняем высоту надписи — иначе нижние строки
-    // обрезались бы и причина отказа осталась бы невидимой.
-    CGRect frame = _espStatusLabel.frame;
-    CGSize fit = [_espStatusLabel sizeThatFits:CGSizeMake(frame.size.width, 400.0)];
-    CGFloat newHeight = MAX(fit.height, 14.0);
-    if (fabs(newHeight - frame.size.height) > 0.5) {
-        frame.size.height = newHeight;
-        _espStatusLabel.frame = frame;
-        [_espStatusLabel.superview setNeedsLayout];
     }
 }
 
@@ -3603,8 +3447,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
     }
     _sectionTitle.textColor = HUDText();
     _buildLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.32];
-    // Живой статус ESP — тот же полупрозрачный тон, что и при сборке меню.
-    _espStatusLabel.textColor = [UIColor colorWithWhite:(sMenuLight ? 0.0 : 1.0) alpha:0.7];
     // Надпись «ascent»: свой цвет по теме (тёмная #827e7b, светлая чёрный).
     [self applyPanelTitleTheme];
     _unloadButton.backgroundColor = HUDGray();
