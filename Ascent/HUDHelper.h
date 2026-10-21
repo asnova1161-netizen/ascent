@@ -67,6 +67,12 @@ NSString *AscentHUDLogText(void);
 /// Последние `maxLines` строк журнала.
 NSString *AscentHUDLogTail(int maxLines);
 
+/// Последние `maxLines` строк журнала, в которых есть подстрока `tag`
+/// (например @"[game]" или @"[esp]"). Нужно, чтобы показать причину отказа
+/// доступа прямо в меню чита: общий хвост журнала забивают отметки оверлея,
+/// и нужные строки в него не попадают.
+NSString *AscentHUDLogTailMatching(NSString *tag, int maxLines);
+
 #pragma mark - Диагностика запуска
 
 /// В каком режиме запущен ЭТОТ процесс: "app", "-hud", "-check", "-exit".
