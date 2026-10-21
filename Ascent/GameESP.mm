@@ -796,8 +796,22 @@ static void AscentESPTickOnce(void)
         return;
     }
     if (!AscentGameIsAttached()) {
-        AscentESPPublish(NULL, 0, NO, "нет доступа к процессу игры");
-        return;
+        // ESP включён, а доступа к игре нет — берём его САМИ, не полагаясь на
+        // таймер HUDApp: иначе при неработающем таймере переключатели вообще
+        // не доезжали до чтения памяти, и в журнале не было ни одной строки
+        // «[esp]». Повторяем не чаще раза в 3 с, чтобы не долбить task_for_pid.
+        static uint64_t sLastAttachUs = 0;
+        uint64_t attachNow = ESPNowUs();
+        if (sLastAttachUs == 0 || attachNow - sLastAttachUs >= 3000000ull) {
+            sLastAttachUs = attachNow;
+            if (AscentGameFindProcess(@"standoff") > 0) {
+                AscentGameProbe(@"standoff");
+            }
+        }
+        if (!AscentGameIsAttached()) {
+            AscentESPPublish(NULL, 0, NO, "нет доступа к процессу игры");
+            return;
+        }
     }
 
     ESPResolver *r = &gResolver;
