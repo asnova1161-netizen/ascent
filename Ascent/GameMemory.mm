@@ -38,9 +38,18 @@ extern "C" kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_po
 
 // Голова dyld_all_image_infos: только стабильные первые поля, без хвоста,
 // который в разных версиях iOS разной длины.
+//
+// Раскладка на arm64 (см. <mach-o/dyld_images.h>, struct dyld_all_image_infos):
+//   +0x00 version        (u32)
+//   +0x04 infoArrayCount (u32)
+//   +0x08 ЗАЗОР          (4..7 байт — infoArray должен быть выровнен на 8)
+//   +0x10 infoArray      (ptr)
+// Зазор объявлен ЯВНО: если положиться на неявное выравнивание, смещение
+// infoArray легко «уедет» и вместо массива образов прочитается мусор.
 typedef struct {
     uint32_t version;
     uint32_t infoArrayCount;
+    uint32_t _reserved;
     uint64_t infoArray;
 } AscentDyldImagesHead;
 
@@ -459,12 +468,25 @@ uint64_t AscentGameImageBase(NSString *name)
     mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
     kern_return_t kr = task_info(gGameTask, TASK_DYLD_INFO, (task_info_t)&dyldInfo, &count);
     if (kr == KERN_SUCCESS && dyldInfo.all_image_info_addr != 0) {
-        // dyld_all_image_infos: +0x00 infoArrayCount (u32), +0x08 infoArray (ptr)
-        uint32_t infoArrayCount = 0;
-        uint64_t infoArray = 0;
-        AscentGameRead(dyldInfo.all_image_info_addr + 0x0, &infoArrayCount, sizeof(infoArrayCount));
-        AscentGameRead(dyldInfo.all_image_info_addr + 0x8, &infoArray, sizeof(infoArray));
-        if (infoArray != 0 && infoArrayCount > 0 && infoArrayCount < 4096) {
+        // dyld_all_image_infos (arm64): +0x00 version (u32), +0x04 infoArrayCount (u32),
+        // +0x08..0x0F выравнивающий зазор, +0x10 infoArray (ptr). Читаем структуру
+        // целиком — так компилятор сам расставит выравнивание, и мы не завяжемся
+        // на «магические» смещения (раньше здесь были +0x0/+0x8, из-за чего
+        // вместо infoArray читался зазор, и образ UnityFramework не находился).
+        AscentDyldImagesHead head;
+        memset(&head, 0, sizeof(head));
+        if (!AscentGameRead(dyldInfo.all_image_info_addr, &head, sizeof(head))) {
+            AscentGameSetError(@"не прочитали голову dyld_all_image_infos");
+            return 0;
+        }
+        uint32_t infoArrayCount = head.infoArrayCount;
+        uint64_t infoArray = head.infoArray;
+        if (infoArray == 0 || infoArrayCount == 0) {
+            AscentGameSetErrorFormat(@"список образов dyld пуст (count=%u, array=0x%llx)",
+                                     infoArrayCount, infoArray);
+            return 0;
+        }
+        if (infoArrayCount < 4096) {
             const char *needle = name.UTF8String;
             for (uint32_t i = 0; i < infoArrayCount && result == 0; i++) {
                 // dyld_image_info: +0x00 imageLoadAddress, +0x08 imageFilePath, +0x10 imageFileModDate
@@ -497,8 +519,13 @@ uint64_t AscentGameImageBase(NSString *name)
         }
     }
 
-    @synchronized (cache) {
-        cache[name] = @((unsigned long long)result);
+    // Отрицательный результат НЕ кэшируем: игру могли ещё не дочитать, и тогда
+    // залипший ноль навсегда лишил бы ESP образа UnityFramework до перезапуска
+    // оверлея. Положительный результат кэшируем — база образа не меняется.
+    if (result != 0) {
+        @synchronized (cache) {
+            cache[name] = @((unsigned long long)result);
+        }
     }
     return result;
 }
