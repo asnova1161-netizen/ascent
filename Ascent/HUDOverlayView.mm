@@ -4132,7 +4132,6 @@ static CGPoint LimitStep(CGPoint from, CGPoint to, CGFloat limit)
 - (void)dealloc
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [self stopESPStatusTimer];
     if (_usesDeviceOrientationFallback) {
         [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     } else {
