@@ -772,7 +772,20 @@ static int ESPWorldToScreen(const float m[16], const float pos[3],
 
 static void AscentESPTickOnce(void)
 {
-    double espSwitch = AscentSharedNumber(@"cheat.esp");
+    // Переключатель читаем с диска не чаще 4 раз в секунду: тик теперь идёт
+    // на главном runloop, а разбор plist 15 раз в секунду давал бы лишние
+    // подвисания меню.
+    static double sCachedEspSwitch = 0.0;
+    static uint64_t sCachedSwitchUs = 0;
+    uint64_t tickNow = ESPNowUs();
+    double espSwitch;
+    if (sCachedSwitchUs != 0 && tickNow - sCachedSwitchUs < 250000ull) {
+        espSwitch = sCachedEspSwitch;
+    } else {
+        espSwitch = AscentSharedNumber(@"cheat.esp");
+        sCachedEspSwitch = espSwitch;
+        sCachedSwitchUs = tickNow;
+    }
 
     // Диагностика в журнал: видно и тумблер, и доступ, и каталог состояния.
     // Пишем на первом проходе и дальше не чаще раза в 2 с.
@@ -801,12 +814,20 @@ static void AscentESPTickOnce(void)
         // не доезжали до чтения памяти, и в журнале не было ни одной строки
         // «[esp]». Повторяем не чаще раза в 3 с, чтобы не долбить task_for_pid.
         static uint64_t sLastAttachUs = 0;
+        static int sAttaching = 0;
         uint64_t attachNow = ESPNowUs();
-        if (sLastAttachUs == 0 || attachNow - sLastAttachUs >= 3000000ull) {
+        // Привязку делаем в ФОНЕ: теперь в ней есть перебор всех задач ядра,
+        // а он занимает десятки миллисекунд — на главном runloop это
+        // подвесило бы меню и сам цикл ESP.
+        if ((sLastAttachUs == 0 || attachNow - sLastAttachUs >= 3000000ull) &&
+            __sync_bool_compare_and_swap(&sAttaching, 0, 1)) {
             sLastAttachUs = attachNow;
-            if (AscentGameFindProcess(@"standoff") > 0) {
-                AscentGameProbe(@"standoff");
-            }
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                @autoreleasepool {
+                    AscentGameProbe(@"standoff");
+                }
+                __sync_lock_release(&sAttaching);
+            });
         }
         if (!AscentGameIsAttached()) {
             AscentESPPublish(NULL, 0, NO, "нет доступа к процессу игры");
@@ -932,18 +953,22 @@ static void AscentESPStartTimer(void)
 {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        dispatch_queue_t queue = dispatch_queue_create("ascent.esp", DISPATCH_QUEUE_SERIAL);
-        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
-        dispatch_source_set_timer(timer,
-                                  dispatch_time(DISPATCH_TIME_NOW, 0),
-                                  66ull * NSEC_PER_MSEC,   // ~15 Гц
-                                  10ull * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(timer, ^{
-            @autoreleasepool {
-                AscentESPTickOnce();
-            }
+        // Цикл ESP крутится на ГЛАВНОМ runloop — тем же механизмом, что и
+        // таймер строки статуса в меню, который на устройстве работает
+        // заведомо. Отдельный dispatch-источник мог вообще не запуститься
+        // (тогда счётчик кадров навсегда оставался нулём), а NSTimer на
+        // главном runloop гарантированно тикает, пока жив оверлей.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AscentHUDLog(@"[esp] цикл запущен (главный runloop, 66 мс)");
+            NSTimer *timer = [NSTimer timerWithTimeInterval:0.066
+                                                    repeats:YES
+                                                      block:^(NSTimer *fireTimer) {
+                @autoreleasepool {
+                    AscentESPTickOnce();
+                }
+            }];
+            [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
         });
-        dispatch_resume(timer);
     });
 }
 
