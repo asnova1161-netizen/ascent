@@ -460,31 +460,67 @@ static task_t AscentTaskForPid(int pid)
     return task;
 }
 
+// Функции ниже определены в разделе «Образы (dyld)»: объявляем их заранее,
+// потому что привязка к игре пользуется ими.
+static uint64_t AscentImageBaseInTask(task_t task, const char *needle);
+static BOOL AscentFindGameByContent(int *outPid, task_t *outTask, uint64_t *outBase);
+static BOOL AscentFindGameByPidScan(int *outPid, task_t *outTask, uint64_t *outBase);
+
 BOOL AscentGameAttach(NSString *nameHint)
 {
     AscentGameDetach();
 
     int pid = AscentGameFindProcess(nameHint);
-    if (pid <= 0) {
-        return NO;
+    task_t task = MACH_PORT_NULL;
+    uint64_t unityBase = 0;
+
+    // Дорога 1: нашли процесс по имени — берём его task-порт.
+    if (pid > 0) {
+        task = AscentTaskForPid(pid);
+        if (task != MACH_PORT_NULL) {
+            unityBase = AscentImageBaseInTask(task, "UnityFramework");
+            if (unityBase == 0) {
+                // Порт дали, но UnityFramework в задаче нет — это не игра.
+                AscentHUDLog(@"[game] pid=%d без UnityFramework — ищу игру по содержимому", pid);
+                mach_port_deallocate(mach_task_self(), task);
+                task = MACH_PORT_NULL;
+            }
+        }
     }
 
-    task_t task = AscentTaskForPid(pid);
+    // Дорога 2: имя/pid ничего не дали — перебираем все задачи ядра и берём
+    // ту, в которой есть UnityFramework. Это работает даже когда proc_name и
+    // proc_listallpids не отдают список процессов.
     if (task == MACH_PORT_NULL) {
-        AscentGameSetErrorFormat(@"task-порт для pid %d не получен (ни task_for_pid, ни processor_set_tasks)", pid);
+        int foundPid = 0;
+        task_t foundTask = MACH_PORT_NULL;
+        uint64_t foundBase = 0;
+        if (AscentFindGameByContent(&foundPid, &foundTask, &foundBase)) {
+            pid = foundPid;
+            task = foundTask;
+            unityBase = foundBase;
+            AscentHUDLog(@"[game] игра найдена по содержимому: pid=%d UnityFramework=0x%llx",
+                         pid, unityBase);
+        } else if (AscentFindGameByPidScan(&foundPid, &foundTask, &foundBase)) {
+            pid = foundPid;
+            task = foundTask;
+            unityBase = foundBase;
+        }
+    }
+
+    if (task == MACH_PORT_NULL) {
+        AscentGameSetErrorFormat(@"task-порт игры не получен (pid %d)", pid);
         AscentHUDLog(@"[game] доступ НЕ получен: %@", gGameError);
         return NO;
     }
-    AscentHUDLog(@"[game] task-порт получен: pid=%d task=%u", pid, (unsigned)task);
 
     gGamePid = pid;
     gGameTask = task;
-    gGameBase = AscentMainModuleBase(&gGameSize);
+    gGameBase = unityBase;
+    gGameSize = 0;
     gGameError = nil;
-
-    if (gGameBase == 0 && gGameError == nil) {
-        AscentGameSetError(@"task-порт есть, но главный модуль не найден");
-    }
+    AscentHUDLog(@"[game] доступ есть: pid=%d UnityFramework=0x%llx task=%u",
+                 pid, unityBase, (unsigned)task);
     return YES;
 }
 
@@ -496,8 +532,7 @@ NSString *AscentGameStatus(void)
         }
         return @"нет доступа";
     }
-    return [NSString stringWithFormat:@"pid %d, модуль 0x%llx (%.1f МБ)",
-            gGamePid, gGameBase, (double)gGameSize / 1048576.0];
+    return [NSString stringWithFormat:@"pid %d, UnityFramework 0x%llx", gGamePid, gGameBase];
 }
 
 void AscentGameReportProcess(NSString *nameHint)
@@ -513,12 +548,14 @@ void AscentGameReportProcess(NSString *nameHint)
 void AscentGameProbe(NSString *nameHint)
 {
     int pid = AscentGameFindProcess(nameHint);
-    if (pid <= 0) {
-        AscentHUDLog(@"[game] процесс «%@»: %@", nameHint, gGameError ?: @"не найден");
-        return;
+    if (pid > 0) {
+        AscentHUDLog(@"[game] процесс «%@» найден: pid=%d, беру task-порт", nameHint, pid);
+    } else {
+        // Имя ничего не дало — это ещё не приговор: AscentGameAttach сам
+        // переберёт все задачи ядра и найдёт игру по образу UnityFramework.
+        AscentHUDLog(@"[game] процесс «%@»: %@ — перебираю задачи", nameHint, gGameError ?: @"не найден");
     }
 
-    AscentHUDLog(@"[game] процесс «%@» найден: pid=%d, беру task-порт", nameHint, pid);
     if (AscentGameAttach(nameHint)) {
         AscentHUDLog(@"[game] доступ есть: %@", AscentGameStatus());
     } else {
@@ -593,6 +630,188 @@ uint64_t AscentGameScanPattern(uint64_t start, uint64_t length,
 
 #pragma mark - Образы (dyld)
 
+// База образа, в пути которого есть `needle`, для ПРОИЗВОЛЬНОЙ задачи.
+// Читаем через mach_vm_read_overwrite прямо по переданному task-порту: так
+// можно проверить чужую задачу, ещё не выбрав её как игру. Именно этот
+// признак (наличие UnityFramework) однозначно отличает Standoff 2 от любого
+// другого процесса — имя процесса и proc_listallpids для этого не нужны.
+static uint64_t AscentImageBaseInTask(task_t task, const char *needle)
+{
+    if (task == MACH_PORT_NULL || needle == NULL || needle[0] == '\0') {
+        return 0;
+    }
+
+    task_dyld_info_data_t dyldInfo;
+    mach_msg_type_number_t infoCount = TASK_DYLD_INFO_COUNT;
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&dyldInfo, &infoCount) != KERN_SUCCESS) {
+        return 0;
+    }
+    if (dyldInfo.all_image_info_addr == 0) {
+        return 0;
+    }
+
+    // Голова dyld_all_image_infos: infoArrayCount на +4, infoArray на +8 —
+    // ровно те смещения, что и в рабочем PastaWare.
+    uint8_t head[32];
+    memset(head, 0, sizeof(head));
+    mach_vm_size_t got = 0;
+    if (mach_vm_read_overwrite(task,
+                               (mach_vm_address_t)dyldInfo.all_image_info_addr,
+                               (mach_vm_size_t)sizeof(head),
+                               (mach_vm_address_t)head, &got) != KERN_SUCCESS || got < 16) {
+        return 0;
+    }
+
+    uint32_t imageCount = 0;
+    uint64_t imageArray = 0;
+    memcpy(&imageCount, head + 4, 4);
+    memcpy(&imageArray, head + 8, 8);
+    if (imageCount == 0 || imageCount > 8192 || imageArray == 0) {
+        return 0;
+    }
+
+    size_t arrayBytes = (size_t)imageCount * 24;   // dyld_image_info: 3 x u64
+    uint8_t *images = (uint8_t *)malloc(arrayBytes);
+    if (images == NULL) {
+        return 0;
+    }
+
+    uint64_t result = 0;
+    got = 0;
+    if (mach_vm_read_overwrite(task,
+                               (mach_vm_address_t)imageArray,
+                               (mach_vm_size_t)arrayBytes,
+                               (mach_vm_address_t)images, &got) == KERN_SUCCESS) {
+        for (uint32_t i = 0; i < imageCount && result == 0; i++) {
+            uint64_t loadAddress = 0;
+            uint64_t filePathPtr = 0;
+            memcpy(&loadAddress, images + (size_t)i * 24 + 0, 8);
+            memcpy(&filePathPtr, images + (size_t)i * 24 + 8, 8);
+            if (loadAddress == 0 || filePathPtr == 0) {
+                continue;
+            }
+
+            // Путь читаем кусками по 64 байта до NUL: так один длинный путь
+            // не упирается в границу страницы и чтение не падает целиком.
+            char path[320];
+            memset(path, 0, sizeof(path));
+            int done = 0;
+            for (size_t off = 0; off + 64 < sizeof(path) && !done; off += 64) {
+                char chunk[64];
+                memset(chunk, 0, sizeof(chunk));
+                mach_vm_size_t pathGot = 0;
+                if (mach_vm_read_overwrite(task,
+                                           (mach_vm_address_t)(filePathPtr + off),
+                                           (mach_vm_size_t)sizeof(chunk),
+                                           (mach_vm_address_t)chunk, &pathGot) != KERN_SUCCESS) {
+                    break;
+                }
+                for (size_t k = 0; k < sizeof(chunk); k++) {
+                    path[off + k] = chunk[k];
+                    if (chunk[k] == 0) { done = 1; break; }
+                }
+            }
+            path[sizeof(path) - 1] = 0;
+
+            if (strstr(path, needle) != NULL) {
+                result = loadAddress;
+            }
+        }
+    }
+
+    free(images);
+    return result;
+}
+
+// Поиск игры «по содержимому»: перебираем ВСЕ задачи ядра и берём ту, в
+// списке образов которой есть UnityFramework. Не зависит ни от proc_name,
+// ни от proc_listallpids, ни от пути к бандлу — поэтому работает даже там,
+// где обычный поиск по имени процесса ничего не находит.
+static BOOL AscentFindGameByContent(int *outPid, task_t *outTask, uint64_t *outBase)
+{
+    if (outPid == NULL || outTask == NULL || outBase == NULL) {
+        return NO;
+    }
+
+    AscentHostPsetPrivFn psetPrivFn = AscentHostPsetPriv();
+    if (psetPrivFn == NULL) {
+        AscentHUDLog(@"[game] перебор задач: host_processor_set_priv недоступен");
+        return NO;
+    }
+
+    host_t host = mach_host_self();
+    processor_set_t pset = MACH_PORT_NULL;
+    processor_set_t psetPriv = MACH_PORT_NULL;
+    task_array_t tasks = NULL;
+    mach_msg_type_number_t taskCount = 0;
+
+    if (processor_set_default(host, &pset) != KERN_SUCCESS ||
+        psetPrivFn(host, pset, &psetPriv) != KERN_SUCCESS ||
+        processor_set_tasks(psetPriv, &tasks, &taskCount) != KERN_SUCCESS ||
+        tasks == NULL) {
+        AscentHUDLog(@"[game] перебор задач: processor_set_tasks не отдал список");
+        return NO;
+    }
+
+    int selfPid = (int)getpid();
+    BOOL found = NO;
+    for (mach_msg_type_number_t i = 0; i < taskCount; i++) {
+        int pid = 0;
+        if (pid_for_task(tasks[i], &pid) != KERN_SUCCESS || pid <= 0 || pid == selfPid) {
+            continue;
+        }
+        uint64_t base = AscentImageBaseInTask(tasks[i], "UnityFramework");
+        if (base != 0) {
+            *outPid = pid;
+            *outTask = tasks[i];
+            *outBase = base;
+            found = YES;
+            break;
+        }
+    }
+
+    AscentHUDLog(@"[game] перебор %u задач: игра %@",
+                 (unsigned)taskCount, found ? @"найдена" : @"не найдена");
+
+    // Освобождаем только память массива: порты, которые ядро уже отдало,
+    // остаются нашими, поэтому найденный порт выше не теряется.
+    vm_deallocate(mach_task_self(), (vm_address_t)tasks,
+                  (vm_size_t)(taskCount * sizeof(task_t)));
+    return found;
+}
+
+// Последняя дорога: прямой перебор pid от 1 до 1500. Каждому даём
+// task-порт и смотрим, есть ли в задаче UnityFramework. Это нужно на случай,
+// когда и список процессов (proc_*), и перебор задач ядра закрыты, а
+// task_for_pid при этом работает — как раз то, на чём держится PastaWare.
+static BOOL AscentFindGameByPidScan(int *outPid, task_t *outTask, uint64_t *outBase)
+{
+    if (outPid == NULL || outTask == NULL || outBase == NULL) {
+        return NO;
+    }
+
+    int selfPid = (int)getpid();
+    for (int pid = 1; pid <= 1500; pid++) {
+        if (pid == selfPid) { continue; }
+        task_t task = MACH_PORT_NULL;
+        if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS || task == MACH_PORT_NULL) {
+            continue;
+        }
+        uint64_t base = AscentImageBaseInTask(task, "UnityFramework");
+        if (base != 0) {
+            *outPid = pid;
+            *outTask = task;
+            *outBase = base;
+            AscentHUDLog(@"[game] игра найдена перебором pid: %d", pid);
+            return YES;
+        }
+        mach_port_deallocate(mach_task_self(), task);
+    }
+
+    AscentHUDLog(@"[game] перебор pid 1..1500: игра не найдена");
+    return NO;
+}
+
 // База образа по имени (например, «UnityFramework»): идём по списку dyld
 // (dyld_all_image_info → infoArray[i].{imageFilePath, imageLoadAddress}),
 // сравниваем путь с нужным именем. Результат кэшируется — база образа
@@ -603,8 +822,11 @@ uint64_t AscentGameImageBase(NSString *name)
     static dispatch_once_t once;
     dispatch_once(&once, ^{ cache = [NSMutableDictionary new]; });
     if (name == nil) { return 0; }
+    // Ключ кэша включает pid: после перезапуска игры адресное пространство
+    // новое и база образа другая, а старый кэш вернул бы мёртвый адрес.
+    NSString *cacheKey = [NSString stringWithFormat:@"%d:%@", gGamePid, name];
     @synchronized (cache) {
-        NSNumber *hit = cache[name];
+        NSNumber *hit = cache[cacheKey];
         if (hit != nil) { return (uint64_t)hit.unsignedLongLongValue; }
     }
 
@@ -673,7 +895,7 @@ uint64_t AscentGameImageBase(NSString *name)
     // оверлея. Положительный результат кэшируем — база образа не меняется.
     if (result != 0) {
         @synchronized (cache) {
-            cache[name] = @((unsigned long long)result);
+            cache[cacheKey] = @((unsigned long long)result);
         }
     }
     return result;
