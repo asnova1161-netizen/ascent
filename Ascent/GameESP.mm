@@ -362,6 +362,8 @@ static int ESPUpdateMatrix(void)
     return 0;
 }
 
+static int ESPClassNameIs(uint64_t klass, const char *name);
+
 // Прямой мир Axiom: [base+0xB800DB0] → +0xB8 (static_fields) → +0x38.
 // Класс мира — «yde» (список по +0x40) или «bwt» (по +0x50).
 static uint64_t ESPResolveWorldDirect(int *outFlag)
