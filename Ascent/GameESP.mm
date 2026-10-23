@@ -903,6 +903,27 @@ static void ESPDumpAppendClassName(NSMutableData *data, uint64_t object)
     [data appendBytes:name length:sizeof(name)];
 }
 
+// Список List<T>: сам объект, T[] и первые элементы. Нужен, чтобы на
+// устройстве увидеть бокс-лист актора (actor+0x10 / +0x60) и компоненты.
+static void ESPDumpAppendList(NSMutableData *data, uint64_t list)
+{
+    ESPDumpAppendU64(data, list);
+    ESPDumpAppendClassName(data, list);
+    ESPDumpAppendMemory(data, list, 0x100);
+    uint64_t array = ESPRead64(list + 0x10);
+    uint32_t count = ESPRead32(list + 0x18);
+    ESPDumpAppendU64(data, array);
+    ESPDumpAppendU64(data, (uint64_t)count);
+    ESPDumpAppendMemory(data, array, 0x100);
+    uint32_t stored = (count > 4) ? 4 : count;
+    for (uint32_t i = 0; i < stored; i++) {
+        uint64_t element = ESPRead64(array + 0x20 + (uint64_t)i * 8);
+        ESPDumpAppendU64(data, element);
+        ESPDumpAppendClassName(data, element);
+        ESPDumpAppendMemory(data, element, 0x100);
+    }
+}
+
 static void ESPWriteDiagnosticDump(uint64_t *objects, int count)
 {
     static int sDumped = 0;
@@ -939,6 +960,11 @@ static void ESPWriteDiagnosticDump(uint64_t *objects, int count)
         ESPDumpAppendClassName(data, actor);
         ESPDumpAppendMemory(data, actor, 0x400);
 
+        // Бокс-лист/позиция: entity=[actor+0x10], альтернативы +0x60/+0x70.
+        ESPDumpAppendList(data, ESPRead64(actor + 0x10));
+        ESPDumpAppendList(data, ESPRead64(actor + 0x60));
+        ESPDumpAppendList(data, ESPRead64(actor + 0x70));
+
         uint64_t compHolder = ESPRead64(actor + kOffComponents);
         ESPDumpAppendU64(data, compHolder);
         ESPDumpAppendMemory(data, compHolder, 0x200);
@@ -954,6 +980,9 @@ static void ESPWriteDiagnosticDump(uint64_t *objects, int count)
             ESPDumpAppendU64(data, comp);
             ESPDumpAppendClassName(data, comp);
             ESPDumpAppendMemory(data, comp, 0x100);
+            // Axiom: comp+0x28 — контейнер «mqy» (кости/точки).
+            ESPDumpAppendList(data, ESPRead64(comp + 0x28));
+            ESPDumpAppendList(data, ESPRead64(comp + 0x30));
         }
     }
 
@@ -1132,11 +1161,48 @@ static int ESPPositionFromComponent(uint64_t comp, float out[3])
     return 0;
 }
 
+// Бокс-лист актора. У «chh» Axiom хранит List`1 по +0x10; элементы —
+// «vaa»/«kpe». У «kpe» корень/трансформ читается по +0x30 и +0x78.
+static int ESPPositionFromEntityList(uint64_t obj, float out[3])
+{
+    uint64_t list = ESPRead64(obj + 0x10);
+    if (!ESPLikePointer(list)) { return 0; }
+    if (!ESPClassNameIs(ESPRead64(list), "List`1")) { return 0; }
+    uint64_t array = ESPRead64(list + 0x10);
+    uint32_t count = ESPRead32(list + 0x18);
+    if (!ESPLikePointer(array) || count < 1 || count > 0x200) { return 0; }
+
+    uint32_t limit = (count > 8) ? 8 : count;
+    for (uint32_t i = 0; i < limit; i++) {
+        uint64_t element = ESPRead64(array + 0x20 + (uint64_t)i * 8);
+        if (!ESPLikePointer(element)) { continue; }
+
+        uint64_t t = ESPRead64(element + 0x30);
+        if (ESPLikePointer(t)) {
+            uint64_t tt = ESPRead64(t + 0x10);
+            if (ESPLikePointer(tt) &&
+                ESPPositionFromTransform(tt, out) && ESPPosValid(out)) { return 1; }
+            if (ESPPositionFromTransform(t, out) && ESPPosValid(out)) { return 1; }
+        }
+        uint64_t g = ESPRead64(element + 0x78);
+        if (ESPLikePointer(g)) {
+            uint64_t gt = ESPRead64(g + 0x10);
+            if (ESPLikePointer(gt) &&
+                ESPPositionFromTransform(gt, out) && ESPPosValid(out)) { return 1; }
+            if (ESPPositionFromTransform(g, out) && ESPPosValid(out)) { return 1; }
+        }
+        uint64_t e = ESPRead64(element + 0x10);
+        if (ESPLikePointer(e) &&
+            ESPPositionFromTransform(e, out) && ESPPosValid(out)) { return 1; }
+        if (ESPPositionFromTransform(element, out) && ESPPosValid(out)) { return 1; }
+    }
+    return 0;
+}
+
 // Позиция игрока. Сначала пробуем прямые держатели трансформа, которые
 // использовал PastaWare/Axiom:
 //   [obj+0x70] → [+0x10] → transform;  [obj+0x60] → [+0x10] → transform.
-// Затем — компоненты [obj+0x28]: у Axiom это «vxc» с байтом активности
-// +0x13; у старой сборки — компонент класса K1.
+// Затем — бокс-лист [obj+0x10] и компоненты [obj+0x28].
 static int ESPPositionForPlayer(uint64_t obj, float out[3])
 {
     // 1) Держатель трансформа [obj+0x70] (f_2840c PastaWare).
@@ -1157,7 +1223,10 @@ static int ESPPositionForPlayer(uint64_t obj, float out[3])
         if (ESPPositionFromTransform(alt, out) && ESPPosValid(out)) { return 1; }
     }
 
-    // 3) Компоненты игрока.
+    // 3) Бокс-лист [obj+0x10].
+    if (ESPPositionFromEntityList(obj, out) && ESPPosValid(out)) { return 1; }
+
+    // 4) Компоненты игрока.
     uint64_t elements = 0;
     uint32_t count = 0;
     if (!ESPComponentElements(obj, &elements, &count)) { return 0; }
@@ -1352,6 +1421,13 @@ static void AscentESPTickOnce(void)
 
         uint32_t health = ESPRead8(obj + kOffHealth);
 
+        static int sLoggedFirstPlayer = 0;
+        if (!sLoggedFirstPlayer) {
+            sLoggedFirstPlayer = 1;
+            AscentHUDLog(@"[esp] первый игрок: obj=0x%llx pos=%.2f,%.2f,%.2f health=%u",
+                         obj, pos[0], pos[1], pos[2], health);
+        }
+
         CGPoint feet;
         CGPoint headPoint;
         float depth = 0.0f;
@@ -1380,6 +1456,15 @@ static void AscentESPTickOnce(void)
     }
 
     r->nPlayers = (uint32_t)playerCount;
+
+    if (count > 0 && playerCount == 0) {
+        static uint64_t sLastPosFailUs = 0;
+        if (sLastPosFailUs == 0 || now - sLastPosFailUs >= 3000000ull) {
+            sLastPosFailUs = now;
+            AscentHUDLog(@"[esp] акторы=%d, но позиция не найдена (первый 0x%llx)",
+                         count, objects[0]);
+        }
+    }
 
     char status[256];
     snprintf(status, sizeof(status),
