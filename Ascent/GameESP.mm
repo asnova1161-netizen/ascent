@@ -485,6 +485,22 @@ static int ESPClassNameIs(uint64_t klass, const char *name)
     return memcmp(buffer, name, length) == 0 ? 1 : 0;
 }
 
+// Копия имени класса в буфер — только для диагностических строк журнала.
+static void ESPClassNameCopy(uint64_t object, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) { return; }
+    out[0] = '\0';
+    uint64_t klass = ESPRead64(object);
+    if (!ESPLikePointer(klass)) { return; }
+    uint64_t namePtr = ESPRead64(klass + 0x10);
+    if (!ESPLikePointer(namePtr)) { return; }
+    char buffer[48];
+    memset(buffer, 0, sizeof(buffer));
+    if (!ESPReadBulk(namePtr, buffer, sizeof(buffer) - 1)) { return; }
+    strncpy(out, buffer, cap - 1);
+    out[cap - 1] = '\0';
+}
+
 // check_27674 (реализация ниже, нужна и поиску корня).
 static int ESPCheckRoot(uint64_t root);
 
@@ -873,13 +889,33 @@ static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
     }
 
     r->nRejected = rejected;
+
+    char rawClass[48] = {0};
+    char at10Class[48] = {0};
+    uint64_t at10 = 0;
+    if (firstRaw != 0) {
+        ESPClassNameCopy(firstRaw, rawClass, sizeof(rawClass));
+        at10 = ESPRead64(firstRaw + 0x10);
+        ESPClassNameCopy(at10, at10Class, sizeof(at10Class));
+    }
+
     if (outCount == 0 && count > 0) {
         static uint64_t sLastListLogUs = 0;
         uint64_t logNow = ESPNowUs();
         if (sLastListLogUs == 0 || logNow - sLastListLogUs >= 3000000ull) {
             sLastListLogUs = logNow;
-            AscentHUDLog(@"[esp] список пуст: entries=%u reject=%u root=0x%llx flag=%d firstRaw=0x%llx firstActor=0x%llx",
-                         count, rejected, r->rootA, r->rootFlag, firstRaw, firstActor);
+            AscentHUDLog(@"[esp] список пуст: entries=%u reject=%u root=0x%llx flag=%d firstRaw=0x%llx rawClass=%s at10=0x%llx at10Class=%s firstActor=0x%llx",
+                         count, rejected, r->rootA, r->rootFlag, firstRaw,
+                         rawClass, at10, at10Class, firstActor);
+        }
+    } else if (outCount > 0) {
+        static int sLoggedList = 0;
+        if (!sLoggedList) {
+            sLoggedList = 1;
+            char actorClass[48] = {0};
+            ESPClassNameCopy(outObjects[0], actorClass, sizeof(actorClass));
+            AscentHUDLog(@"[esp] список: entries=%u actors=%d first=0x%llx class=%s",
+                         count, outCount, outObjects[0], actorClass);
         }
     }
     return outCount;
@@ -1006,6 +1042,9 @@ static void ESPWriteDiagnosticDump(uint64_t *objects, int count)
     NSString *path = [AscentStateDirectory() stringByAppendingPathComponent:@"esp-dump.bin"];
     NSError *error = nil;
     if ([data writeToFile:path options:NSDataWritingAtomic error:&error]) {
+        // Копия в общий кэш: её проще забрать через Filza/TrollStore.
+        [data writeToFile:@"/var/mobile/Library/Caches/ascent-esp-dump.bin"
+                  options:NSDataWritingAtomic error:NULL];
         AscentHUDLog(@"[esp] дамп памяти: %@ (%lu байт)", path, (unsigned long)data.length);
         sDumped = 1;
     } else {
