@@ -87,7 +87,26 @@ static const uint64_t kRvaP2          = 0xB810E80;  // тег «корень P2�
 static const uint64_t kRvaP3          = 0xB818340;  // тег «корень P3»
 static const uint64_t kRvaP4          = 0xB802058;  // тег камеры
 static const uint64_t kRvaK1          = 0xB8117D8;  // klass игроков
-static const uint64_t kRvaRootProbe   = 0xB80B2A0;  // точка входа поиска корня
+static const uint64_t kRvaRootProbe   = 0xB80FB2A0; // PlayerLoopHelper (Axiom)
+
+// Прямые цепочки Axiom для Standoff 2 Remaster 1.0.0 (iOS arm64).
+// Мир: [base+0xB800DB0] — Il2CppClass* UnityEngine.Awaitable;
+//       [klass+0xB8] — static_fields; [static_fields+0x38] — объект мира.
+// Камера: [base+0xA0CDEE0] → +0x58 → +0xB8 → [..] → +0x70 (объект камеры)
+//         → +0xE8 → +0x20 (camHolder) → +0x10 (camChild) → +0x70 (view/proj).
+static const uint64_t kRvaWorldProbe  = 0xB800DB0;  // Il2CppClass* Awaitable
+static const uint64_t kRvaWorldClass  = 0xB80EF90;  // Il2CppClass* мира (yde/bwt)
+static const uint64_t kRvaListClass   = 0xB7F98E0;  // Il2CppClass* List<T>
+static const uint64_t kRvaCameraProbe = 0xA0CDEE0;  // статик UnityEngine.Camera
+static const uint32_t kOffClassStaticFields = 0xB8; // Il2CppClass.static_fields
+static const uint32_t kOffWorldStaticField  = 0x38; // world в static_fields
+static const uint32_t kOffCamChain1   = 0x58;
+static const uint32_t kOffCamChain2   = 0xB8;
+static const uint32_t kOffCamObject   = 0x70;
+static const uint32_t kOffCamObjectAlt = 0x68;
+static const uint32_t kOffCamHolder1  = 0xE8;
+static const uint32_t kOffCamHolder2  = 0x20;
+static const uint32_t kOffCamChild    = 0x10;
 
 // 11 пар «кандидат klass → смещение поля» для поиска корня.
 static const uint64_t kCandidateRva[11] = {
@@ -287,22 +306,27 @@ static int ESPRawViewProj(uint64_t camChild, float view[16], float proj[16])
     return ESPViewValid(view) && ESPProjValid(proj);
 }
 
-// Комбинированная матрица (f_2b218): быстрый кэш camChild+0xF0, иначе
-// out = proj × view (column-major) с валидацией f_2b5d0.
+// Комбинированная матрица (f_2b218): Axiom каждый кадр читает сырые
+// view/proj (0x80 байт по camChild+0x70) и сам считает proj × view. Кэш
+// camChild+0xF0 используем только как запасной путь: он может отставать
+// на кадр и давать «плывущие» боксы.
 static int ESPCombinedMatrix(uint64_t camChild, float out[16], int *source)
 {
+    float view[16], proj[16];
+    if (ESPRawViewProj(camChild, view, proj)) {
+        ESPMatMul(out, proj, view);
+        if (ESPMatValid(out)) {
+            if (source != NULL) { *source = 2; }
+            return 1;
+        }
+    }
     uint8_t fast[64];
     if (ESPReadBulk(camChild + kOffCamCached, fast, sizeof(fast)) && ESPMatValid(fast)) {
         memcpy(out, fast, 64);
         if (source != NULL) { *source = 1; }
         return 1;
     }
-    float view[16], proj[16];
-    if (!ESPRawViewProj(camChild, view, proj)) { return 0; }
-    ESPMatMul(out, proj, view);
-    if (!ESPMatValid(out)) { return 0; }
-    if (source != NULL) { *source = 2; }
-    return 1;
+    return 0;
 }
 
 // Обновление матрицы (f_282ac): camChild = u64@(camHolder+0x10) — обязательный
@@ -338,6 +362,90 @@ static int ESPUpdateMatrix(void)
     return 0;
 }
 
+// Прямой мир Axiom: [base+0xB800DB0] → +0xB8 (static_fields) → +0x38.
+// Класс мира — «yde» (список по +0x40) или «bwt» (по +0x50).
+static uint64_t ESPResolveWorldDirect(int *outFlag)
+{
+    ESPResolver *r = &gResolver;
+    if (!ESPLikePointer(r->base)) { return 0; }
+
+    uint64_t klass = ESPRead64(r->base + kRvaWorldProbe);
+    if (!ESPLikePointer(klass)) { return 0; }
+    uint64_t statics = ESPRead64(klass + kOffClassStaticFields);
+    if (!ESPLikePointer(statics)) { return 0; }
+    uint64_t world = ESPRead64(statics + kOffWorldStaticField);
+    if (!ESPLikePointer(world)) { return 0; }
+
+    uint64_t worldClass = ESPRead64(world);
+    if (!ESPLikePointer(worldClass)) { return 0; }
+
+    // Axiom дополнительно сверяет [world] с классом из 0xB80EF90. Если статик
+    // не прочитался, доверяем точному имени класса.
+    uint64_t expected = ESPRead64(r->base + kRvaWorldClass);
+    if (ESPLikePointer(expected) && expected != worldClass) { return 0; }
+
+    if (ESPClassNameIs(worldClass, "yde")) {
+        if (outFlag != NULL) { *outFlag = 0; }
+        return world;
+    }
+    if (ESPClassNameIs(worldClass, "bwt")) {
+        if (outFlag != NULL) { *outFlag = 1; }
+        return world;
+    }
+    return 0;
+}
+
+// Прямая камера Axiom:
+//   p0=[base+0xA0CDEE0] → p1=[p0+0x58] → p2=[p1+0xB8] → p3=[p2]
+//   cameraObject=[p3+0x70] (запасной +0x68) → holder=[..+0xE8]
+//   camHolder=[holder+0x20]; у camHolder+0x10 лежит camChild с view/proj.
+static uint64_t ESPResolveCameraDirect(void)
+{
+    ESPResolver *r = &gResolver;
+    if (!ESPLikePointer(r->base)) { return 0; }
+
+    uint64_t p0 = ESPRead64(r->base + kRvaCameraProbe);
+    if (!ESPLikePointer(p0)) { return 0; }
+    uint64_t p1 = ESPRead64(p0 + kOffCamChain1);
+    if (!ESPLikePointer(p1)) { return 0; }
+    uint64_t p2 = ESPRead64(p1 + kOffCamChain2);
+    if (!ESPLikePointer(p2)) { return 0; }
+    uint64_t p3 = ESPRead64(p2);
+    if (!ESPLikePointer(p3)) { return 0; }
+
+    uint64_t cameraObject = ESPRead64(p3 + kOffCamObject);
+    if (!ESPLikePointer(cameraObject)) {
+        cameraObject = ESPRead64(p3 + kOffCamObjectAlt);
+    }
+    if (!ESPLikePointer(cameraObject)) { return 0; }
+
+    uint64_t holder = ESPRead64(cameraObject + kOffCamHolder1);
+    if (!ESPLikePointer(holder)) { return 0; }
+    uint64_t camHolder = ESPRead64(holder + kOffCamHolder2);
+    if (!ESPLikePointer(camHolder)) { return 0; }
+
+    uint64_t camChild = ESPRead64(camHolder + kOffCamChild);
+    if (!ESPLikePointer(camChild)) { return 0; }
+    float view[16], proj[16];
+    if (!ESPRawViewProj(camChild, view, proj)) { return 0; }
+    return camHolder;
+}
+
+// Мягкая проверка цепочки игроков: все указатели на месте; количество может
+// быть 0 (меню/лобби), поэтому count здесь не требуем.
+static int ESPWorldChainLooksValid(uint64_t world, uint32_t flag)
+{
+    uint64_t t1 = ESPRead64(world + (flag ? 0x50 : 0x40));
+    if (!ESPLikePointer(t1)) { return 0; }
+    uint64_t t2 = ESPRead64(t1 + 0x30);
+    if (!ESPLikePointer(t2)) { return 0; }
+    uint64_t t3 = ESPRead64(t2 + 0x18);
+    if (!ESPLikePointer(t3)) { return 0; }
+    uint64_t array = ESPRead64(t3 + 0x10);
+    if (!ESPLikePointer(array)) { return 0; }
+    return 1;
+}
+
 #pragma mark - Резолвер: скан статиков и поиск корня
 
 static void ESPScanStatics(uint64_t base)
@@ -351,16 +459,19 @@ static void ESPScanStatics(uint64_t base)
 }
 
 // Имя класса (strcompare_2afa8): u64@(klass+0x10) — сырая C-строка; читаем
-// 24 байта, [23] = 0, сравнение точное (имя целиком).
+// 32 байта и сравниваем точное имя с завершающим нулём. Так короткие имена
+// (yde/bwt/jug/chh) не зависят от мусора после строки.
 static int ESPClassNameIs(uint64_t klass, const char *name)
 {
+    if (!ESPLikePointer(klass) || name == NULL) { return 0; }
     uint64_t namePtr = ESPRead64(klass + 0x10);
     if (!ESPLikePointer(namePtr)) { return 0; }
-    uint8_t buffer[24];
+    uint8_t buffer[32];
     memset(buffer, 0, sizeof(buffer));
     if (!ESPReadBulk(namePtr, buffer, sizeof(buffer))) { return 0; }
-    buffer[23] = 0;
-    return strncmp((const char *)buffer, name, sizeof(buffer)) == 0 ? 1 : 0;
+    size_t length = strlen(name);
+    if (length == 0 || length >= sizeof(buffer)) { return 0; }
+    return memcmp(buffer, name, length) == 0 ? 1 : 0;
 }
 
 // check_27674 (реализация ниже, нужна и поиску корня).
@@ -406,6 +517,37 @@ static void ESPFindRoots(void)
 {
     ESPResolver *r = &gResolver;
     r->lastFail = 0;
+
+    // 1) Прямые цепочки Axiom (Remaster 1.0.0). Камеру обновляем всегда,
+    //    мир — только если его цепочка игроков выглядит живой. Это основной
+    //    путь; старый VContainer-скан ниже остаётся запасным.
+    uint64_t directCamera = ESPResolveCameraDirect();
+    if (ESPLikePointer(directCamera) && directCamera != r->camHolder) {
+        r->camHolder = directCamera;
+        r->camObj = 0;
+        r->matrixReady = 0;
+    }
+
+    int directFlag = -1;
+    uint64_t directWorld = ESPResolveWorldDirect(&directFlag);
+    if (ESPLikePointer(directWorld) && directFlag >= 0 &&
+        ESPWorldChainLooksValid(directWorld, (uint32_t)directFlag)) {
+        if (directWorld != r->rootA || r->rootFlag != directFlag) {
+            r->rootA = directWorld;
+            r->rootFlag = directFlag;
+            r->camObj = 0;
+            r->matrixReady = 0;
+        }
+        static uint64_t sLastDirectLogUs = 0;
+        uint64_t directLogNow = ESPNowUs();
+        if (sLastDirectLogUs == 0 || directLogNow - sLastDirectLogUs >= 5000000ull) {
+            sLastDirectLogUs = directLogNow;
+            AscentHUDLog(@"[esp] direct: world=0x%llx flag=%d cam=0x%llx",
+                         directWorld, directFlag, r->camHolder);
+        }
+        r->lastFail = 0;
+        return;
+    }
 
     // Теги корня (P3/P2) могут не прочитаться на другой версии игры — тогда
     // работаем «по содержимому»: ищем любой узел, у которого цепочка списка
@@ -570,7 +712,9 @@ static void ESPFindRoots(void)
         else if (validatedRoot[1] != 0) { root = validatedRoot[1]; rootFlagFromContent = 1; }
     }
 
-    if (ESPLikePointer(cam) && cam != r->camHolder) {
+    // Прямая камера Axiom приоритетнее: не даём старому скану затереть её
+    // «контентной» камерой, найденной по устаревшим тегам.
+    if (ESPLikePointer(cam) && cam != r->camHolder && !ESPLikePointer(directCamera)) {
         r->camHolder = cam;
         r->camObj = 0;
         r->matrixReady = 0;
@@ -597,13 +741,15 @@ static void ESPFindRoots(void)
 
 #pragma mark - Резолвер: игроки
 
-// check_27674: корень валиден по классу: [root] == P3 → флаг 0; иначе
-// [root] == P2 → флаг 1; иначе/при невалидном статике — 0.
+// check_27674: корень валиден по классу. На Remaster 1.0.0 класс мира —
+// «yde» (флаг 0) или «bwt» (флаг 1); старые теги P3/P2 оставлены запасными.
 static int ESPCheckRoot(uint64_t root)
 {
     ESPResolver *r = &gResolver;
     if (!ESPLikePointer(root)) { return 0; }
     uint64_t klass = ESPRead64(root);
+    if (ESPClassNameIs(klass, "yde")) { r->rootFlag = 0; return 1; }
+    if (ESPClassNameIs(klass, "bwt")) { r->rootFlag = 1; return 1; }
     if (klass == r->P3 && ESPLikePointer(r->P3)) { r->rootFlag = 0; return 1; }
     if (klass == r->P2 && ESPLikePointer(r->P2)) { r->rootFlag = 1; return 1; }
     return 0;
@@ -642,10 +788,15 @@ static int ESPRootStillValid(void)
 }
 
 // Список игроков (порт f_27ed0): owner = [rootA + (флаг ? 0x50 : 0x40)];
-// t2 = [owner+0x30]; t3 = [t2+0x18]; items = [t3+0x10];
-// count = u32@(t3+0x18) ∈ [1,0x800]; игрок = u64@(u64@(items+0x20+i*8)).
-// Свои пропускаются по P1; если P1 нет — фильтр здоровья u8@(obj+0x90) ∈ [1,32];
-// без дублей, не больше 64.
+// t2 = [owner+0x30]; t3 = [t2+0x18]; array = [t3+0x10];
+// count = u32@(t3+0x18) ∈ [1,0x800]; элементы — array+0x20.
+//
+// ВАЖНО: Axiom берёт элемент массива как САМ объект актора (один разыменование
+// от слота массива), а не [элемент]. Старый двойной разыменовывал класс и
+// из-за этого не находил ни одного игрока. Оставляем адаптивный вариант: если
+// по элементу класс не «jug»/«chh», пробуем [элемент] — так работают и сборки
+// с обёрткой. Здоровье больше не отбрасывает игроков: при неверном смещении
+// фильтр молча скрывал бы весь список.
 static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
 {
     ESPResolver *r = &gResolver;
@@ -669,18 +820,34 @@ static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
     uint32_t rejected = 0;
     uint64_t seen[64];
     int seenCount = 0;
+    uint64_t firstRaw = 0;
+    uint64_t firstActor = 0;
 
     for (uint32_t i = 0; i < count; i++) {
         uint64_t raw = ESPRead64(items + 0x20 + (uint64_t)i * 8);
         if (!ESPLikePointer(raw)) { rejected++; continue; }
-        uint64_t obj = ESPRead64(raw);          // двойное разыменование
-        if (!ESPLikePointer(obj)) { rejected++; continue; }
+        if (firstRaw == 0) { firstRaw = raw; }
 
-        if (ESPLikePointer(r->P1)) {
-            if (obj == r->P1) { rejected++; continue; }
-        } else {
-            uint32_t health = ESPRead8(obj + kOffHealth);
-            if (health < 1 || health > 32) { rejected++; continue; }
+        // Axiom: actor = element (single deref). Fallback: wrapped actor.
+        uint64_t obj = raw;
+        BOOL actorClass = (ESPClassNameIs(ESPRead64(obj), "jug") ||
+                           ESPClassNameIs(ESPRead64(obj), "chh"));
+        if (!actorClass) {
+            uint64_t alt = ESPRead64(raw);
+            if (ESPLikePointer(alt) &&
+                (ESPClassNameIs(ESPRead64(alt), "jug") ||
+                 ESPClassNameIs(ESPRead64(alt), "chh"))) {
+                obj = alt;
+                actorClass = YES;
+            }
+        }
+        if (!actorClass) { rejected++; continue; }
+        if (firstActor == 0) { firstActor = obj; }
+
+        // Свой объект (если статик P1 жив) — не рисуем.
+        if (ESPLikePointer(r->P1) && (obj == r->P1 || raw == r->P1)) {
+            rejected++;
+            continue;
         }
 
         int duplicate = 0;
@@ -695,7 +862,107 @@ static int ESPBuildPlayerList(uint64_t *outObjects, int capacity)
     }
 
     r->nRejected = rejected;
+    if (outCount == 0 && count > 0) {
+        static uint64_t sLastListLogUs = 0;
+        uint64_t logNow = ESPNowUs();
+        if (sLastListLogUs == 0 || logNow - sLastListLogUs >= 3000000ull) {
+            sLastListLogUs = logNow;
+            AscentHUDLog(@"[esp] список пуст: entries=%u reject=%u root=0x%llx flag=%d firstRaw=0x%llx firstActor=0x%llx",
+                         count, rejected, r->rootA, r->rootFlag, firstRaw, firstActor);
+        }
+    }
     return outCount;
+}
+
+// Одноразовый дамп памяти для разбора раскладки на устройстве. Пишем мир,
+// цепочку списка и первые четыре актора с их компонентами. По этому файлу
+// можно точно определить позицию/здоровье/команду без decrypted IPA.
+static void ESPDumpAppendMemory(NSMutableData *data, uint64_t address, NSUInteger length)
+{
+    uint8_t buffer[0x400];
+    if (length > sizeof(buffer)) { length = sizeof(buffer); }
+    memset(buffer, 0, length);
+    if (ESPLikePointer(address)) { ESPReadBulk(address, buffer, length); }
+    [data appendBytes:buffer length:length];
+}
+
+static void ESPDumpAppendU64(NSMutableData *data, uint64_t value)
+{
+    [data appendBytes:&value length:sizeof(value)];
+}
+
+static void ESPDumpAppendClassName(NSMutableData *data, uint64_t object)
+{
+    char name[48];
+    memset(name, 0, sizeof(name));
+    uint64_t klass = ESPRead64(object);
+    uint64_t namePtr = ESPLikePointer(klass) ? ESPRead64(klass + 0x10) : 0;
+    if (ESPLikePointer(namePtr)) { ESPReadBulk(namePtr, name, sizeof(name) - 1); }
+    [data appendBytes:name length:sizeof(name)];
+}
+
+static void ESPWriteDiagnosticDump(uint64_t *objects, int count)
+{
+    static int sDumped = 0;
+    if (sDumped) { return; }
+    ESPResolver *r = &gResolver;
+    if (!ESPLikePointer(r->rootA) || !r->matrixReady) { return; }
+
+    NSMutableData *data = [NSMutableData data];
+    const char magic[8] = { 'A', 'S', 'P', 'D', 'U', 'M', 'P', '2' };
+    [data appendBytes:magic length:sizeof(magic)];
+    ESPDumpAppendU64(data, r->base);
+    ESPDumpAppendU64(data, r->rootA);
+    ESPDumpAppendU64(data, (uint64_t)r->rootFlag);
+    ESPDumpAppendU64(data, r->camHolder);
+    ESPDumpAppendU64(data, (uint64_t)r->matrixReady);
+    [data appendBytes:r->matrix length:64];
+
+    // Мир и цепочка списка.
+    ESPDumpAppendMemory(data, r->rootA, 0x200);
+    uint64_t owner = ESPRead64(r->rootA + (r->rootFlag ? 0x50 : 0x40));
+    uint64_t t2 = ESPRead64(owner + 0x30);
+    uint64_t t3 = ESPRead64(t2 + 0x18);
+    uint64_t array = ESPRead64(t3 + 0x10);
+    ESPDumpAppendU64(data, owner);    ESPDumpAppendMemory(data, owner, 0x100);
+    ESPDumpAppendU64(data, t2);       ESPDumpAppendMemory(data, t2, 0x100);
+    ESPDumpAppendU64(data, t3);       ESPDumpAppendMemory(data, t3, 0x100);
+    ESPDumpAppendU64(data, array);    ESPDumpAppendMemory(data, array, 0x100);
+
+    uint32_t stored = (count > 4) ? 4 : (uint32_t)count;
+    ESPDumpAppendU64(data, (uint64_t)stored);
+    for (uint32_t i = 0; i < stored; i++) {
+        uint64_t actor = objects[i];
+        ESPDumpAppendU64(data, actor);
+        ESPDumpAppendClassName(data, actor);
+        ESPDumpAppendMemory(data, actor, 0x400);
+
+        uint64_t compHolder = ESPRead64(actor + kOffComponents);
+        ESPDumpAppendU64(data, compHolder);
+        ESPDumpAppendMemory(data, compHolder, 0x200);
+        uint64_t compArray = ESPRead64(compHolder + 0x10);
+        uint32_t compCount = ESPRead32(compHolder + 0x18);
+        ESPDumpAppendU64(data, compArray);
+        ESPDumpAppendU64(data, (uint64_t)compCount);
+        ESPDumpAppendMemory(data, compArray, 0x100);
+
+        uint32_t dumpComps = (compCount > 4) ? 4 : compCount;
+        for (uint32_t c = 0; c < dumpComps; c++) {
+            uint64_t comp = ESPRead64(compArray + 0x20 + (uint64_t)c * 8);
+            ESPDumpAppendU64(data, comp);
+            ESPDumpAppendClassName(data, comp);
+            ESPDumpAppendMemory(data, comp, 0x100);
+        }
+    }
+
+    NSString *path = [AscentStateDirectory() stringByAppendingPathComponent:@"esp-dump.bin"];
+    NSError *error = nil;
+    if ([data writeToFile:path options:NSDataWritingAtomic error:&error]) {
+        AscentHUDLog(@"[esp] дамп памяти: %@ (%lu байт)", path, (unsigned long)data.length);
+        sDumped = 1;
+    } else {
+        AscentHUDLog(@"[esp] дамп не записан: %@", error.localizedDescription);
+    }
 }
 
 // Моя команда: u8@(u64@(u64@(rootA+0xC0)+0xB0)+0x13) — только для корня P3
@@ -816,21 +1083,41 @@ static int ESPPositionFromTransform(uint64_t transform, float out[3])
     return 1;
 }
 
-// Компоненты игрока (f_2b854): a = [obj+0x28]; b = [a+0x10];
-// elements = [b+0x10]; count = u32@(b+0x18) ∈ [1,64].
+// Компоненты игрока. Axiom (FUN_100025624): a = [obj+0x28] — держатель
+// «nwb»; array = [a+0x10] — T[]; count = u32@(a+0x18); элементы — array+0x20.
+// Старый вариант (PastaWare) читал ещё один хоп: b=[a+0x10] (List),
+// elements=[b+0x10], count=u32@(b+0x18). Пробуем оба, сначала Axiom.
 static int ESPComponentElements(uint64_t obj, uint64_t *outElements, uint32_t *outCount)
 {
     uint64_t a = ESPRead64(obj + kOffComponents);
-    if (a < 0x1000001ull) { return 0; }
-    uint64_t b = ESPRead64(a + 0x10);
-    if (b < 0x1000001ull) { return 0; }
-    uint64_t elements = ESPRead64(b + 0x10);
-    if (elements < 0x1000001ull) { return 0; }
-    uint32_t count = ESPRead32(b + 0x18);
-    if (count < 1 || count > kMaxComponents) { return 0; }
-    *outElements = elements;
-    *outCount = count;
-    return 1;
+    if (!ESPLikePointer(a)) { return 0; }
+
+    // Axiom: a+0x10 — уже массив, a+0x18 — количество.
+    uint64_t array = ESPRead64(a + 0x10);
+    uint32_t count = ESPRead32(a + 0x18);
+    if (ESPLikePointer(array) && count >= 1 && count <= kMaxComponents) {
+        uint64_t first = ESPRead64(array + 0x20);
+        if (ESPLikePointer(first)) {
+            *outElements = array;
+            *outCount = count;
+            return 1;
+        }
+    }
+
+    // PastaWare legacy: a+0x10 — List<T>, b+0x10 — T[], b+0x18 — count.
+    uint64_t b = array;
+    if (!ESPLikePointer(b)) { return 0; }
+    uint64_t legacyArray = ESPRead64(b + 0x10);
+    uint32_t legacyCount = ESPRead32(b + 0x18);
+    if (ESPLikePointer(legacyArray) && legacyCount >= 1 && legacyCount <= kMaxComponents) {
+        uint64_t first = ESPRead64(legacyArray + 0x20);
+        if (ESPLikePointer(first)) {
+            *outElements = legacyArray;
+            *outCount = legacyCount;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Позиция по компоненту (f_2b6f8): трансформ по [comp+0x28], иначе по [comp+0x30].
@@ -843,16 +1130,46 @@ static int ESPPositionFromComponent(uint64_t comp, float out[3])
     return 0;
 }
 
-// Позиция игрока (порт f_2840c): компонент с klass == K1 → [comp+0x28],
-// затем любой компонент через f_2b6f8 ([comp+0x28], иначе [comp+0x30]).
-// Ветка [obj+0x70] в оригинале читает u16-идентификатор, а не трансформ,
-// поэтому здесь её нет.
+// Позиция игрока. Сначала пробуем прямые держатели трансформа, которые
+// использовал PastaWare/Axiom:
+//   [obj+0x70] → [+0x10] → transform;  [obj+0x60] → [+0x10] → transform.
+// Затем — компоненты [obj+0x28]: у Axiom это «vxc» с байтом активности
+// +0x13; у старой сборки — компонент класса K1.
 static int ESPPositionForPlayer(uint64_t obj, float out[3])
 {
+    // 1) Держатель трансформа [obj+0x70] (f_2840c PastaWare).
+    uint64_t holder = ESPRead64(obj + kOffPlayerHolder);
+    if (ESPLikePointer(holder)) {
+        uint64_t transform = ESPRead64(holder + 0x10);
+        if (ESPLikePointer(transform) &&
+            ESPPositionFromTransform(transform, out) && ESPPosValid(out)) { return 1; }
+        if (ESPPositionFromTransform(holder, out) && ESPPosValid(out)) { return 1; }
+    }
+
+    // 2) Axiom для «chh»: [obj+0x60] — объект с трансформом/позицией.
+    uint64_t alt = ESPRead64(obj + 0x60);
+    if (ESPLikePointer(alt)) {
+        uint64_t transform = ESPRead64(alt + 0x10);
+        if (ESPLikePointer(transform) &&
+            ESPPositionFromTransform(transform, out) && ESPPosValid(out)) { return 1; }
+        if (ESPPositionFromTransform(alt, out) && ESPPosValid(out)) { return 1; }
+    }
+
+    // 3) Компоненты игрока.
     uint64_t elements = 0;
     uint32_t count = 0;
     if (!ESPComponentElements(obj, &elements, &count)) { return 0; }
 
+    // 3a) Axiom: компоненты класса «vxc» с ненулевым байтом +0x13.
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t comp = ESPRead64(elements + 0x20 + (uint64_t)i * 8);
+        if (!ESPLikePointer(comp)) { continue; }
+        if (!ESPClassNameIs(ESPRead64(comp), "vxc")) { continue; }
+        if (ESPRead8(comp + 0x13) == 0) { continue; }
+        if (ESPPositionFromComponent(comp, out) && ESPPosValid(out)) { return 1; }
+    }
+
+    // 3b) Старый путь: компонент класса K1 → [comp+0x28].
     if (ESPLikePointer(gResolver.K1)) {
         for (uint32_t i = 0; i < count; i++) {
             uint64_t comp = ESPRead64(elements + 0x20 + (uint64_t)i * 8);
@@ -864,6 +1181,7 @@ static int ESPPositionForPlayer(uint64_t obj, float out[3])
         }
     }
 
+    // 3c) Любой компонент через f_2b6f8.
     for (uint32_t i = 0; i < count; i++) {
         uint64_t comp = ESPRead64(elements + 0x20 + (uint64_t)i * 8);
         if (!ESPLikePointer(comp)) { continue; }
@@ -983,7 +1301,8 @@ static void AscentESPTickOnce(void)
         r->matrixReady = 0;
     }
     BOOL needRoots = (r->lastRootsUs == 0 || now - r->lastRootsUs >= kRootsIntervalUs ||
-                      (!ESPLikePointer(r->rootA) && now - r->lastRootsUs >= kRootsRetryUs));
+                      ((!ESPLikePointer(r->rootA) || !r->matrixReady) &&
+                       now - r->lastRootsUs >= kRootsRetryUs));
     if (needRoots) {
         r->lastRootsUs = now;
         ESPFindRoots();
@@ -993,8 +1312,8 @@ static void AscentESPTickOnce(void)
     if (!ESPUpdateMatrix()) {
         char status[256];
         snprintf(status, sizeof(status),
-                 "ESP: нет матрицы | fail=%d base=0x%llx P3=0x%llx cam=0x%llx",
-                 r->lastFail, r->base, r->P3, r->camHolder);
+                 "ESP: нет матрицы | fail=%d base=0x%llx root=0x%llx cam=0x%llx",
+                 r->lastFail, r->base, r->rootA, r->camHolder);
         AscentESPPublish(NULL, 0, NO, status);
         return;
     }
@@ -1008,11 +1327,14 @@ static void AscentESPTickOnce(void)
         else if (count == -2) { why = "корень без списка"; }
         else if (count == -3) { why = "структура списка не найдена"; }
         char status[256];
-        snprintf(status, sizeof(status), "ESP: %s | fail=%d P3=0x%llx root=0x%llx cam=0x%llx",
-                 why, r->lastFail, r->P3, r->rootA, r->camHolder);
+        snprintf(status, sizeof(status), "ESP: %s | fail=%d flag=%d root=0x%llx cam=0x%llx",
+                 why, r->lastFail, r->rootFlag, r->rootA, r->camHolder);
         AscentESPPublish(NULL, 0, NO, status);
         return;
     }
+
+    // Одноразовый дамп: акторы и их память для точного разбора полей.
+    ESPWriteDiagnosticDump(objects, count);
 
     // 5) Позиции и проекция.
     AscentESPPlayer players[kAscentESPMaxPlayers];
