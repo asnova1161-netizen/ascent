@@ -295,26 +295,34 @@ static int ESPProjValid(const float *p)
     return 1;
 }
 
-// Сырые view/proj камеры-ребёнка (f_2b350): 128 байт по camChild+0x70,
-// первые 64 байта — view, вторые — proj.
-static int ESPRawViewProj(uint64_t camChild, float view[16], float proj[16])
+// Сырые две матрицы камеры-ребёнка (f_2b350): 128 байт по camChild+0x70.
+// Не навязываем роли view/proj: Axiom просто читает первую и вторую половины.
+static int ESPRawMatrices(uint64_t camChild, float first[16], float second[16])
 {
     uint8_t raw[128];
     if (!ESPReadBulk(camChild + kOffCamView, raw, sizeof(raw))) { return 0; }
-    memcpy(view, raw, 64);
-    memcpy(proj, raw + 64, 64);
+    memcpy(first, raw, 64);
+    memcpy(second, raw + 64, 64);
+    return 1;
+}
+
+// Совместимость со старым сканом: считаем, что первая половина — view,
+// вторая — proj, и проверяем их профильными валидаторами.
+static int ESPRawViewProj(uint64_t camChild, float view[16], float proj[16])
+{
+    if (!ESPRawMatrices(camChild, view, proj)) { return 0; }
     return ESPViewValid(view) && ESPProjValid(proj);
 }
 
-// Комбинированная матрица (f_2b218): Axiom каждый кадр читает сырые
-// view/proj (0x80 байт по camChild+0x70) и сам считает proj × view. Кэш
-// camChild+0xF0 используем только как запасной путь: он может отставать
-// на кадр и давать «плывущие» боксы.
+// Комбинированная матрица (f_2b218). Axiom читает 0x80 байт по camChild+0x70
+// и считает C = first × second в row-major. В column-major это second × first;
+// именно так и умножаем, не полагаясь на то, какая половина — view, а какая proj.
+// Кэш camChild+0xF0 — только запасной путь.
 static int ESPCombinedMatrix(uint64_t camChild, float out[16], int *source)
 {
-    float view[16], proj[16];
-    if (ESPRawViewProj(camChild, view, proj)) {
-        ESPMatMul(out, proj, view);
+    float first[16], second[16];
+    if (ESPRawMatrices(camChild, first, second)) {
+        ESPMatMul(out, second, first);
         if (ESPMatValid(out)) {
             if (source != NULL) { *source = 2; }
             return 1;
@@ -338,10 +346,9 @@ static int ESPUpdateMatrix(void)
 
     uint64_t camChild = ESPRead64(r->camHolder + 0x10);
     if (ESPLikePointer(camChild)) {
-        float view[16], proj[16], out[16];
+        float out[16];
         int source = 0;
-        if (ESPRawViewProj(camChild, view, proj) &&
-            ESPCombinedMatrix(camChild, out, &source)) {
+        if (ESPCombinedMatrix(camChild, out, &source)) {
             r->camObj = camChild;
             r->matrixSource = source;
             memcpy(r->matrix, out, 64);
@@ -428,8 +435,10 @@ static uint64_t ESPResolveCameraDirect(void)
 
     uint64_t camChild = ESPRead64(camHolder + kOffCamChild);
     if (!ESPLikePointer(camChild)) { return 0; }
-    float view[16], proj[16];
-    if (!ESPRawViewProj(camChild, view, proj)) { return 0; }
+    float first[16], second[16], combined[16];
+    if (!ESPRawMatrices(camChild, first, second)) { return 0; }
+    ESPMatMul(combined, second, first);
+    if (!ESPMatValid(combined)) { return 0; }
     return camHolder;
 }
 
@@ -940,6 +949,14 @@ static void ESPWriteDiagnosticDump(uint64_t *objects, int count)
     ESPDumpAppendU64(data, r->camHolder);
     ESPDumpAppendU64(data, (uint64_t)r->matrixReady);
     [data appendBytes:r->matrix length:64];
+    uint64_t camChild = ESPRead64(r->camHolder + kOffCamChild);
+    ESPDumpAppendU64(data, camChild);
+    uint8_t rawMatrices[128];
+    memset(rawMatrices, 0, sizeof(rawMatrices));
+    if (ESPLikePointer(camChild)) {
+        ESPReadBulk(camChild + kOffCamView, rawMatrices, sizeof(rawMatrices));
+    }
+    [data appendBytes:rawMatrices length:sizeof(rawMatrices)];
 
     // Мир и цепочка списка.
     ESPDumpAppendMemory(data, r->rootA, 0x200);
